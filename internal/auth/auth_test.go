@@ -1,14 +1,14 @@
 package auth
 
 import (
-"context"
-"errors"
-"strings"
-"testing"
-"time"
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
 
-"github.com/Avicted/dialtone/internal/device"
-"github.com/Avicted/dialtone/internal/user"
+	"github.com/Avicted/dialtone/internal/device"
+	"github.com/Avicted/dialtone/internal/user"
 )
 
 // ── in-memory fakes ──
