@@ -201,3 +201,52 @@ func (r *messageRepo) ListForRecipientDevice(ctx context.Context, deviceID devic
 	}
 	return msgs, nil
 }
+
+type broadcastRepo struct {
+	db *sql.DB
+}
+
+func (r *broadcastRepo) Save(ctx context.Context, msg message.BroadcastMessage) error {
+	if msg.ID == "" || msg.SenderID == "" || msg.Body == "" || msg.SentAt.IsZero() {
+		return fmt.Errorf("broadcast message fields are required")
+	}
+
+	_, err := r.db.ExecContext(ctx, `INSERT INTO broadcast_messages
+		(id, sender_id, sender_name, body, sent_at)
+		VALUES ($1, $2, $3, $4, $5)`,
+		msg.ID, msg.SenderID, msg.SenderName, msg.Body, msg.SentAt)
+	if err != nil {
+		return fmt.Errorf("insert broadcast message: %w", err)
+	}
+	return nil
+}
+
+func (r *broadcastRepo) ListRecent(ctx context.Context, limit int) ([]message.BroadcastMessage, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("limit must be positive")
+	}
+
+	rows, err := r.db.QueryContext(ctx, `SELECT id, sender_id, sender_name, body, sent_at
+		FROM broadcast_messages ORDER BY sent_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list broadcasts: %w", err)
+	}
+	defer rows.Close()
+
+	var msgs []message.BroadcastMessage
+	for rows.Next() {
+		var msg message.BroadcastMessage
+		if err := rows.Scan(&msg.ID, &msg.SenderID, &msg.SenderName, &msg.Body, &msg.SentAt); err != nil {
+			return nil, fmt.Errorf("scan broadcast: %w", err)
+		}
+		msgs = append(msgs, msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate broadcasts: %w", err)
+	}
+	// Reverse to chronological order (oldest first).
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+	return msgs, nil
+}

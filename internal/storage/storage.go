@@ -17,6 +17,7 @@ type Store interface {
 	Users() user.Repository
 	Devices() device.Repository
 	Messages() message.Repository
+	Broadcasts() message.BroadcastRepository
 }
 
 type NopStore struct{}
@@ -44,5 +45,9 @@ func (s *NopStore) Devices() device.Repository {
 }
 
 func (s *NopStore) Messages() message.Repository {
+	return nil
+}
+
+func (s *NopStore) Broadcasts() message.BroadcastRepository {
 	return nil
 }

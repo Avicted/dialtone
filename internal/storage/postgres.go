@@ -12,10 +12,11 @@ import (
 )
 
 type PostgresStore struct {
-	db       *sql.DB
-	users    *userRepo
-	devices  *deviceRepo
-	messages *messageRepo
+	db         *sql.DB
+	users      *userRepo
+	devices    *deviceRepo
+	messages   *messageRepo
+	broadcasts *broadcastRepo
 }
 
 func NewPostgresStore(ctx context.Context, dbURL string) (*PostgresStore, error) {
@@ -37,6 +38,7 @@ func NewPostgresStore(ctx context.Context, dbURL string) (*PostgresStore, error)
 	store.users = &userRepo{db: db}
 	store.devices = &deviceRepo{db: db}
 	store.messages = &messageRepo{db: db}
+	store.broadcasts = &broadcastRepo{db: db}
 	return store, nil
 }
 
@@ -60,4 +62,8 @@ func (s *PostgresStore) Devices() device.Repository {
 
 func (s *PostgresStore) Messages() message.Repository {
 	return s.messages
+}
+
+func (s *PostgresStore) Broadcasts() message.BroadcastRepository {
+	return s.broadcasts
 }

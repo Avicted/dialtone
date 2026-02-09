@@ -13,7 +13,6 @@ import (
 	"github.com/Avicted/dialtone/internal/auth"
 	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/message"
-	"github.com/Avicted/dialtone/internal/storage"
 	"github.com/Avicted/dialtone/internal/user"
 	"github.com/google/uuid"
 	"nhooyr.io/websocket"
@@ -32,11 +31,12 @@ type Hub struct {
 	byDevice   map[deviceKey]*Client
 	byUser     map[user.ID]map[*Client]struct{}
 	messages   message.Repository
+	broadcasts message.BroadcastRepository
 	devices    device.Repository
 	count      atomic.Int64
 }
 
-func NewHub(messages message.Repository, devices device.Repository) *Hub {
+func NewHub(messages message.Repository, broadcasts message.BroadcastRepository, devices device.Repository) *Hub {
 	return &Hub{
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
@@ -45,6 +45,7 @@ func NewHub(messages message.Repository, devices device.Repository) *Hub {
 		byDevice:   make(map[deviceKey]*Client),
 		byUser:     make(map[user.ID]map[*Client]struct{}),
 		messages:   messages,
+		broadcasts: broadcasts,
 		devices:    devices,
 	}
 }
@@ -409,6 +410,20 @@ func (h *Hub) handleBroadcast(ctx context.Context, sender *Client, msg inboundMe
 	sentAt := time.Now().UTC()
 	msgID := uuid.NewString()
 
+	if h.broadcasts != nil {
+		record := message.BroadcastMessage{
+			ID:         message.ID(msgID),
+			SenderID:   sender.userID,
+			SenderName: sender.username,
+			Body:       msg.Body,
+			SentAt:     sentAt,
+		}
+		if err := h.broadcasts.Save(ctx, record); err != nil {
+			sender.sendError("server_error", "failed to store message")
+			return
+		}
+	}
+
 	out := outboundMessage{
 		Type:       "message.broadcast",
 		MessageID:  msgID,
@@ -424,26 +439,24 @@ func (h *Hub) handleBroadcast(ctx context.Context, sender *Client, msg inboundMe
 }
 
 func (h *Hub) sendHistory(ctx context.Context, client *Client) {
-	if client == nil || h.messages == nil {
+	if client == nil {
 		return
 	}
 
-	msgs, err := h.messages.ListForRecipientDevice(ctx, client.deviceID, 100)
-	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return
+	// Send broadcast history (most recent 100 messages).
+	if h.broadcasts != nil {
+		msgs, err := h.broadcasts.ListRecent(ctx, 100)
+		if err == nil {
+			for _, msg := range msgs {
+				client.sendEvent(outboundMessage{
+					Type:       "message.history",
+					MessageID:  string(msg.ID),
+					Sender:     msg.SenderID,
+					SenderName: msg.SenderName,
+					Body:       msg.Body,
+					SentAt:     msg.SentAt.UTC().Format(time.RFC3339Nano),
+				})
+			}
 		}
-		client.sendError("server_error", "failed to load history")
-		return
-	}
-
-	for _, msg := range msgs {
-		client.sendEvent(outboundMessage{
-			Type:      "message.history",
-			MessageID: string(msg.ID),
-			Sender:    msg.SenderID,
-			Body:      string(msg.Ciphertext),
-			SentAt:    msg.SentAt.UTC().Format(time.RFC3339Nano),
-		})
 	}
 }
