@@ -11,6 +11,13 @@ Set env vars:
 ```
 export DIALTONE_DB_URL=postgres://user:pass@localhost:5432/dialtone?sslmode=disable
 export DIALTONE_LISTEN_ADDR=:8080
+export DIALTONE_MASTER_KEY=<base64-encoded-32-byte-key>
+```
+
+Generate a master key:
+
+```
+openssl rand -base64 32
 ```
 
 Then start the server:
@@ -18,6 +25,22 @@ Then start the server:
 ```
 go run ./cmd/server
 ```
+
+## Encryption at rest
+The server encrypts sensitive fields before storing them in Postgres. A master key is required and must be provided via `DIALTONE_MASTER_KEY` as a base64-encoded 32-byte value.
+
+Encrypted fields:
+- users.username
+- devices.public_key
+- broadcast_messages.sender_name
+- broadcast_messages.sender_public_key
+
+Lookup behavior:
+- The application stores a keyed hash of usernames and device public keys for equality lookups.
+- Existing plaintext rows are encrypted lazily the first time they are read.
+
+Migrations:
+- Ensure migrations are applied before running the server so the encrypted columns and indexes exist.
 
 ## Structure
 - cmd/server: entrypoint

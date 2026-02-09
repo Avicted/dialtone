@@ -14,6 +14,7 @@ import (
 	"github.com/Avicted/dialtone/internal/config"
 	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/httpapi"
+	"github.com/Avicted/dialtone/internal/securestore"
 	"github.com/Avicted/dialtone/internal/storage"
 	"github.com/Avicted/dialtone/internal/user"
 	"github.com/Avicted/dialtone/internal/ws"
@@ -37,7 +38,11 @@ func run() error {
 
 	storeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	store, err := storage.NewPostgresStore(storeCtx, cfg.DBURL)
+	fieldCrypto, err := securestore.NewFieldCrypto(cfg.MasterKey)
+	if err != nil {
+		return fmt.Errorf("init field crypto: %w", err)
+	}
+	store, err := storage.NewPostgresStore(storeCtx, cfg.DBURL, fieldCrypto)
 	if err != nil {
 		return fmt.Errorf("init store: %w", err)
 	}

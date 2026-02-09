@@ -7,6 +7,7 @@ import (
 
 	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/message"
+	"github.com/Avicted/dialtone/internal/securestore"
 	"github.com/Avicted/dialtone/internal/user"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -19,9 +20,12 @@ type PostgresStore struct {
 	broadcasts *broadcastRepo
 }
 
-func NewPostgresStore(ctx context.Context, dbURL string) (*PostgresStore, error) {
+func NewPostgresStore(ctx context.Context, dbURL string, crypto *securestore.FieldCrypto) (*PostgresStore, error) {
 	if dbURL == "" {
 		return nil, fmt.Errorf("db url is required")
+	}
+	if crypto == nil {
+		return nil, fmt.Errorf("field crypto is required")
 	}
 
 	db, err := sql.Open("pgx", dbURL)
@@ -35,10 +39,10 @@ func NewPostgresStore(ctx context.Context, dbURL string) (*PostgresStore, error)
 	}
 
 	store := &PostgresStore{db: db}
-	store.users = &userRepo{db: db}
-	store.devices = &deviceRepo{db: db}
+	store.users = &userRepo{db: db, crypto: crypto}
+	store.devices = &deviceRepo{db: db, crypto: crypto}
 	store.messages = &messageRepo{db: db}
-	store.broadcasts = &broadcastRepo{db: db}
+	store.broadcasts = &broadcastRepo{db: db, crypto: crypto}
 	return store, nil
 }
 
