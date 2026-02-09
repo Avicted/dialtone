@@ -341,7 +341,9 @@ func (h *Hub) handleIncoming(ctx context.Context, incoming incomingMessage) {
 	case "message.send":
 		h.handleSend(ctx, incoming.client, incoming.msg)
 	case "message.broadcast":
-		h.handleBroadcast(ctx, incoming.client, incoming.msg)
+		if incoming.client != nil {
+			incoming.client.sendError("rooms_only", "global chat is disabled; join a room")
+		}
 	case "room.message.send":
 		h.handleRoomMessage(ctx, incoming.client, incoming.msg)
 	default:
@@ -575,28 +577,5 @@ func (h *Hub) handleRoomMessage(ctx context.Context, sender *Client, msg inbound
 func (h *Hub) sendHistory(ctx context.Context, client *Client) {
 	if client == nil {
 		return
-	}
-
-	// Send broadcast history (most recent 100 messages).
-	if h.broadcasts != nil {
-		msgs, err := h.broadcasts.ListRecent(ctx, 100)
-		if err == nil {
-			for _, msg := range msgs {
-				keyEnvelope := ""
-				if msg.Envelopes != nil {
-					keyEnvelope = msg.Envelopes[string(client.deviceID)]
-				}
-				client.sendEvent(outboundMessage{
-					Type:            "message.history",
-					MessageID:       string(msg.ID),
-					Sender:          msg.SenderID,
-					SenderNameEnc:   msg.SenderNameEnc,
-					SenderPublicKey: msg.SenderPublicKey,
-					KeyEnvelope:     keyEnvelope,
-					Body:            msg.Body,
-					SentAt:          msg.SentAt.UTC().Format(time.RFC3339Nano),
-				})
-			}
-		}
 	}
 }

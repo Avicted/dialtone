@@ -5,3 +5,6 @@ bin/
 .vscode/
 
 .github/
+
+*.md
+!README.md

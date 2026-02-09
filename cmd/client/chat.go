@@ -215,6 +215,9 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		m.wsCh = msg.ch
 		m.connected = true
 		m.errMsg = ""
+		if m.activeRoom == "" && len(m.messages) == 0 {
+			m.appendSystemMessage("no global chat; create or join a room with /room")
+		}
 		if m.sidebarVisible && m.activeRoom != "" {
 			return m, tea.Batch(waitForWSMsg(m.wsCh), m.scheduleRoomMembersTick(m.activeRoom))
 		}
@@ -273,59 +276,7 @@ func (m *chatModel) sendCurrentMessage() {
 		m.input.Reset()
 		return
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	keysResp, err := m.api.FetchAllDeviceKeys(ctx)
-	if err != nil {
-		m.errMsg = fmt.Sprintf("fetch keys: %v", err)
-		return
-	}
-
-	contentKey := make([]byte, crypto.KeySize)
-	if _, err := rand.Read(contentKey); err != nil {
-		m.errMsg = fmt.Sprintf("random key: %v", err)
-		return
-	}
-
-	ct, err := crypto.Encrypt(contentKey, []byte(body))
-	if err != nil {
-		m.errMsg = fmt.Sprintf("encrypt: %v", err)
-		return
-	}
-	encryptedBody := base64.StdEncoding.EncodeToString(ct)
-	senderNameEnc, err := encryptRoomField(contentKey, m.auth.Username)
-	if err != nil {
-		m.errMsg = fmt.Sprintf("encrypt sender name: %v", err)
-		return
-	}
-
-	envelopes := make(map[string]string, len(keysResp.Keys))
-	for _, key := range keysResp.Keys {
-		pub, err := crypto.PublicKeyFromBase64(key.PublicKey)
-		if err != nil {
-			continue
-		}
-		encKey, err := crypto.EncryptForPeer(m.kp.Private, pub, contentKey)
-		if err != nil {
-			continue
-		}
-		envelopes[key.DeviceID] = encKey
-	}
-	if len(envelopes) == 0 {
-		m.errMsg = "no recipient keys available"
-		return
-	}
-
-	_ = m.ws.Send(SendMessage{
-		Type:          "message.broadcast",
-		Body:          encryptedBody,
-		PublicKey:     crypto.PublicKeyToBase64(m.kp.Public),
-		SenderNameEnc: senderNameEnc,
-		KeyEnvelopes:  envelopes,
-	})
-	m.input.Reset()
+	m.appendSystemMessage("no global chat; create or join a room with /room")
 }
 
 func (m *chatModel) handleCommand(raw string) {
@@ -528,7 +479,7 @@ func (m *chatModel) leaveRoom() {
 	m.activeRoom = ""
 	m.sidebarVisible = false
 	m.updateLayout()
-	m.appendSystemMessage("now chatting in global")
+	m.appendSystemMessage("left room; use /room create, /room join, or /room use")
 	m.refreshViewport()
 }
 
@@ -873,6 +824,9 @@ func (m *chatModel) renderMessages() string {
 		msgs = m.roomMsgs[m.activeRoom]
 	}
 	if len(msgs) == 0 {
+		if m.activeRoom == "" {
+			return labelStyle.Render("  No room selected. Use /room create, /room join, or /room use.")
+		}
 		return labelStyle.Render("  No messages yet. Send one to start chatting!")
 	}
 
@@ -1071,7 +1025,7 @@ func (m chatModel) View() string {
 
 func (m *chatModel) activeRoomLabel() string {
 	if m.activeRoom == "" {
-		return "global"
+		return "no room"
 	}
 	if info, ok := m.rooms[m.activeRoom]; ok && info.Name != "" {
 		return "room: " + info.Name
