@@ -6,6 +6,7 @@ import (
 
 	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/message"
+	"github.com/Avicted/dialtone/internal/room"
 	"github.com/Avicted/dialtone/internal/user"
 )
 
@@ -18,6 +19,7 @@ type Store interface {
 	Devices() device.Repository
 	Messages() message.Repository
 	Broadcasts() message.BroadcastRepository
+	Rooms() room.Repository
 }
 
 type NopStore struct{}
@@ -49,5 +51,9 @@ func (s *NopStore) Messages() message.Repository {
 }
 
 func (s *NopStore) Broadcasts() message.BroadcastRepository {
+	return nil
+}
+
+func (s *NopStore) Rooms() room.Repository {
 	return nil
 }

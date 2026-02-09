@@ -13,6 +13,7 @@ import (
 	"github.com/Avicted/dialtone/internal/auth"
 	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/message"
+	"github.com/Avicted/dialtone/internal/room"
 	"github.com/Avicted/dialtone/internal/user"
 	"github.com/google/uuid"
 	"nhooyr.io/websocket"
@@ -33,10 +34,12 @@ type Hub struct {
 	messages   message.Repository
 	broadcasts message.BroadcastRepository
 	devices    device.Repository
+	rooms      room.Repository
+	mu         sync.RWMutex
 	count      atomic.Int64
 }
 
-func NewHub(messages message.Repository, broadcasts message.BroadcastRepository, devices device.Repository) *Hub {
+func NewHub(messages message.Repository, broadcasts message.BroadcastRepository, devices device.Repository, rooms room.Repository) *Hub {
 	return &Hub{
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
@@ -47,6 +50,7 @@ func NewHub(messages message.Repository, broadcasts message.BroadcastRepository,
 		messages:   messages,
 		broadcasts: broadcasts,
 		devices:    devices,
+		rooms:      rooms,
 	}
 }
 
@@ -59,15 +63,19 @@ func (h *Hub) Run(ctx context.Context) {
 			}
 			return
 		case c := <-h.register:
+			h.mu.Lock()
 			h.clients[c] = struct{}{}
 			h.byDevice[c.deviceKey()] = c
 			if h.byUser[c.userID] == nil {
 				h.byUser[c.userID] = make(map[*Client]struct{})
 			}
 			h.byUser[c.userID][c] = struct{}{}
+			h.mu.Unlock()
 			h.count.Add(1)
 		case c := <-h.unregister:
+			h.mu.Lock()
 			if _, ok := h.clients[c]; !ok {
+				h.mu.Unlock()
 				continue
 			}
 			delete(h.clients, c)
@@ -78,6 +86,7 @@ func (h *Hub) Run(ctx context.Context) {
 					delete(h.byUser, c.userID)
 				}
 			}
+			h.mu.Unlock()
 			h.count.Add(-1)
 			c.close(websocket.StatusNormalClosure, "bye")
 		case msg := <-h.incoming:
@@ -88,6 +97,17 @@ func (h *Hub) Run(ctx context.Context) {
 
 func (h *Hub) ClientCount() int64 {
 	return h.count.Load()
+}
+
+func (h *Hub) IsOnline(userID user.ID) bool {
+	if userID == "" {
+		return false
+	}
+	h.mu.RLock()
+	clients := h.byUser[userID]
+	online := len(clients) > 0
+	h.mu.RUnlock()
+	return online
 }
 
 func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
@@ -230,6 +250,7 @@ type incomingMessage struct {
 type inboundMessage struct {
 	Type       string            `json:"type"`
 	Recipient  user.ID           `json:"recipient"`
+	RoomID     room.ID           `json:"room_id"`
 	Body       string            `json:"body"`
 	MessageID  string            `json:"message_id"`
 	ClientTime string            `json:"client_time"`
@@ -242,6 +263,7 @@ type outboundMessage struct {
 	MessageID       string  `json:"message_id"`
 	Sender          user.ID `json:"sender"`
 	SenderName      string  `json:"sender_name"`
+	RoomID          room.ID `json:"room_id,omitempty"`
 	SenderPublicKey string  `json:"sender_public_key,omitempty"`
 	KeyEnvelope     string  `json:"key_envelope,omitempty"`
 	Body            string  `json:"body"`
@@ -304,6 +326,10 @@ func decodeIncoming(data []byte) (inboundMessage, error) {
 		if msg.Body == "" {
 			return inboundMessage{}, errors.New("body is required")
 		}
+	case "room.message.send":
+		if msg.RoomID == "" || msg.Body == "" {
+			return inboundMessage{}, errors.New("room_id and body are required")
+		}
 	}
 	return msg, nil
 }
@@ -314,6 +340,8 @@ func (h *Hub) handleIncoming(ctx context.Context, incoming incomingMessage) {
 		h.handleSend(ctx, incoming.client, incoming.msg)
 	case "message.broadcast":
 		h.handleBroadcast(ctx, incoming.client, incoming.msg)
+	case "room.message.send":
+		h.handleRoomMessage(ctx, incoming.client, incoming.msg)
 	default:
 		incoming.client.sendError("unsupported_type", "unsupported message type")
 	}
@@ -364,21 +392,26 @@ func (h *Hub) handleSend(ctx context.Context, sender *Client, msg inboundMessage
 		}
 	}
 
-	if recipients := h.byUser[msg.Recipient]; recipients != nil {
-		for client := range recipients {
-			envelopeID := envelopeIDs[client.deviceID]
-			if envelopeID == "" {
-				envelopeID = uuid.NewString()
-			}
-			client.sendEvent(outboundMessage{
-				Type:       "message.new",
-				MessageID:  envelopeID,
-				Sender:     sender.userID,
-				SenderName: sender.username,
-				Body:       msg.Body,
-				SentAt:     sentAt.Format(time.RFC3339Nano),
-			})
+	h.mu.RLock()
+	recipients := h.byUser[msg.Recipient]
+	clients := make([]*Client, 0, len(recipients))
+	for client := range recipients {
+		clients = append(clients, client)
+	}
+	h.mu.RUnlock()
+	for _, client := range clients {
+		envelopeID := envelopeIDs[client.deviceID]
+		if envelopeID == "" {
+			envelopeID = uuid.NewString()
 		}
+		client.sendEvent(outboundMessage{
+			Type:       "message.new",
+			MessageID:  envelopeID,
+			Sender:     sender.userID,
+			SenderName: sender.username,
+			Body:       msg.Body,
+			SentAt:     sentAt.Format(time.RFC3339Nano),
+		})
 	}
 
 	ackID := ""
@@ -448,12 +481,86 @@ func (h *Hub) handleBroadcast(ctx context.Context, sender *Client, msg inboundMe
 		SentAt:          sentAt.Format(time.RFC3339Nano),
 	}
 
+	h.mu.RLock()
+	clients := make([]*Client, 0, len(h.clients))
 	for client := range h.clients {
+		clients = append(clients, client)
+	}
+	h.mu.RUnlock()
+	for _, client := range clients {
 		perClient := out
 		if msg.Envelopes != nil {
 			perClient.KeyEnvelope = msg.Envelopes[string(client.deviceID)]
 		}
 		client.sendEvent(perClient)
+	}
+}
+
+func (h *Hub) handleRoomMessage(ctx context.Context, sender *Client, msg inboundMessage) {
+	if sender == nil || sender.userID == "" {
+		return
+	}
+	if msg.RoomID == "" || msg.Body == "" {
+		sender.sendError("invalid_message", "room_id and body are required")
+		return
+	}
+	if h.rooms == nil {
+		sender.sendError("server_error", "room storage unavailable")
+		return
+	}
+
+	isMember, err := h.rooms.IsMember(ctx, msg.RoomID, sender.userID)
+	if err != nil {
+		sender.sendError("server_error", "failed to check membership")
+		return
+	}
+	if !isMember {
+		sender.sendError("room_forbidden", "not a room member")
+		return
+	}
+
+	sentAt := time.Now().UTC()
+	msgID := uuid.NewString()
+	record := room.Message{
+		ID:         msgID,
+		RoomID:     msg.RoomID,
+		SenderID:   sender.userID,
+		SenderName: sender.username,
+		Body:       msg.Body,
+		SentAt:     sentAt,
+	}
+	if err := h.rooms.SaveMessage(ctx, record); err != nil {
+		sender.sendError("server_error", "failed to store room message")
+		return
+	}
+
+	members, err := h.rooms.ListMembers(ctx, msg.RoomID)
+	if err != nil {
+		sender.sendError("server_error", "failed to list room members")
+		return
+	}
+
+	out := outboundMessage{
+		Type:       "room.message.new",
+		MessageID:  msgID,
+		RoomID:     msg.RoomID,
+		Sender:     sender.userID,
+		SenderName: sender.username,
+		Body:       msg.Body,
+		SentAt:     sentAt.Format(time.RFC3339Nano),
+	}
+
+	for _, memberID := range members {
+		h.mu.RLock()
+		recipients := h.byUser[memberID]
+		clients := make([]*Client, 0, len(recipients))
+		for client := range recipients {
+			clients = append(clients, client)
+		}
+		h.mu.RUnlock()
+		for _, client := range clients {
+			client.sendEvent(out)
+		}
 	}
 }
 

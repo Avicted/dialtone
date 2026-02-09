@@ -29,7 +29,7 @@ func newLoginModel() loginModel {
 	password := textinput.New()
 	password.Placeholder = "password (min 8 chars)"
 	password.EchoMode = textinput.EchoPassword
-	password.EchoCharacter = '•'
+	password.EchoCharacter = '*'
 	password.CharLimit = 128
 	password.Width = 30
 
@@ -109,7 +109,7 @@ func (m loginModel) View() string {
 	}
 	b.WriteString(strings.Repeat("\n", topPad))
 
-	b.WriteString(centerText(appNameStyle.Render("◆  dialtone"), m.width))
+	b.WriteString(centerText(appNameStyle.Render("*  dialtone"), m.width))
 	b.WriteString("\n")
 	b.WriteString(centerText(subtitleStyle.Render("encrypted messaging"), m.width))
 	b.WriteString("\n\n")
@@ -130,7 +130,7 @@ func (m loginModel) View() string {
 	b.WriteString("\n")
 
 	if m.errMsg != "" {
-		b.WriteString(centerText(errorStyle.Render("  ✗ "+m.errMsg), m.width))
+		b.WriteString(centerText(errorStyle.Render("  x "+m.errMsg), m.width))
 		b.WriteString("\n\n")
 	}
 
@@ -139,7 +139,7 @@ func (m loginModel) View() string {
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString(centerText(helpStyle.Render("tab: switch field • ctrl+r: register/login • enter: submit • ctrl+c: quit"), m.width))
+	b.WriteString(centerText(helpStyle.Render("tab: switch field - ctrl+r: register/login - enter: submit - ctrl+q: quit"), m.width))
 
 	return b.String()
 }

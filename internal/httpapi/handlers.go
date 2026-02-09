@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Avicted/dialtone/internal/auth"
 	"github.com/Avicted/dialtone/internal/device"
+	"github.com/Avicted/dialtone/internal/room"
 	"github.com/Avicted/dialtone/internal/storage"
 	"github.com/Avicted/dialtone/internal/user"
 )
@@ -18,16 +21,24 @@ const (
 )
 
 type Handler struct {
-	users   *user.Service
-	devices *device.Service
-	auth    *auth.Service
+	users    *user.Service
+	devices  *device.Service
+	rooms    *room.Service
+	auth     *auth.Service
+	presence PresenceProvider
 }
 
-func NewHandler(users *user.Service, devices *device.Service, auth *auth.Service) *Handler {
+type PresenceProvider interface {
+	IsOnline(userID user.ID) bool
+}
+
+func NewHandler(users *user.Service, devices *device.Service, rooms *room.Service, auth *auth.Service, presence PresenceProvider) *Handler {
 	return &Handler{
-		users:   users,
-		devices: devices,
-		auth:    auth,
+		users:    users,
+		devices:  devices,
+		rooms:    rooms,
+		auth:     auth,
+		presence: presence,
 	}
 }
 
@@ -37,6 +48,11 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/devices/keys", h.handleDeviceKeys)
 	mux.HandleFunc("/auth/register", h.handleRegister)
 	mux.HandleFunc("/auth/login", h.handleLogin)
+	mux.HandleFunc("/rooms", h.handleRooms)
+	mux.HandleFunc("/rooms/invites", h.handleRoomInvites)
+	mux.HandleFunc("/rooms/join", h.handleRoomJoin)
+	mux.HandleFunc("/rooms/messages", h.handleRoomMessages)
+	mux.HandleFunc("/rooms/members", h.handleRoomMembers)
 }
 
 type authRequest struct {
@@ -132,6 +148,22 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		DevicePubKey: createdDevice.PublicKey,
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) authenticate(r *http.Request) (auth.Session, error) {
+	if h.auth == nil {
+		return auth.Session{}, auth.ErrUnauthorized
+	}
+	if token := strings.TrimSpace(r.URL.Query().Get("token")); token != "" {
+		return h.auth.ValidateToken(token)
+	}
+	if header := strings.TrimSpace(r.Header.Get("Authorization")); header != "" {
+		parts := strings.Fields(header)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
+			return h.auth.ValidateToken(parts[1])
+		}
+	}
+	return auth.Session{}, auth.ErrUnauthorized
 }
 
 type createUserRequest struct {
@@ -280,6 +312,348 @@ func (h *Handler) handleDeviceKeys(w http.ResponseWriter, r *http.Request) {
 	resp := deviceKeysResponse{Keys: keys}
 	if !all {
 		resp.UserID = userID
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+type roomResponse struct {
+	ID        room.ID `json:"id"`
+	Name      string  `json:"name"`
+	CreatedBy user.ID `json:"created_by"`
+	CreatedAt string  `json:"created_at"`
+}
+
+type roomMessageResponse struct {
+	ID         string  `json:"id"`
+	RoomID     room.ID `json:"room_id"`
+	SenderID   user.ID `json:"sender_id"`
+	SenderName string  `json:"sender_name"`
+	Body       string  `json:"body"`
+	SentAt     string  `json:"sent_at"`
+}
+
+type createRoomRequest struct {
+	Name string `json:"name"`
+}
+
+type createRoomResponse struct {
+	Room roomResponse `json:"room"`
+}
+
+type listRoomsResponse struct {
+	Rooms []roomResponse `json:"rooms"`
+}
+
+func (h *Handler) handleRooms(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if h.rooms == nil {
+		writeError(w, http.StatusInternalServerError, errors.New("room service not configured"))
+		return
+	}
+
+	session, err := h.authenticate(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		rooms, err := h.rooms.ListRooms(r.Context(), session.UserID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		resp := listRoomsResponse{Rooms: make([]roomResponse, 0, len(rooms))}
+		for _, rm := range rooms {
+			resp.Rooms = append(resp.Rooms, roomResponse{
+				ID:        rm.ID,
+				Name:      rm.Name,
+				CreatedBy: rm.CreatedBy,
+				CreatedAt: rm.CreatedAt.UTC().Format(timeLayout),
+			})
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	var req createRoomRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	created, err := h.rooms.CreateRoom(r.Context(), session.UserID, req.Name)
+	if err != nil {
+		switch {
+		case errors.Is(err, room.ErrInvalidInput):
+			writeError(w, http.StatusBadRequest, err)
+		default:
+			writeError(w, http.StatusInternalServerError, err)
+		}
+		return
+	}
+
+	resp := createRoomResponse{Room: roomResponse{
+		ID:        created.ID,
+		Name:      created.Name,
+		CreatedBy: created.CreatedBy,
+		CreatedAt: created.CreatedAt.UTC().Format(timeLayout),
+	}}
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+type createInviteRequest struct {
+	RoomID room.ID `json:"room_id"`
+}
+
+type createInviteResponse struct {
+	Token     string  `json:"token"`
+	RoomID    room.ID `json:"room_id"`
+	ExpiresAt string  `json:"expires_at"`
+}
+
+func (h *Handler) handleRoomInvites(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if h.rooms == nil {
+		writeError(w, http.StatusInternalServerError, errors.New("room service not configured"))
+		return
+	}
+
+	session, err := h.authenticate(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+
+	var req createInviteRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	invite, err := h.rooms.CreateInvite(r.Context(), session.UserID, req.RoomID)
+	if err != nil {
+		switch {
+		case errors.Is(err, room.ErrInvalidInput):
+			writeError(w, http.StatusBadRequest, err)
+		case errors.Is(err, room.ErrNotFound), errors.Is(err, storage.ErrNotFound):
+			writeError(w, http.StatusNotFound, err)
+		default:
+			writeError(w, http.StatusInternalServerError, err)
+		}
+		return
+	}
+
+	resp := createInviteResponse{
+		Token:     invite.Token,
+		RoomID:    invite.RoomID,
+		ExpiresAt: invite.ExpiresAt.UTC().Format(timeLayout),
+	}
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+type joinRoomRequest struct {
+	Token string `json:"token"`
+}
+
+type joinRoomResponse struct {
+	Room     roomResponse          `json:"room"`
+	JoinedAt string                `json:"joined_at"`
+	Messages []roomMessageResponse `json:"messages"`
+}
+
+func (h *Handler) handleRoomJoin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if h.rooms == nil {
+		writeError(w, http.StatusInternalServerError, errors.New("room service not configured"))
+		return
+	}
+
+	session, err := h.authenticate(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+
+	var req joinRoomRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	joinedRoom, joinedAt, messages, err := h.rooms.JoinWithInvite(r.Context(), session.UserID, req.Token)
+	if err != nil {
+		switch {
+		case errors.Is(err, room.ErrInvalidInput):
+			writeError(w, http.StatusBadRequest, err)
+		case errors.Is(err, room.ErrInviteExpired), errors.Is(err, room.ErrInviteConsumed):
+			writeError(w, http.StatusGone, err)
+		case errors.Is(err, room.ErrNotFound), errors.Is(err, storage.ErrNotFound):
+			writeError(w, http.StatusNotFound, err)
+		default:
+			writeError(w, http.StatusInternalServerError, err)
+		}
+		return
+	}
+
+	resp := joinRoomResponse{
+		Room: roomResponse{
+			ID:        joinedRoom.ID,
+			Name:      joinedRoom.Name,
+			CreatedBy: joinedRoom.CreatedBy,
+			CreatedAt: joinedRoom.CreatedAt.UTC().Format(timeLayout),
+		},
+		JoinedAt: joinedAt.UTC().Format(timeLayout),
+		Messages: make([]roomMessageResponse, 0, len(messages)),
+	}
+	for _, msg := range messages {
+		resp.Messages = append(resp.Messages, roomMessageResponse{
+			ID:         msg.ID,
+			RoomID:     msg.RoomID,
+			SenderID:   msg.SenderID,
+			SenderName: msg.SenderName,
+			Body:       msg.Body,
+			SentAt:     msg.SentAt.UTC().Format(timeLayout),
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+type roomMessagesResponse struct {
+	RoomID   room.ID               `json:"room_id"`
+	Messages []roomMessageResponse `json:"messages"`
+}
+
+func (h *Handler) handleRoomMessages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if h.rooms == nil {
+		writeError(w, http.StatusInternalServerError, errors.New("room service not configured"))
+		return
+	}
+
+	session, err := h.authenticate(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+
+	roomID := room.ID(strings.TrimSpace(r.URL.Query().Get("room_id")))
+	if roomID == "" {
+		writeError(w, http.StatusBadRequest, errors.New("room_id query parameter is required"))
+		return
+	}
+
+	limit := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			limit = parsed
+		}
+	}
+
+	msgs, err := h.rooms.ListMessages(r.Context(), session.UserID, roomID, limit)
+	if err != nil {
+		switch {
+		case errors.Is(err, room.ErrInvalidInput):
+			writeError(w, http.StatusBadRequest, err)
+		case errors.Is(err, room.ErrNotFound), errors.Is(err, storage.ErrNotFound):
+			writeError(w, http.StatusNotFound, err)
+		default:
+			writeError(w, http.StatusInternalServerError, err)
+		}
+		return
+	}
+
+	resp := roomMessagesResponse{
+		RoomID:   roomID,
+		Messages: make([]roomMessageResponse, 0, len(msgs)),
+	}
+	for _, msg := range msgs {
+		resp.Messages = append(resp.Messages, roomMessageResponse{
+			ID:         msg.ID,
+			RoomID:     msg.RoomID,
+			SenderID:   msg.SenderID,
+			SenderName: msg.SenderName,
+			Body:       msg.Body,
+			SentAt:     msg.SentAt.UTC().Format(timeLayout),
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+type roomMemberResponse struct {
+	UserID   user.ID `json:"user_id"`
+	Username string  `json:"username"`
+	Online   bool    `json:"online"`
+}
+
+type roomMembersResponse struct {
+	RoomID  room.ID              `json:"room_id"`
+	Members []roomMemberResponse `json:"members"`
+}
+
+func (h *Handler) handleRoomMembers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if h.rooms == nil {
+		writeError(w, http.StatusInternalServerError, errors.New("room service not configured"))
+		return
+	}
+
+	session, err := h.authenticate(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+
+	roomID := room.ID(strings.TrimSpace(r.URL.Query().Get("room_id")))
+	if roomID == "" {
+		writeError(w, http.StatusBadRequest, errors.New("room_id query parameter is required"))
+		return
+	}
+
+	members, err := h.rooms.ListMembers(r.Context(), session.UserID, roomID)
+	if err != nil {
+		switch {
+		case errors.Is(err, room.ErrInvalidInput):
+			writeError(w, http.StatusBadRequest, err)
+		case errors.Is(err, room.ErrNotFound), errors.Is(err, storage.ErrNotFound):
+			writeError(w, http.StatusNotFound, err)
+		default:
+			writeError(w, http.StatusInternalServerError, err)
+		}
+		return
+	}
+
+	resp := roomMembersResponse{RoomID: roomID, Members: make([]roomMemberResponse, 0, len(members))}
+	for _, member := range members {
+		online := false
+		if h.presence != nil {
+			online = h.presence.IsOnline(member)
+		}
+		username := ""
+		if h.users != nil {
+			if found, err := h.users.GetByID(r.Context(), member); err == nil {
+				username = found.Username
+			}
+		}
+		if username == "" {
+			username = string(member)
+		}
+		resp.Members = append(resp.Members, roomMemberResponse{UserID: member, Username: username, Online: online})
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

@@ -24,6 +24,7 @@ type ServerMessage struct {
 	MessageID    string `json:"message_id"`
 	Sender       string `json:"sender"`
 	SenderName   string `json:"sender_name"`
+	RoomID       string `json:"room_id,omitempty"`
 	SenderPubKey string `json:"sender_public_key,omitempty"`
 	KeyEnvelope  string `json:"key_envelope,omitempty"`
 	Body         string `json:"body"`
@@ -34,6 +35,7 @@ type ServerMessage struct {
 
 type SendMessage struct {
 	Type         string            `json:"type"`
+	RoomID       string            `json:"room_id,omitempty"`
 	Body         string            `json:"body"`
 	MessageID    string            `json:"message_id,omitempty"`
 	PublicKey    string            `json:"public_key,omitempty"`

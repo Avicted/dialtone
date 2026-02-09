@@ -18,6 +18,8 @@ import (
 	"github.com/Avicted/dialtone/internal/crypto"
 )
 
+const sidebarWidth = 26
+
 // peerKeyCache is a thread-safe cache of peer public keys, stored behind a
 // pointer so chatModel can be copied by Bubble Tea without tripping vet.
 type peerKeyCache struct {
@@ -50,21 +52,43 @@ type chatMessage struct {
 	isHistory  bool
 	isMine     bool
 	encrypted  bool // true if body arrived as ciphertext
+	isSystem   bool
+}
+
+type roomInfo struct {
+	ID   string
+	Name string
+}
+
+type roomMember struct {
+	UserID   string
+	Username string
+	Online   bool
 }
 
 type chatModel struct {
-	api       *APIClient
-	auth      *AuthResponse
-	kp        *crypto.KeyPair
-	ws        *WSClient
-	wsCh      chan ServerMessage
-	messages  []chatMessage
-	viewport  viewport.Model
-	input     textinput.Model
-	connected bool
-	errMsg    string
-	width     int
-	height    int
+	api               *APIClient
+	auth              *AuthResponse
+	kp                *crypto.KeyPair
+	ws                *WSClient
+	wsCh              chan ServerMessage
+	messages          []chatMessage
+	rooms             map[string]roomInfo
+	roomMsgs          map[string][]chatMessage
+	roomHistoryLoaded map[string]bool
+	roomMembers       map[string][]roomMember
+	userNames         map[string]string
+	activeRoom        string
+	sidebarVisible    bool
+	selectActive      bool
+	selectOptions     []roomInfo
+	selectIndex       int
+	viewport          viewport.Model
+	input             textinput.Model
+	connected         bool
+	errMsg            string
+	width             int
+	height            int
 
 	// peers caches sender_id -> public key for decryption.
 	peers *peerKeyCache
@@ -79,6 +103,10 @@ type wsMessageMsg ServerMessage
 
 type wsErrorMsg struct{ err error }
 
+type roomMembersTick struct {
+	roomID string
+}
+
 func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width, height int) chatModel {
 	input := textinput.New()
 	input.Placeholder = "type a message..."
@@ -91,14 +119,19 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width,
 	vp := viewport.New(vpWidth, vpHeight)
 
 	return chatModel{
-		api:      api,
-		auth:     auth,
-		kp:       kp,
-		viewport: vp,
-		input:    input,
-		width:    width,
-		height:   height,
-		peers:    newPeerKeyCache(),
+		api:               api,
+		auth:              auth,
+		kp:                kp,
+		viewport:          vp,
+		input:             input,
+		width:             width,
+		height:            height,
+		peers:             newPeerKeyCache(),
+		rooms:             make(map[string]roomInfo),
+		roomMsgs:          make(map[string][]chatMessage),
+		roomHistoryLoaded: make(map[string]bool),
+		roomMembers:       make(map[string][]roomMember),
+		userNames:         make(map[string]string),
 	}
 }
 
@@ -138,18 +171,34 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.viewport.Width = clampMin(m.width-4, 10)
-		m.viewport.Height = clampMin(m.height-7, 1)
-		m.input.Width = clampMin(m.width-8, 20)
+		m.updateLayout()
 		m.refreshViewport()
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.selectActive {
+			m.handleRoomSelectKey(msg)
+			return m, nil
+		}
 		switch msg.String() {
 		case "enter":
 			if m.connected {
 				m.sendCurrentMessage()
 			}
+			return m, nil
+
+		case "ctrl+u":
+			if m.activeRoom == "" {
+				m.appendSystemMessage("sidebar is only available inside a room")
+				return m, nil
+			}
+			m.sidebarVisible = !m.sidebarVisible
+			m.updateLayout()
+			if m.sidebarVisible {
+				m.fetchRoomMembers(m.activeRoom)
+				return m, m.scheduleRoomMembersTick(m.activeRoom)
+			}
+			m.refreshViewport()
 			return m, nil
 
 		case "pgup", "pgdown":
@@ -163,6 +212,9 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		m.wsCh = msg.ch
 		m.connected = true
 		m.errMsg = ""
+		if m.sidebarVisible && m.activeRoom != "" {
+			return m, tea.Batch(waitForWSMsg(m.wsCh), m.scheduleRoomMembersTick(m.activeRoom))
+		}
 		return m, waitForWSMsg(m.wsCh)
 
 	case wsMessageMsg:
@@ -174,6 +226,13 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		m.connected = false
 		m.errMsg = msg.err.Error()
 		return m, nil
+
+	case roomMembersTick:
+		if !m.sidebarVisible || m.activeRoom == "" || msg.roomID != m.activeRoom {
+			return m, nil
+		}
+		m.fetchRoomMembers(m.activeRoom)
+		return m, m.scheduleRoomMembersTick(m.activeRoom)
 	}
 
 	var cmd tea.Cmd
@@ -184,6 +243,21 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 func (m *chatModel) sendCurrentMessage() {
 	body := strings.TrimSpace(m.input.Value())
 	if body == "" || m.ws == nil {
+		return
+	}
+	if strings.HasPrefix(body, "/") {
+		m.handleCommand(body)
+		m.input.Reset()
+		return
+	}
+
+	if m.activeRoom != "" {
+		_ = m.ws.Send(SendMessage{
+			Type:   "room.message.send",
+			RoomID: m.activeRoom,
+			Body:   body,
+		})
+		m.input.Reset()
 		return
 	}
 
@@ -233,6 +307,358 @@ func (m *chatModel) sendCurrentMessage() {
 		KeyEnvelopes: envelopes,
 	})
 	m.input.Reset()
+}
+
+func (m *chatModel) handleCommand(raw string) {
+	parts := strings.Fields(raw)
+	if len(parts) == 0 {
+		return
+	}
+	cmd := strings.ToLower(parts[0])
+	if cmd != "/room" {
+		m.appendSystemMessage("unknown command")
+		return
+	}
+	if len(parts) < 2 {
+		m.appendSystemMessage("room commands: /room list | create <name> | invite <room_id|name> | join <token> | use <room_id|name> | leave")
+		return
+	}
+	action := strings.ToLower(parts[1])
+
+	switch action {
+	case "help":
+		m.appendSystemMessage("/room list | /room create <name> | /room invite <room_id|name> | /room join <token> | /room use <room_id|name> | /room leave")
+	case "list":
+		m.fetchRooms()
+	case "create":
+		if len(parts) < 3 {
+			m.appendSystemMessage("usage: /room create <name>")
+			return
+		}
+		name := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
+		m.createRoom(name)
+	case "invite":
+		if len(parts) < 3 {
+			m.appendSystemMessage("usage: /room invite <room_id|name>")
+			return
+		}
+		nameOrID := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
+		m.createInvite(nameOrID)
+	case "join":
+		if len(parts) < 3 {
+			m.appendSystemMessage("usage: /room join <token>")
+			return
+		}
+		m.joinRoom(parts[2])
+	case "use":
+		if len(parts) < 3 {
+			m.appendSystemMessage("usage: /room use <room_id|name>")
+			return
+		}
+		nameOrID := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
+		m.useRoom(nameOrID)
+	case "leave", "global":
+		m.leaveRoom()
+	default:
+		m.appendSystemMessage("unknown room command")
+	}
+}
+
+func (m *chatModel) fetchRooms() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rooms, err := m.api.ListRooms(ctx, m.auth.Token)
+	if err != nil {
+		m.errMsg = fmt.Sprintf("list rooms: %v", err)
+		return
+	}
+	if len(rooms) == 0 {
+		m.appendSystemMessage("no rooms yet")
+		return
+	}
+	for _, rm := range rooms {
+		m.rooms[rm.ID] = roomInfo{ID: rm.ID, Name: rm.Name}
+	}
+	var b strings.Builder
+	b.WriteString("rooms:")
+	for _, rm := range rooms {
+		b.WriteString("\n  ")
+		b.WriteString(rm.Name)
+		b.WriteString(" (")
+		b.WriteString(shortID(rm.ID))
+		b.WriteString(")")
+	}
+	m.appendSystemMessage(b.String())
+}
+
+func (m *chatModel) createRoom(name string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	created, err := m.api.CreateRoom(ctx, m.auth.Token, name)
+	if err != nil {
+		m.errMsg = fmt.Sprintf("create room: %v", err)
+		return
+	}
+	info := roomInfo{ID: created.ID, Name: created.Name}
+	m.rooms[created.ID] = info
+	m.activeRoom = created.ID
+	m.appendSystemMessage(fmt.Sprintf("created room '%s' (%s)", created.Name, shortID(created.ID)))
+	m.refreshViewport()
+}
+
+func (m *chatModel) createInvite(nameOrID string) {
+	resolvedID, info, ok := m.resolveRoom(nameOrID, false)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	invite, err := m.api.CreateRoomInvite(ctx, m.auth.Token, resolvedID)
+	if err != nil {
+		m.errMsg = fmt.Sprintf("create invite: %v", err)
+		return
+	}
+	m.appendSystemMessage(fmt.Sprintf("invite token: %s (room '%s', expires %s)", invite.Token, info.Name, formatTime(invite.ExpiresAt)))
+}
+
+func (m *chatModel) joinRoom(token string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	joined, err := m.api.JoinRoom(ctx, m.auth.Token, token)
+	if err != nil {
+		m.errMsg = fmt.Sprintf("join room: %v", err)
+		return
+	}
+	info := roomInfo{ID: joined.Room.ID, Name: joined.Room.Name}
+	m.rooms[joined.Room.ID] = info
+	m.activeRoom = joined.Room.ID
+	m.appendSystemMessage(fmt.Sprintf("joined room '%s'", joined.Room.Name))
+
+	for _, msg := range joined.Messages {
+		cm := chatMessage{
+			sender:     msg.SenderID,
+			senderName: msg.SenderName,
+			body:       msg.Body,
+			sentAt:     msg.SentAt,
+			isHistory:  true,
+			isMine:     msg.SenderID == m.auth.UserID,
+		}
+		m.roomMsgs[msg.RoomID] = append(m.roomMsgs[msg.RoomID], cm)
+	}
+	m.roomHistoryLoaded[joined.Room.ID] = true
+	if m.sidebarVisible {
+		m.fetchRoomMembers(joined.Room.ID)
+		m.scheduleRoomMembersTick(joined.Room.ID)
+	}
+	m.updateLayout()
+	m.refreshViewport()
+}
+
+func (m *chatModel) useRoom(roomID string) {
+	if strings.EqualFold(roomID, "global") {
+		m.leaveRoom()
+		return
+	}
+	resolvedID, info, ok := m.resolveRoom(roomID, true)
+	if !ok {
+		return
+	}
+	m.applyRoomSelection(resolvedID, info)
+}
+
+func (m *chatModel) leaveRoom() {
+	m.activeRoom = ""
+	m.sidebarVisible = false
+	m.updateLayout()
+	m.appendSystemMessage("now chatting in global")
+	m.refreshViewport()
+}
+
+func (m *chatModel) loadRoomHistory(roomID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	msgs, err := m.api.ListRoomMessages(ctx, m.auth.Token, roomID, 100)
+	if err != nil {
+		m.errMsg = fmt.Sprintf("room history: %v", err)
+		return
+	}
+	if len(msgs) == 0 {
+		m.roomHistoryLoaded[roomID] = true
+		return
+	}
+
+	loaded := make([]chatMessage, 0, len(msgs))
+	for _, msg := range msgs {
+		loaded = append(loaded, chatMessage{
+			sender:     msg.SenderID,
+			senderName: msg.SenderName,
+			body:       msg.Body,
+			sentAt:     msg.SentAt,
+			isHistory:  true,
+			isMine:     msg.SenderID == m.auth.UserID,
+		})
+	}
+
+	if existing := m.roomMsgs[roomID]; len(existing) > 0 {
+		loaded = append(loaded, existing...)
+	}
+	m.roomMsgs[roomID] = loaded
+	m.roomHistoryLoaded[roomID] = true
+}
+
+func (m *chatModel) resolveRoom(nameOrID string, allowSelect bool) (string, roomInfo, bool) {
+	if nameOrID == "" {
+		m.appendSystemMessage("room id or name is required")
+		return "", roomInfo{}, false
+	}
+	if info, ok := m.rooms[nameOrID]; ok {
+		return nameOrID, info, true
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rooms, err := m.api.ListRooms(ctx, m.auth.Token)
+	if err != nil {
+		m.errMsg = fmt.Sprintf("list rooms: %v", err)
+		return "", roomInfo{}, false
+	}
+	if len(rooms) == 0 {
+		m.appendSystemMessage("no rooms available")
+		return "", roomInfo{}, false
+	}
+	for _, rm := range rooms {
+		m.rooms[rm.ID] = roomInfo{ID: rm.ID, Name: rm.Name}
+	}
+
+	needle := strings.ToLower(strings.TrimSpace(nameOrID))
+	var matches []roomInfo
+	for _, rm := range rooms {
+		if strings.ToLower(rm.Name) == needle {
+			matches = append(matches, roomInfo{ID: rm.ID, Name: rm.Name})
+		}
+	}
+	if len(matches) == 0 {
+		for _, rm := range rooms {
+			if strings.HasPrefix(strings.ToLower(rm.ID), needle) {
+				matches = append(matches, roomInfo{ID: rm.ID, Name: rm.Name})
+			}
+		}
+	}
+	if len(matches) == 0 {
+		m.appendSystemMessage("unknown room name")
+		return "", roomInfo{}, false
+	}
+	if len(matches) > 1 {
+		if allowSelect {
+			m.startRoomSelection(matches)
+			return "", roomInfo{}, false
+		}
+		var b strings.Builder
+		b.WriteString("multiple rooms match; use an id:\n")
+		for _, match := range matches {
+			b.WriteString("  ")
+			b.WriteString(match.Name)
+			b.WriteString(" (")
+			b.WriteString(match.ID)
+			b.WriteString(")\n")
+		}
+		m.appendSystemMessage(b.String())
+		return "", roomInfo{}, false
+	}
+	return matches[0].ID, matches[0], true
+}
+
+func (m *chatModel) startRoomSelection(options []roomInfo) {
+	if len(options) == 0 {
+		return
+	}
+	m.selectActive = true
+	m.selectOptions = options
+	m.selectIndex = 0
+	m.updateLayout()
+}
+
+func (m *chatModel) handleRoomSelectKey(msg tea.KeyMsg) {
+	switch msg.String() {
+	case "up", "k":
+		if m.selectIndex > 0 {
+			m.selectIndex--
+		}
+	case "down", "j":
+		if m.selectIndex < len(m.selectOptions)-1 {
+			m.selectIndex++
+		}
+	case "enter":
+		if len(m.selectOptions) == 0 {
+			m.selectActive = false
+			m.updateLayout()
+			return
+		}
+		selected := m.selectOptions[m.selectIndex]
+		m.selectActive = false
+		m.updateLayout()
+		m.applyRoomSelection(selected.ID, selected)
+	case "esc":
+		m.selectActive = false
+		m.updateLayout()
+		m.appendSystemMessage("room selection canceled")
+	}
+}
+
+func (m *chatModel) applyRoomSelection(roomID string, info roomInfo) {
+	m.activeRoom = roomID
+	if !m.roomHistoryLoaded[roomID] {
+		m.loadRoomHistory(roomID)
+	}
+	if m.sidebarVisible {
+		m.fetchRoomMembers(roomID)
+		m.scheduleRoomMembersTick(roomID)
+	}
+	m.updateLayout()
+	m.appendSystemMessage(fmt.Sprintf("now chatting in '%s'", info.Name))
+	m.refreshViewport()
+}
+
+func (m *chatModel) fetchRoomMembers(roomID string) {
+	if roomID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	members, err := m.api.ListRoomMembers(ctx, m.auth.Token, roomID)
+	if err != nil {
+		m.errMsg = fmt.Sprintf("room members: %v", err)
+		return
+	}
+	roomMembers := make([]roomMember, 0, len(members))
+	for _, member := range members {
+		roomMembers = append(roomMembers, roomMember{
+			UserID:   member.UserID,
+			Username: member.Username,
+			Online:   member.Online,
+		})
+	}
+	m.roomMembers[roomID] = roomMembers
+}
+
+func (m *chatModel) appendSystemMessage(text string) {
+	msg := chatMessage{senderName: "system", body: text, sentAt: time.Now().UTC().Format(time.RFC3339Nano), isSystem: true}
+	if m.activeRoom != "" {
+		m.roomMsgs[m.activeRoom] = append(m.roomMsgs[m.activeRoom], msg)
+		m.refreshViewport()
+		return
+	}
+	m.messages = append(m.messages, msg)
+	m.refreshViewport()
+}
+
+func (m *chatModel) scheduleRoomMembersTick(roomID string) tea.Cmd {
+	if roomID == "" {
+		return nil
+	}
+	return tea.Tick(4*time.Second, func(time.Time) tea.Msg {
+		return roomMembersTick{roomID: roomID}
+	})
 }
 
 // tryDecrypt attempts to decrypt a message body from a sender.
@@ -326,6 +752,18 @@ func (m *chatModel) handleServerMessage(msg ServerMessage) {
 		}
 		m.messages = append(m.messages, cm)
 
+	case "room.message.new":
+		cm := chatMessage{
+			sender:     msg.Sender,
+			senderName: msg.SenderName,
+			body:       msg.Body,
+			sentAt:     msg.SentAt,
+			isHistory:  false,
+			isMine:     msg.Sender == m.auth.UserID,
+		}
+		roomID := msg.RoomID
+		m.roomMsgs[roomID] = append(m.roomMsgs[roomID], cm)
+
 	case "error":
 		m.errMsg = fmt.Sprintf("[%s] %s", msg.Code, msg.Message)
 	}
@@ -336,15 +774,34 @@ func (m *chatModel) refreshViewport() {
 	m.viewport.GotoBottom()
 }
 
+func (m *chatModel) updateLayout() {
+	width := m.width - 4
+	if !m.selectActive && m.sidebarVisible && m.activeRoom != "" {
+		width -= sidebarWidth
+	}
+	m.viewport.Width = clampMin(width, 10)
+	m.viewport.Height = clampMin(m.height-7, 1)
+	m.input.Width = clampMin(m.width-8, 20)
+}
+
 func (m *chatModel) renderMessages() string {
-	if len(m.messages) == 0 {
+	msgs := m.messages
+	if m.activeRoom != "" {
+		msgs = m.roomMsgs[m.activeRoom]
+	}
+	if len(msgs) == 0 {
 		return labelStyle.Render("  No messages yet. Send one to start chatting!")
 	}
 
 	var b strings.Builder
-	for _, msg := range m.messages {
+	for _, msg := range msgs {
 		ts := formatTime(msg.sentAt)
-		sender := "you"
+		sender := m.auth.Username
+		if sender == "" {
+			if cached, ok := m.userNames[m.auth.UserID]; ok {
+				sender = cached
+			}
+		}
 		if !msg.isMine {
 			if msg.senderName != "" {
 				sender = msg.senderName
@@ -352,39 +809,126 @@ func (m *chatModel) renderMessages() string {
 				sender = shortID(msg.sender)
 			}
 		}
-
-		lockIcon := ""
-		if msg.encrypted {
-			lockIcon = "🔒 "
+		if msg.isSystem {
+			sender = "system"
 		}
 
-		var line string
+		var style lipgloss.Style
 		switch {
+		case msg.isSystem:
+			style = labelStyle
 		case msg.isHistory:
-			line = historyMsgStyle.Render(fmt.Sprintf("  %s[%s] %s: %s", lockIcon, ts, sender, msg.body))
+			style = historyMsgStyle
 		case msg.isMine:
-			line = sentMsgStyle.Render(fmt.Sprintf("  %s[%s] %s: %s", lockIcon, ts, sender, msg.body))
+			style = sentMsgStyle
 		default:
-			line = recvMsgStyle.Render(fmt.Sprintf("  %s[%s] %s: %s", lockIcon, ts, sender, msg.body))
+			style = recvMsgStyle
 		}
-		b.WriteString(line)
-		b.WriteString("\n")
+		lines := formatMessageLines(ts, sender, msg.body, m.viewport.Width, msg.isSystem)
+		for _, line := range lines {
+			b.WriteString(style.Render(line))
+			b.WriteString("\n")
+		}
 	}
 	return b.String()
+}
+
+func (m *chatModel) renderSidebar() string {
+	members := m.roomMembers[m.activeRoom]
+	lines := make([]string, 0, len(members)+2)
+	lines = append(lines, sidebarTitleStyle.Render("Members"))
+	if len(members) == 0 {
+		lines = append(lines, labelStyle.Render("(none)"))
+	} else {
+		for _, member := range members {
+			status := sidebarOfflineStyle.Render("o")
+			if member.Online {
+				status = sidebarOnlineStyle.Render("*")
+			}
+			display := member.Username
+			if display == "" {
+				display = shortID(member.UserID)
+			}
+			lines = append(lines, fmt.Sprintf("%s %s", status, display))
+		}
+	}
+	content := strings.Join(lines, "\n")
+	return sidebarBoxStyle.Width(sidebarWidth).Render(content)
+}
+
+func (m *chatModel) renderRoomSelectionModal() string {
+	if len(m.selectOptions) == 0 {
+		return ""
+	}
+
+	lines := make([]string, 0, len(m.selectOptions)+3)
+	lines = append(lines, "Select a room", "")
+	for i, option := range m.selectOptions {
+		prefix := "  "
+		if i == m.selectIndex {
+			prefix = "> "
+		}
+		lines = append(lines, fmt.Sprintf("%s%s (%s)", prefix, option.Name, shortID(option.ID)))
+	}
+	lines = append(lines, "", "enter: select  esc: cancel")
+
+	availableWidth := clampMin(m.width-4, 20)
+	maxContentWidth := availableWidth - 4
+	if maxContentWidth < 10 {
+		maxContentWidth = 10
+	}
+	maxLen := 0
+	for i, line := range lines {
+		trimmed := trimLine(line, maxContentWidth)
+		lines[i] = trimmed
+		if len(trimmed) > maxLen {
+			maxLen = len(trimmed)
+		}
+	}
+	boxWidth := maxLen + 4
+	if boxWidth > availableWidth {
+		boxWidth = availableWidth
+		maxContentWidth = boxWidth - 4
+		for i, line := range lines {
+			lines[i] = trimLine(line, maxContentWidth)
+		}
+	}
+
+	var b strings.Builder
+	border := strings.Repeat("-", boxWidth-2)
+	b.WriteString("+")
+	b.WriteString(border)
+	b.WriteString("+\n")
+	for _, line := range lines {
+		padding := maxContentWidth - len(line)
+		if padding < 0 {
+			padding = 0
+		}
+		b.WriteString("| ")
+		b.WriteString(line)
+		b.WriteString(strings.Repeat(" ", padding))
+		b.WriteString(" |\n")
+	}
+	b.WriteString("+")
+	b.WriteString(border)
+	b.WriteString("+")
+
+	return lipgloss.Place(availableWidth, m.viewport.Height, lipgloss.Center, lipgloss.Center, b.String())
 }
 
 func (m chatModel) View() string {
 	var b strings.Builder
 
 	header := fmt.Sprintf(
-		"  %s  %s  %s",
-		appNameStyle.Render("◆ dialtone"),
+		"  %s  %s  %s  %s",
+		appNameStyle.Render("* dialtone"),
 		headerStyle.Render(m.auth.Username),
 		labelStyle.Render(shortID(m.auth.UserID)),
+		labelStyle.Render(m.activeRoomLabel()),
 	)
-	connStatus := connectedStyle.Render("● connected")
+	connStatus := connectedStyle.Render("online")
 	if !m.connected {
-		connStatus = disconnectedStyle.Render("○ disconnected")
+		connStatus = disconnectedStyle.Render("offline")
 	}
 	gap := max(1, m.width-lipgloss.Width(header)-lipgloss.Width(connStatus)-2)
 	b.WriteString(header + strings.Repeat(" ", gap) + connStatus)
@@ -393,7 +937,13 @@ func (m chatModel) View() string {
 	b.WriteString(separator(m.width))
 	b.WriteString("\n")
 
-	b.WriteString(m.viewport.View())
+	chatContent := m.viewport.View()
+	if m.selectActive {
+		chatContent = m.renderRoomSelectionModal()
+	} else if m.sidebarVisible && m.activeRoom != "" {
+		chatContent = lipgloss.JoinHorizontal(lipgloss.Top, m.viewport.View(), m.renderSidebar())
+	}
+	b.WriteString(chatContent)
 	b.WriteString("\n")
 
 	b.WriteString(separator(m.width))
@@ -404,12 +954,22 @@ func (m chatModel) View() string {
 	b.WriteString("\n")
 
 	if m.errMsg != "" {
-		b.WriteString(errorStyle.Render("  ✗ " + m.errMsg))
+		b.WriteString(errorStyle.Render("  x " + m.errMsg))
 	} else {
-		b.WriteString(helpStyle.Render("  enter: send • pgup/pgdn: scroll • 🔒 e2e encrypted • ctrl+c: quit"))
+		b.WriteString(helpStyle.Render("  enter: send - /room help in chat - ctrl+u: members - pgup/pgdn: scroll - ctrl+q: quit"))
 	}
 
 	return b.String()
+}
+
+func (m *chatModel) activeRoomLabel() string {
+	if m.activeRoom == "" {
+		return "global"
+	}
+	if info, ok := m.rooms[m.activeRoom]; ok && info.Name != "" {
+		return "room: " + info.Name
+	}
+	return "room: " + shortID(m.activeRoom)
 }
 
 func formatTime(ts string) string {
@@ -432,4 +992,72 @@ func clampMin(v, minimum int) int {
 		return minimum
 	}
 	return v
+}
+
+func trimLine(line string, max int) string {
+	if max <= 0 || len(line) <= max {
+		return line
+	}
+	if max <= 3 {
+		return line[:max]
+	}
+	return line[:max-3] + "..."
+}
+
+func formatMessageLines(ts, sender, body string, width int, isSystem bool) []string {
+	prefix := fmt.Sprintf("  [%s] ", ts)
+	if !isSystem {
+		prefix = fmt.Sprintf("  [%s] %s: ", ts, sender)
+	}
+	contPrefix := strings.Repeat(" ", len(prefix))
+	available := width - len(prefix)
+	if available < 10 {
+		available = 10
+	}
+
+	var out []string
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		wrapped := wrapText(line, available)
+		for j, part := range wrapped {
+			if i == 0 && j == 0 {
+				out = append(out, prefix+part)
+				continue
+			}
+			out = append(out, contPrefix+part)
+		}
+		if len(wrapped) == 0 {
+			if i == 0 {
+				out = append(out, prefix)
+			} else {
+				out = append(out, contPrefix)
+			}
+		}
+	}
+	return out
+}
+
+func wrapText(text string, width int) []string {
+	if width <= 0 {
+		return []string{text}
+	}
+	if text == "" {
+		return []string{""}
+	}
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	var lines []string
+	current := words[0]
+	for _, word := range words[1:] {
+		if len(current)+1+len(word) <= width {
+			current = current + " " + word
+			continue
+		}
+		lines = append(lines, current)
+		current = word
+	}
+	lines = append(lines, current)
+	return lines
 }

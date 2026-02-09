@@ -10,40 +10,26 @@ import (
 
 	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/message"
-	"github.com/Avicted/dialtone/internal/securestore"
+	"github.com/Avicted/dialtone/internal/room"
 	"github.com/Avicted/dialtone/internal/user"
 )
 
 type userRepo struct {
-	db     *sql.DB
-	crypto *securestore.FieldCrypto
+	db *sql.DB
 }
 
 func (r *userRepo) Create(ctx context.Context, u user.User) error {
 	if u.ID == "" || u.Username == "" || u.CreatedAt.IsZero() {
 		return fmt.Errorf("user id, username, and created_at are required")
 	}
-	if r.crypto == nil {
-		return fmt.Errorf("field crypto is required")
-	}
-
-	usernameEnc, err := r.crypto.EncryptString(u.Username)
-	if err != nil {
-		return fmt.Errorf("encrypt username: %w", err)
-	}
-	usernameHash := r.crypto.HashString(u.Username)
 
 	var passwordHash any
 	if u.PasswordHash != "" {
 		passwordHash = u.PasswordHash
 	}
-	var username any
-	if usernameEnc == "" {
-		username = u.Username
-	}
 
-	_, err = r.db.ExecContext(ctx, `INSERT INTO users (id, username, username_enc, username_hash, password_hash, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)`, u.ID, username, usernameEnc, usernameHash, passwordHash, u.CreatedAt)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO users (id, username, password_hash, created_at)
+		VALUES ($1, $2, $3, $4)`, u.ID, u.Username, passwordHash, u.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert user: %w", err)
 	}
@@ -51,116 +37,69 @@ func (r *userRepo) Create(ctx context.Context, u user.User) error {
 }
 
 func (r *userRepo) GetByID(ctx context.Context, id user.ID) (user.User, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT id, username, username_enc, password_hash, created_at
+	row := r.db.QueryRowContext(ctx, `SELECT id, username, password_hash, created_at
 		FROM users WHERE id = $1`, id)
 	var u user.User
 	var username sql.NullString
-	var usernameEnc sql.NullString
 	var passwordHash sql.NullString
-	if err := row.Scan(&u.ID, &username, &usernameEnc, &passwordHash, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &username, &passwordHash, &u.CreatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return user.User{}, ErrNotFound
 		}
 		return user.User{}, fmt.Errorf("select user by id: %w", err)
 	}
-	if usernameEnc.Valid && usernameEnc.String != "" {
-		name, err := r.crypto.DecryptString(usernameEnc.String)
-		if err != nil {
-			return user.User{}, fmt.Errorf("decrypt username: %w", err)
-		}
-		u.Username = name
-	} else if username.Valid {
+	if username.Valid {
 		u.Username = username.String
-		_ = r.backfillUsername(ctx, u.ID, u.Username)
 	}
 	if passwordHash.Valid {
 		u.PasswordHash = passwordHash.String
+	}
+	if u.Username == "" {
+		return user.User{}, ErrNotFound
 	}
 	return u, nil
 }
 
 func (r *userRepo) GetByUsername(ctx context.Context, username string) (user.User, error) {
-	hash := r.crypto.HashString(username)
-	row := r.db.QueryRowContext(ctx, `SELECT id, username, username_enc, password_hash, created_at
-		FROM users WHERE username_hash = $1`, hash)
+	row := r.db.QueryRowContext(ctx, `SELECT id, username, password_hash, created_at
+		FROM users WHERE username = $1`, username)
 	var u user.User
 	var storedUsername sql.NullString
-	var usernameEnc sql.NullString
 	var passwordHash sql.NullString
-	if err := row.Scan(&u.ID, &storedUsername, &usernameEnc, &passwordHash, &u.CreatedAt); err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return user.User{}, fmt.Errorf("select user by username: %w", err)
+	if err := row.Scan(&u.ID, &storedUsername, &passwordHash, &u.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return user.User{}, ErrNotFound
 		}
-		row = r.db.QueryRowContext(ctx, `SELECT id, username, username_enc, password_hash, created_at
-			FROM users WHERE username = $1`, username)
-		if err := row.Scan(&u.ID, &storedUsername, &usernameEnc, &passwordHash, &u.CreatedAt); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return user.User{}, ErrNotFound
-			}
-			return user.User{}, fmt.Errorf("select user by username: %w", err)
-		}
+		return user.User{}, fmt.Errorf("select user by username: %w", err)
 	}
-	if usernameEnc.Valid && usernameEnc.String != "" {
-		name, err := r.crypto.DecryptString(usernameEnc.String)
-		if err != nil {
-			return user.User{}, fmt.Errorf("decrypt username: %w", err)
-		}
-		u.Username = name
-	} else if storedUsername.Valid {
+	if storedUsername.Valid {
 		u.Username = storedUsername.String
-		_ = r.backfillUsername(ctx, u.ID, u.Username)
 	}
 	if passwordHash.Valid {
 		u.PasswordHash = passwordHash.String
 	}
+	if u.Username == "" {
+		return user.User{}, ErrNotFound
+	}
 	return u, nil
 }
 
-func (r *userRepo) backfillUsername(ctx context.Context, id user.ID, username string) error {
-	if r.crypto == nil || username == "" {
-		return nil
-	}
-	usernameEnc, err := r.crypto.EncryptString(username)
-	if err != nil {
-		return err
-	}
-	usernameHash := r.crypto.HashString(username)
-	_, err = r.db.ExecContext(ctx, `UPDATE users
-		SET username_enc = $2, username_hash = $3, username = NULL
-		WHERE id = $1 AND (username_enc IS NULL OR username_enc = '')`, id, usernameEnc, usernameHash)
-	return err
-}
-
 type deviceRepo struct {
-	db     *sql.DB
-	crypto *securestore.FieldCrypto
+	db *sql.DB
 }
 
 func (r *deviceRepo) Create(ctx context.Context, d device.Device) error {
 	if d.ID == "" || d.UserID == "" || d.PublicKey == "" || d.CreatedAt.IsZero() {
 		return fmt.Errorf("device id, user_id, public_key, and created_at are required")
 	}
-	if r.crypto == nil {
-		return fmt.Errorf("field crypto is required")
-	}
-
-	publicKeyEnc, err := r.crypto.EncryptString(d.PublicKey)
-	if err != nil {
-		return fmt.Errorf("encrypt public key: %w", err)
-	}
-	publicKeyHash := r.crypto.HashString(d.PublicKey)
 
 	var lastSeen any
 	if d.LastSeenAt != nil {
 		lastSeen = *d.LastSeenAt
 	}
-	var publicKey any
-	if publicKeyEnc == "" {
-		publicKey = d.PublicKey
-	}
 
-	_, err = r.db.ExecContext(ctx, `INSERT INTO devices (id, user_id, public_key, public_key_enc, public_key_hash, created_at, last_seen_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`, d.ID, d.UserID, publicKey, publicKeyEnc, publicKeyHash, d.CreatedAt, lastSeen)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO devices (id, user_id, public_key, created_at, last_seen_at)
+		VALUES ($1, $2, $3, $4, $5)`, d.ID, d.UserID, d.PublicKey, d.CreatedAt, lastSeen)
 	if err != nil {
 		return fmt.Errorf("insert device: %w", err)
 	}
@@ -168,75 +107,57 @@ func (r *deviceRepo) Create(ctx context.Context, d device.Device) error {
 }
 
 func (r *deviceRepo) GetByID(ctx context.Context, id device.ID) (device.Device, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT id, user_id, public_key, public_key_enc, created_at, last_seen_at
+	row := r.db.QueryRowContext(ctx, `SELECT id, user_id, public_key, created_at, last_seen_at
 		FROM devices WHERE id = $1`, id)
 	var d device.Device
 	var publicKey sql.NullString
-	var publicKeyEnc sql.NullString
 	var lastSeen sql.NullTime
-	if err := row.Scan(&d.ID, &d.UserID, &publicKey, &publicKeyEnc, &d.CreatedAt, &lastSeen); err != nil {
+	if err := row.Scan(&d.ID, &d.UserID, &publicKey, &d.CreatedAt, &lastSeen); err != nil {
 		if err == sql.ErrNoRows {
 			return device.Device{}, device.ErrNotFound
 		}
 		return device.Device{}, fmt.Errorf("select device by id: %w", err)
 	}
-	if publicKeyEnc.Valid && publicKeyEnc.String != "" {
-		key, err := r.crypto.DecryptString(publicKeyEnc.String)
-		if err != nil {
-			return device.Device{}, fmt.Errorf("decrypt public key: %w", err)
-		}
-		d.PublicKey = key
-	} else if publicKey.Valid {
+	if publicKey.Valid {
 		d.PublicKey = publicKey.String
-		_ = r.backfillPublicKey(ctx, d.ID, d.PublicKey)
 	}
 	if lastSeen.Valid {
 		t := lastSeen.Time
 		d.LastSeenAt = &t
+	}
+	if d.PublicKey == "" {
+		return device.Device{}, device.ErrNotFound
 	}
 	return d, nil
 }
 
 func (r *deviceRepo) GetByUserAndPublicKey(ctx context.Context, userID user.ID, publicKey string) (device.Device, error) {
-	publicKeyHash := r.crypto.HashString(publicKey)
-	row := r.db.QueryRowContext(ctx, `SELECT id, user_id, public_key, public_key_enc, created_at, last_seen_at
-		FROM devices WHERE user_id = $1 AND public_key_hash = $2`, userID, publicKeyHash)
+	row := r.db.QueryRowContext(ctx, `SELECT id, user_id, public_key, created_at, last_seen_at
+		FROM devices WHERE user_id = $1 AND public_key = $2`, userID, publicKey)
 	var d device.Device
 	var storedPublicKey sql.NullString
-	var publicKeyEnc sql.NullString
 	var lastSeen sql.NullTime
-	if err := row.Scan(&d.ID, &d.UserID, &storedPublicKey, &publicKeyEnc, &d.CreatedAt, &lastSeen); err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return device.Device{}, fmt.Errorf("select device by user and public key: %w", err)
+	if err := row.Scan(&d.ID, &d.UserID, &storedPublicKey, &d.CreatedAt, &lastSeen); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return device.Device{}, device.ErrNotFound
 		}
-		row = r.db.QueryRowContext(ctx, `SELECT id, user_id, public_key, public_key_enc, created_at, last_seen_at
-			FROM devices WHERE user_id = $1 AND public_key = $2`, userID, publicKey)
-		if err := row.Scan(&d.ID, &d.UserID, &storedPublicKey, &publicKeyEnc, &d.CreatedAt, &lastSeen); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return device.Device{}, device.ErrNotFound
-			}
-			return device.Device{}, fmt.Errorf("select device by user and public key: %w", err)
-		}
+		return device.Device{}, fmt.Errorf("select device by user and public key: %w", err)
 	}
-	if publicKeyEnc.Valid && publicKeyEnc.String != "" {
-		key, err := r.crypto.DecryptString(publicKeyEnc.String)
-		if err != nil {
-			return device.Device{}, fmt.Errorf("decrypt public key: %w", err)
-		}
-		d.PublicKey = key
-	} else if storedPublicKey.Valid {
+	if storedPublicKey.Valid {
 		d.PublicKey = storedPublicKey.String
-		_ = r.backfillPublicKey(ctx, d.ID, d.PublicKey)
 	}
 	if lastSeen.Valid {
 		t := lastSeen.Time
 		d.LastSeenAt = &t
 	}
+	if d.PublicKey == "" {
+		return device.Device{}, device.ErrNotFound
+	}
 	return d, nil
 }
 
 func (r *deviceRepo) ListByUser(ctx context.Context, userID user.ID) ([]device.Device, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id, user_id, public_key, public_key_enc, created_at, last_seen_at
+	rows, err := r.db.QueryContext(ctx, `SELECT id, user_id, public_key, created_at, last_seen_at
 		FROM devices WHERE user_id = $1 ORDER BY created_at`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list devices by user: %w", err)
@@ -247,26 +168,20 @@ func (r *deviceRepo) ListByUser(ctx context.Context, userID user.ID) ([]device.D
 	for rows.Next() {
 		var d device.Device
 		var publicKey sql.NullString
-		var publicKeyEnc sql.NullString
 		var lastSeen sql.NullTime
-		if err := rows.Scan(&d.ID, &d.UserID, &publicKey, &publicKeyEnc, &d.CreatedAt, &lastSeen); err != nil {
+		if err := rows.Scan(&d.ID, &d.UserID, &publicKey, &d.CreatedAt, &lastSeen); err != nil {
 			return nil, fmt.Errorf("scan device: %w", err)
 		}
-		if publicKeyEnc.Valid && publicKeyEnc.String != "" {
-			key, err := r.crypto.DecryptString(publicKeyEnc.String)
-			if err != nil {
-				return nil, fmt.Errorf("decrypt public key: %w", err)
-			}
-			d.PublicKey = key
-		} else if publicKey.Valid {
+		if publicKey.Valid {
 			d.PublicKey = publicKey.String
-			_ = r.backfillPublicKey(ctx, d.ID, d.PublicKey)
 		}
 		if lastSeen.Valid {
 			t := lastSeen.Time
 			d.LastSeenAt = &t
 		}
-		devices = append(devices, d)
+		if d.PublicKey != "" {
+			devices = append(devices, d)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate devices: %w", err)
@@ -275,7 +190,7 @@ func (r *deviceRepo) ListByUser(ctx context.Context, userID user.ID) ([]device.D
 }
 
 func (r *deviceRepo) ListAll(ctx context.Context) ([]device.Device, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id, user_id, public_key, public_key_enc, created_at, last_seen_at
+	rows, err := r.db.QueryContext(ctx, `SELECT id, user_id, public_key, created_at, last_seen_at
 		FROM devices ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("list devices: %w", err)
@@ -286,26 +201,20 @@ func (r *deviceRepo) ListAll(ctx context.Context) ([]device.Device, error) {
 	for rows.Next() {
 		var d device.Device
 		var publicKey sql.NullString
-		var publicKeyEnc sql.NullString
 		var lastSeen sql.NullTime
-		if err := rows.Scan(&d.ID, &d.UserID, &publicKey, &publicKeyEnc, &d.CreatedAt, &lastSeen); err != nil {
+		if err := rows.Scan(&d.ID, &d.UserID, &publicKey, &d.CreatedAt, &lastSeen); err != nil {
 			return nil, fmt.Errorf("scan device: %w", err)
 		}
-		if publicKeyEnc.Valid && publicKeyEnc.String != "" {
-			key, err := r.crypto.DecryptString(publicKeyEnc.String)
-			if err != nil {
-				return nil, fmt.Errorf("decrypt public key: %w", err)
-			}
-			d.PublicKey = key
-		} else if publicKey.Valid {
+		if publicKey.Valid {
 			d.PublicKey = publicKey.String
-			_ = r.backfillPublicKey(ctx, d.ID, d.PublicKey)
 		}
 		if lastSeen.Valid {
 			t := lastSeen.Time
 			d.LastSeenAt = &t
 		}
-		devices = append(devices, d)
+		if d.PublicKey != "" {
+			devices = append(devices, d)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate devices: %w", err)
@@ -331,21 +240,6 @@ func (r *deviceRepo) UpdateLastSeen(ctx context.Context, id device.ID, lastSeenA
 		return device.ErrNotFound
 	}
 	return nil
-}
-
-func (r *deviceRepo) backfillPublicKey(ctx context.Context, id device.ID, publicKey string) error {
-	if r.crypto == nil || publicKey == "" {
-		return nil
-	}
-	publicKeyEnc, err := r.crypto.EncryptString(publicKey)
-	if err != nil {
-		return err
-	}
-	publicKeyHash := r.crypto.HashString(publicKey)
-	_, err = r.db.ExecContext(ctx, `UPDATE devices
-		SET public_key_enc = $2, public_key_hash = $3, public_key = NULL
-		WHERE id = $1 AND (public_key_enc IS NULL OR public_key_enc = '')`, id, publicKeyEnc, publicKeyHash)
-	return err
 }
 
 type messageRepo struct {
@@ -400,25 +294,12 @@ func (r *messageRepo) ListForRecipientDevice(ctx context.Context, deviceID devic
 }
 
 type broadcastRepo struct {
-	db     *sql.DB
-	crypto *securestore.FieldCrypto
+	db *sql.DB
 }
 
 func (r *broadcastRepo) Save(ctx context.Context, msg message.BroadcastMessage) error {
 	if msg.ID == "" || msg.SenderID == "" || msg.Body == "" || msg.SentAt.IsZero() {
 		return fmt.Errorf("broadcast message fields are required")
-	}
-	if r.crypto == nil {
-		return fmt.Errorf("field crypto is required")
-	}
-
-	senderNameEnc, err := r.crypto.EncryptString(msg.SenderName)
-	if err != nil {
-		return fmt.Errorf("encrypt sender name: %w", err)
-	}
-	senderKeyEnc, err := r.crypto.EncryptString(msg.SenderPublicKey)
-	if err != nil {
-		return fmt.Errorf("encrypt sender public key: %w", err)
 	}
 
 	var envelopes any
@@ -430,10 +311,10 @@ func (r *broadcastRepo) Save(ctx context.Context, msg message.BroadcastMessage) 
 		envelopes = data
 	}
 
-	_, err = r.db.ExecContext(ctx, `INSERT INTO broadcast_messages
-		(id, sender_id, sender_name, sender_public_key, sender_name_enc, sender_public_key_enc, body, key_envelopes, sent_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		msg.ID, msg.SenderID, "", "", senderNameEnc, senderKeyEnc, msg.Body, envelopes, msg.SentAt)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO broadcast_messages
+		(id, sender_id, sender_name, sender_public_key, body, key_envelopes, sent_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		msg.ID, msg.SenderID, msg.SenderName, msg.SenderPublicKey, msg.Body, envelopes, msg.SentAt)
 	if err != nil {
 		return fmt.Errorf("insert broadcast message: %w", err)
 	}
@@ -445,8 +326,7 @@ func (r *broadcastRepo) ListRecent(ctx context.Context, limit int) ([]message.Br
 		return nil, fmt.Errorf("limit must be positive")
 	}
 
-	rows, err := r.db.QueryContext(ctx, `SELECT id, sender_id, sender_name, sender_public_key,
-		sender_name_enc, sender_public_key_enc, body, key_envelopes, sent_at
+	rows, err := r.db.QueryContext(ctx, `SELECT id, sender_id, sender_name, sender_public_key, body, key_envelopes, sent_at
 		FROM broadcast_messages ORDER BY sent_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list broadcasts: %w", err)
@@ -458,35 +338,15 @@ func (r *broadcastRepo) ListRecent(ctx context.Context, limit int) ([]message.Br
 		var msg message.BroadcastMessage
 		var senderName sql.NullString
 		var senderKey sql.NullString
-		var senderNameEnc sql.NullString
-		var senderKeyEnc sql.NullString
 		var envelopes sql.NullString
-		if err := rows.Scan(&msg.ID, &msg.SenderID, &senderName, &senderKey, &senderNameEnc, &senderKeyEnc, &msg.Body, &envelopes, &msg.SentAt); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.SenderID, &senderName, &senderKey, &msg.Body, &envelopes, &msg.SentAt); err != nil {
 			return nil, fmt.Errorf("scan broadcast: %w", err)
 		}
-		needsBackfill := false
-		if senderNameEnc.Valid && senderNameEnc.String != "" {
-			name, err := r.crypto.DecryptString(senderNameEnc.String)
-			if err != nil {
-				return nil, fmt.Errorf("decrypt sender name: %w", err)
-			}
-			msg.SenderName = name
-		} else if senderName.Valid {
+		if senderName.Valid {
 			msg.SenderName = senderName.String
-			needsBackfill = true
 		}
-		if senderKeyEnc.Valid && senderKeyEnc.String != "" {
-			key, err := r.crypto.DecryptString(senderKeyEnc.String)
-			if err != nil {
-				return nil, fmt.Errorf("decrypt sender public key: %w", err)
-			}
-			msg.SenderPublicKey = key
-		} else if senderKey.Valid {
+		if senderKey.Valid {
 			msg.SenderPublicKey = senderKey.String
-			needsBackfill = true
-		}
-		if needsBackfill {
-			_ = r.backfillSender(ctx, msg.ID, msg.SenderName, msg.SenderPublicKey)
 		}
 		if envelopes.Valid && envelopes.String != "" {
 			var decoded map[string]string
@@ -507,20 +367,207 @@ func (r *broadcastRepo) ListRecent(ctx context.Context, limit int) ([]message.Br
 	return msgs, nil
 }
 
-func (r *broadcastRepo) backfillSender(ctx context.Context, id message.ID, senderName, senderPublicKey string) error {
-	if r.crypto == nil {
-		return nil
+type roomRepo struct {
+	db *sql.DB
+}
+
+func (r *roomRepo) CreateRoom(ctx context.Context, rm room.Room) error {
+	if rm.ID == "" || rm.Name == "" || rm.CreatedBy == "" || rm.CreatedAt.IsZero() {
+		return fmt.Errorf("room fields are required")
 	}
-	senderNameEnc, err := r.crypto.EncryptString(senderName)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO rooms (id, name, created_by, created_at)
+		VALUES ($1, $2, $3, $4)`, rm.ID, rm.Name, rm.CreatedBy, rm.CreatedAt)
 	if err != nil {
-		return err
+		return fmt.Errorf("insert room: %w", err)
 	}
-	senderKeyEnc, err := r.crypto.EncryptString(senderPublicKey)
+	return nil
+}
+
+func (r *roomRepo) GetRoom(ctx context.Context, id room.ID) (room.Room, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT id, name, created_by, created_at FROM rooms WHERE id = $1`, id)
+	var rm room.Room
+	if err := row.Scan(&rm.ID, &rm.Name, &rm.CreatedBy, &rm.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return room.Room{}, ErrNotFound
+		}
+		return room.Room{}, fmt.Errorf("select room: %w", err)
+	}
+	return rm, nil
+}
+
+func (r *roomRepo) ListRoomsForUser(ctx context.Context, userID user.ID) ([]room.Room, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT r.id, r.name, r.created_by, r.created_at
+		FROM rooms r
+		JOIN room_members m ON m.room_id = r.id
+		WHERE m.user_id = $1
+		ORDER BY r.created_at DESC`, userID)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("list rooms: %w", err)
 	}
-	_, err = r.db.ExecContext(ctx, `UPDATE broadcast_messages
-		SET sender_name_enc = $2, sender_public_key_enc = $3, sender_name = '', sender_public_key = ''
-		WHERE id = $1 AND (sender_name_enc IS NULL OR sender_name_enc = '')`, id, senderNameEnc, senderKeyEnc)
-	return err
+	defer rows.Close()
+
+	var rooms []room.Room
+	for rows.Next() {
+		var rm room.Room
+		if err := rows.Scan(&rm.ID, &rm.Name, &rm.CreatedBy, &rm.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan room: %w", err)
+		}
+		rooms = append(rooms, rm)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rooms: %w", err)
+	}
+	return rooms, nil
+}
+
+func (r *roomRepo) AddMember(ctx context.Context, roomID room.ID, userID user.ID, joinedAt time.Time) error {
+	if roomID == "" || userID == "" || joinedAt.IsZero() {
+		return fmt.Errorf("member fields are required")
+	}
+	_, err := r.db.ExecContext(ctx, `INSERT INTO room_members (room_id, user_id, joined_at)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (room_id, user_id) DO NOTHING`, roomID, userID, joinedAt)
+	if err != nil {
+		return fmt.Errorf("insert member: %w", err)
+	}
+	return nil
+}
+
+func (r *roomRepo) IsMember(ctx context.Context, roomID room.ID, userID user.ID) (bool, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT 1 FROM room_members WHERE room_id = $1 AND user_id = $2`, roomID, userID)
+	var exists int
+	if err := row.Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("check membership: %w", err)
+	}
+	return true, nil
+}
+
+func (r *roomRepo) ListMembers(ctx context.Context, roomID room.ID) ([]user.ID, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT user_id FROM room_members WHERE room_id = $1`, roomID)
+	if err != nil {
+		return nil, fmt.Errorf("list members: %w", err)
+	}
+	defer rows.Close()
+
+	var members []user.ID
+	for rows.Next() {
+		var member user.ID
+		if err := rows.Scan(&member); err != nil {
+			return nil, fmt.Errorf("scan member: %w", err)
+		}
+		members = append(members, member)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate members: %w", err)
+	}
+	return members, nil
+}
+
+func (r *roomRepo) CreateInvite(ctx context.Context, invite room.Invite) error {
+	if invite.Token == "" || invite.RoomID == "" || invite.CreatedBy == "" || invite.CreatedAt.IsZero() || invite.ExpiresAt.IsZero() {
+		return fmt.Errorf("invite fields are required")
+	}
+	_, err := r.db.ExecContext(ctx, `INSERT INTO room_invites (id, room_id, created_by, created_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5)`, invite.Token, invite.RoomID, invite.CreatedBy, invite.CreatedAt, invite.ExpiresAt)
+	if err != nil {
+		return fmt.Errorf("insert invite: %w", err)
+	}
+	return nil
+}
+
+func (r *roomRepo) ConsumeInvite(ctx context.Context, token string, userID user.ID, now time.Time) (room.Invite, error) {
+	if token == "" || userID == "" || now.IsZero() {
+		return room.Invite{}, fmt.Errorf("consume fields are required")
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return room.Invite{}, fmt.Errorf("begin consume: %w", err)
+	}
+
+	var invite room.Invite
+	row := tx.QueryRowContext(ctx, `UPDATE room_invites
+		SET consumed_at = $2, consumed_by = $3
+		WHERE id = $1 AND consumed_at IS NULL AND expires_at > $2
+		RETURNING id, room_id, created_by, created_at, expires_at, consumed_at, consumed_by`, token, now, userID)
+	if err := row.Scan(&invite.Token, &invite.RoomID, &invite.CreatedBy, &invite.CreatedAt, &invite.ExpiresAt, &invite.ConsumedAt, &invite.ConsumedBy); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			_ = tx.Rollback()
+			return room.Invite{}, fmt.Errorf("consume invite: %w", err)
+		}
+
+		check := tx.QueryRowContext(ctx, `SELECT id, room_id, created_by, created_at, expires_at, consumed_at, consumed_by
+			FROM room_invites WHERE id = $1`, token)
+		var existing room.Invite
+		if err := check.Scan(&existing.Token, &existing.RoomID, &existing.CreatedBy, &existing.CreatedAt, &existing.ExpiresAt, &existing.ConsumedAt, &existing.ConsumedBy); err != nil {
+			_ = tx.Rollback()
+			if errors.Is(err, sql.ErrNoRows) {
+				return room.Invite{}, ErrNotFound
+			}
+			return room.Invite{}, fmt.Errorf("lookup invite: %w", err)
+		}
+		_ = tx.Rollback()
+		if existing.ConsumedAt != nil {
+			return room.Invite{}, room.ErrInviteConsumed
+		}
+		if !existing.ExpiresAt.IsZero() && !existing.ExpiresAt.After(now) {
+			return room.Invite{}, room.ErrInviteExpired
+		}
+		return room.Invite{}, ErrNotFound
+	}
+
+	if _, err := tx.ExecContext(ctx, `INSERT INTO room_members (room_id, user_id, joined_at)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (room_id, user_id) DO NOTHING`, invite.RoomID, userID, now); err != nil {
+		_ = tx.Rollback()
+		return room.Invite{}, fmt.Errorf("insert member: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return room.Invite{}, fmt.Errorf("commit consume: %w", err)
+	}
+	return invite, nil
+}
+
+func (r *roomRepo) SaveMessage(ctx context.Context, msg room.Message) error {
+	if msg.ID == "" || msg.RoomID == "" || msg.SenderID == "" || msg.SenderName == "" || msg.Body == "" || msg.SentAt.IsZero() {
+		return fmt.Errorf("room message fields are required")
+	}
+	_, err := r.db.ExecContext(ctx, `INSERT INTO room_messages (id, room_id, sender_id, sender_name, body, sent_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`, msg.ID, msg.RoomID, msg.SenderID, msg.SenderName, msg.Body, msg.SentAt)
+	if err != nil {
+		return fmt.Errorf("insert room message: %w", err)
+	}
+	return nil
+}
+
+func (r *roomRepo) ListRecentMessages(ctx context.Context, roomID room.ID, limit int) ([]room.Message, error) {
+	if roomID == "" || limit <= 0 {
+		return nil, fmt.Errorf("room id and positive limit are required")
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT id, room_id, sender_id, sender_name, body, sent_at
+		FROM room_messages WHERE room_id = $1 ORDER BY sent_at DESC LIMIT $2`, roomID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list room messages: %w", err)
+	}
+	defer rows.Close()
+
+	var msgs []room.Message
+	for rows.Next() {
+		var msg room.Message
+		if err := rows.Scan(&msg.ID, &msg.RoomID, &msg.SenderID, &msg.SenderName, &msg.Body, &msg.SentAt); err != nil {
+			return nil, fmt.Errorf("scan room message: %w", err)
+		}
+		msgs = append(msgs, msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate room messages: %w", err)
+	}
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+	return msgs, nil
 }

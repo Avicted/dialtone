@@ -49,6 +49,22 @@ var (
 
 	disconnectedStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("196"))
+
+	sidebarTitleStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("246")).
+				Bold(true)
+
+	sidebarOnlineStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("114"))
+
+	sidebarOfflineStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240"))
+
+	sidebarBoxStyle = lipgloss.NewStyle().
+			BorderLeft(true).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("238")).
+			PaddingLeft(1)
 )
 
 func centerText(text string, width int) string {

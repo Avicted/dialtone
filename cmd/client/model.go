@@ -51,7 +51,7 @@ func (m rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = wsm.Height
 	}
 
-	if km, ok := msg.(tea.KeyMsg); ok && km.String() == "ctrl+c" {
+	if km, ok := msg.(tea.KeyMsg); ok && km.String() == "ctrl+q" {
 		if m.state == stateChat && m.chat.ws != nil {
 			m.chat.ws.Close()
 		}

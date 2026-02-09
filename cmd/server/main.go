@@ -14,7 +14,7 @@ import (
 	"github.com/Avicted/dialtone/internal/config"
 	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/httpapi"
-	"github.com/Avicted/dialtone/internal/securestore"
+	"github.com/Avicted/dialtone/internal/room"
 	"github.com/Avicted/dialtone/internal/storage"
 	"github.com/Avicted/dialtone/internal/user"
 	"github.com/Avicted/dialtone/internal/ws"
@@ -38,11 +38,7 @@ func run() error {
 
 	storeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	fieldCrypto, err := securestore.NewFieldCrypto(cfg.MasterKey)
-	if err != nil {
-		return fmt.Errorf("init field crypto: %w", err)
-	}
-	store, err := storage.NewPostgresStore(storeCtx, cfg.DBURL, fieldCrypto)
+	store, err := storage.NewPostgresStore(storeCtx, cfg.DBURL)
 	if err != nil {
 		return fmt.Errorf("init store: %w", err)
 	}
@@ -60,13 +56,14 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	hub := ws.NewHub(store.Messages(), store.Broadcasts(), store.Devices())
+	hub := ws.NewHub(store.Messages(), store.Broadcasts(), store.Devices(), store.Rooms())
 	go hub.Run(ctx)
 
 	userService := user.NewService(store.Users())
 	deviceService := device.NewService(store.Devices())
+	roomService := room.NewService(store.Rooms())
 	authService := auth.NewService(userService, deviceService)
-	api := httpapi.NewHandler(userService, deviceService, authService)
+	api := httpapi.NewHandler(userService, deviceService, roomService, authService, hub)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
