@@ -12,7 +12,6 @@ type ID string
 
 type Room struct {
 	ID        ID
-	Name      string
 	NameEnc   string
 	CreatedBy user.ID
 	CreatedAt time.Time
@@ -32,7 +31,6 @@ type Message struct {
 	ID            string
 	RoomID        ID
 	SenderID      user.ID
-	SenderName    string
 	SenderNameEnc string
 	Body          string
 	SentAt        time.Time

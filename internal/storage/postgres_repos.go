@@ -19,8 +19,8 @@ type userRepo struct {
 }
 
 func (r *userRepo) Create(ctx context.Context, u user.User) error {
-	if u.ID == "" || u.Username == "" || u.CreatedAt.IsZero() {
-		return fmt.Errorf("user id, username, and created_at are required")
+	if u.ID == "" || u.UsernameHash == "" || u.CreatedAt.IsZero() {
+		return fmt.Errorf("user id, username_hash, and created_at are required")
 	}
 
 	var passwordHash any
@@ -28,8 +28,8 @@ func (r *userRepo) Create(ctx context.Context, u user.User) error {
 		passwordHash = u.PasswordHash
 	}
 
-	_, err := r.db.ExecContext(ctx, `INSERT INTO users (id, username, password_hash, created_at)
-		VALUES ($1, $2, $3, $4)`, u.ID, u.Username, passwordHash, u.CreatedAt)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO users (id, username_hash, password_hash, created_at)
+		VALUES ($1, $2, $3, $4)`, u.ID, u.UsernameHash, passwordHash, u.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert user: %w", err)
 	}
@@ -37,48 +37,48 @@ func (r *userRepo) Create(ctx context.Context, u user.User) error {
 }
 
 func (r *userRepo) GetByID(ctx context.Context, id user.ID) (user.User, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT id, username, password_hash, created_at
+	row := r.db.QueryRowContext(ctx, `SELECT id, username_hash, password_hash, created_at
 		FROM users WHERE id = $1`, id)
 	var u user.User
-	var username sql.NullString
+	var usernameHash sql.NullString
 	var passwordHash sql.NullString
-	if err := row.Scan(&u.ID, &username, &passwordHash, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &usernameHash, &passwordHash, &u.CreatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return user.User{}, ErrNotFound
 		}
 		return user.User{}, fmt.Errorf("select user by id: %w", err)
 	}
-	if username.Valid {
-		u.Username = username.String
+	if usernameHash.Valid {
+		u.UsernameHash = usernameHash.String
 	}
 	if passwordHash.Valid {
 		u.PasswordHash = passwordHash.String
 	}
-	if u.Username == "" {
+	if u.UsernameHash == "" {
 		return user.User{}, ErrNotFound
 	}
 	return u, nil
 }
 
-func (r *userRepo) GetByUsername(ctx context.Context, username string) (user.User, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT id, username, password_hash, created_at
-		FROM users WHERE username = $1`, username)
+func (r *userRepo) GetByUsernameHash(ctx context.Context, usernameHash string) (user.User, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT id, username_hash, password_hash, created_at
+		FROM users WHERE username_hash = $1`, usernameHash)
 	var u user.User
-	var storedUsername sql.NullString
+	var storedHash sql.NullString
 	var passwordHash sql.NullString
-	if err := row.Scan(&u.ID, &storedUsername, &passwordHash, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &storedHash, &passwordHash, &u.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return user.User{}, ErrNotFound
 		}
-		return user.User{}, fmt.Errorf("select user by username: %w", err)
+		return user.User{}, fmt.Errorf("select user by username hash: %w", err)
 	}
-	if storedUsername.Valid {
-		u.Username = storedUsername.String
+	if storedHash.Valid {
+		u.UsernameHash = storedHash.String
 	}
 	if passwordHash.Valid {
 		u.PasswordHash = passwordHash.String
 	}
-	if u.Username == "" {
+	if u.UsernameHash == "" {
 		return user.User{}, ErrNotFound
 	}
 	return u, nil
@@ -298,7 +298,7 @@ type broadcastRepo struct {
 }
 
 func (r *broadcastRepo) Save(ctx context.Context, msg message.BroadcastMessage) error {
-	if msg.ID == "" || msg.SenderID == "" || msg.Body == "" || msg.SentAt.IsZero() {
+	if msg.ID == "" || msg.SenderID == "" || msg.SenderNameEnc == "" || msg.Body == "" || msg.SentAt.IsZero() {
 		return fmt.Errorf("broadcast message fields are required")
 	}
 
@@ -312,9 +312,9 @@ func (r *broadcastRepo) Save(ctx context.Context, msg message.BroadcastMessage) 
 	}
 
 	_, err := r.db.ExecContext(ctx, `INSERT INTO broadcast_messages
-		(id, sender_id, sender_name, sender_public_key, body, key_envelopes, sent_at)
+		(id, sender_id, sender_public_key, sender_name_enc, body, key_envelopes, sent_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		msg.ID, msg.SenderID, msg.SenderName, msg.SenderPublicKey, msg.Body, envelopes, msg.SentAt)
+		msg.ID, msg.SenderID, msg.SenderPublicKey, msg.SenderNameEnc, msg.Body, envelopes, msg.SentAt)
 	if err != nil {
 		return fmt.Errorf("insert broadcast message: %w", err)
 	}
@@ -326,7 +326,7 @@ func (r *broadcastRepo) ListRecent(ctx context.Context, limit int) ([]message.Br
 		return nil, fmt.Errorf("limit must be positive")
 	}
 
-	rows, err := r.db.QueryContext(ctx, `SELECT id, sender_id, sender_name, sender_public_key, body, key_envelopes, sent_at
+	rows, err := r.db.QueryContext(ctx, `SELECT id, sender_id, sender_public_key, sender_name_enc, body, key_envelopes, sent_at
 		FROM broadcast_messages ORDER BY sent_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list broadcasts: %w", err)
@@ -336,17 +336,17 @@ func (r *broadcastRepo) ListRecent(ctx context.Context, limit int) ([]message.Br
 	var msgs []message.BroadcastMessage
 	for rows.Next() {
 		var msg message.BroadcastMessage
-		var senderName sql.NullString
 		var senderKey sql.NullString
+		var senderNameEnc sql.NullString
 		var envelopes sql.NullString
-		if err := rows.Scan(&msg.ID, &msg.SenderID, &senderName, &senderKey, &msg.Body, &envelopes, &msg.SentAt); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.SenderID, &senderKey, &senderNameEnc, &msg.Body, &envelopes, &msg.SentAt); err != nil {
 			return nil, fmt.Errorf("scan broadcast: %w", err)
-		}
-		if senderName.Valid {
-			msg.SenderName = senderName.String
 		}
 		if senderKey.Valid {
 			msg.SenderPublicKey = senderKey.String
+		}
+		if senderNameEnc.Valid {
+			msg.SenderNameEnc = senderNameEnc.String
 		}
 		if envelopes.Valid && envelopes.String != "" {
 			var decoded map[string]string
@@ -375,8 +375,8 @@ func (r *roomRepo) CreateRoom(ctx context.Context, rm room.Room) error {
 	if rm.ID == "" || rm.NameEnc == "" || rm.CreatedBy == "" || rm.CreatedAt.IsZero() {
 		return fmt.Errorf("room fields are required")
 	}
-	_, err := r.db.ExecContext(ctx, `INSERT INTO rooms (id, name, name_enc, created_by, created_at)
-		VALUES ($1, $2, $3, $4, $5)`, rm.ID, "", rm.NameEnc, rm.CreatedBy, rm.CreatedAt)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO rooms (id, name_enc, created_by, created_at)
+		VALUES ($1, $2, $3, $4)`, rm.ID, rm.NameEnc, rm.CreatedBy, rm.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert room: %w", err)
 	}
@@ -384,9 +384,9 @@ func (r *roomRepo) CreateRoom(ctx context.Context, rm room.Room) error {
 }
 
 func (r *roomRepo) GetRoom(ctx context.Context, id room.ID) (room.Room, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT id, name, name_enc, created_by, created_at FROM rooms WHERE id = $1`, id)
+	row := r.db.QueryRowContext(ctx, `SELECT id, name_enc, created_by, created_at FROM rooms WHERE id = $1`, id)
 	var rm room.Room
-	if err := row.Scan(&rm.ID, &rm.Name, &rm.NameEnc, &rm.CreatedBy, &rm.CreatedAt); err != nil {
+	if err := row.Scan(&rm.ID, &rm.NameEnc, &rm.CreatedBy, &rm.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return room.Room{}, ErrNotFound
 		}
@@ -396,7 +396,7 @@ func (r *roomRepo) GetRoom(ctx context.Context, id room.ID) (room.Room, error) {
 }
 
 func (r *roomRepo) ListRoomsForUser(ctx context.Context, userID user.ID) ([]room.Room, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT r.id, r.name, r.name_enc, r.created_by, r.created_at
+	rows, err := r.db.QueryContext(ctx, `SELECT r.id, r.name_enc, r.created_by, r.created_at
 		FROM rooms r
 		JOIN room_members m ON m.room_id = r.id
 		WHERE m.user_id = $1
@@ -409,7 +409,7 @@ func (r *roomRepo) ListRoomsForUser(ctx context.Context, userID user.ID) ([]room
 	var rooms []room.Room
 	for rows.Next() {
 		var rm room.Room
-		if err := rows.Scan(&rm.ID, &rm.Name, &rm.NameEnc, &rm.CreatedBy, &rm.CreatedAt); err != nil {
+		if err := rows.Scan(&rm.ID, &rm.NameEnc, &rm.CreatedBy, &rm.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan room: %w", err)
 		}
 		rooms = append(rooms, rm)
@@ -551,8 +551,8 @@ func (r *roomRepo) SaveMessage(ctx context.Context, msg room.Message) error {
 	if msg.ID == "" || msg.RoomID == "" || msg.SenderID == "" || msg.SenderNameEnc == "" || msg.Body == "" || msg.SentAt.IsZero() {
 		return fmt.Errorf("room message fields are required")
 	}
-	_, err := r.db.ExecContext(ctx, `INSERT INTO room_messages (id, room_id, sender_id, sender_name, sender_name_enc, body, sent_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`, msg.ID, msg.RoomID, msg.SenderID, "", msg.SenderNameEnc, msg.Body, msg.SentAt)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO room_messages (id, room_id, sender_id, sender_name_enc, body, sent_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`, msg.ID, msg.RoomID, msg.SenderID, msg.SenderNameEnc, msg.Body, msg.SentAt)
 	if err != nil {
 		return fmt.Errorf("insert room message: %w", err)
 	}
@@ -563,7 +563,7 @@ func (r *roomRepo) ListRecentMessages(ctx context.Context, roomID room.ID, limit
 	if roomID == "" || limit <= 0 {
 		return nil, fmt.Errorf("room id and positive limit are required")
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT id, room_id, sender_id, sender_name, sender_name_enc, body, sent_at
+	rows, err := r.db.QueryContext(ctx, `SELECT id, room_id, sender_id, sender_name_enc, body, sent_at
 		FROM room_messages WHERE room_id = $1 ORDER BY sent_at DESC LIMIT $2`, roomID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list room messages: %w", err)
@@ -573,7 +573,7 @@ func (r *roomRepo) ListRecentMessages(ctx context.Context, roomID room.ID, limit
 	var msgs []room.Message
 	for rows.Next() {
 		var msg room.Message
-		if err := rows.Scan(&msg.ID, &msg.RoomID, &msg.SenderID, &msg.SenderName, &msg.SenderNameEnc, &msg.Body, &msg.SentAt); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.RoomID, &msg.SenderID, &msg.SenderNameEnc, &msg.Body, &msg.SentAt); err != nil {
 			return nil, fmt.Errorf("scan room message: %w", err)
 		}
 		msgs = append(msgs, msg)

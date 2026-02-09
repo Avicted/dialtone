@@ -9,7 +9,7 @@ type ID string
 
 type User struct {
 	ID           ID
-	Username     string
+	UsernameHash string
 	PasswordHash string
 	CreatedAt    time.Time
 }
@@ -17,5 +17,5 @@ type User struct {
 type Repository interface {
 	Create(ctx context.Context, user User) error
 	GetByID(ctx context.Context, id ID) (User, error)
-	GetByUsername(ctx context.Context, username string) (User, error)
+	GetByUsernameHash(ctx context.Context, usernameHash string) (User, error)
 }

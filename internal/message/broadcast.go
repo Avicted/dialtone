@@ -11,7 +11,7 @@ import (
 type BroadcastMessage struct {
 	ID              ID
 	SenderID        user.ID
-	SenderName      string
+	SenderNameEnc   string
 	SenderPublicKey string
 	Body            string
 	Envelopes       map[string]string

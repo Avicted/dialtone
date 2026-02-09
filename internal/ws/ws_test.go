@@ -26,7 +26,7 @@ func (v *fakeValidator) ValidateToken(token string) (auth.Session, error) {
 }
 
 func TestDecodeIncoming_BroadcastValid(t *testing.T) {
-	data := []byte(`{"type":"message.broadcast","body":"hello world"}`)
+	data := []byte(`{"type":"message.broadcast","body":"hello world","sender_name_enc":"abc"}`)
 	msg, err := decodeIncoming(data)
 	if err != nil {
 		t.Fatalf("decodeIncoming() error = %v", err)
@@ -51,7 +51,7 @@ func TestDecodeIncoming_SendValid(t *testing.T) {
 }
 
 func TestDecodeIncoming_BroadcastEmptyBody(t *testing.T) {
-	data := []byte(`{"type":"message.broadcast","body":""}`)
+	data := []byte(`{"type":"message.broadcast","body":"","sender_name_enc":"abc"}`)
 	_, err := decodeIncoming(data)
 	if err == nil {
 		t.Fatal("expected error for empty body")
@@ -85,7 +85,7 @@ func TestDecodeIncoming_UnknownTypePassesThrough(t *testing.T) {
 }
 
 func TestDecodeIncoming_WhitespaceTrimming(t *testing.T) {
-	data := []byte(`{"type":"  message.broadcast  ","body":"  hello  "}`)
+	data := []byte(`{"type":"  message.broadcast  ","body":"  hello  ","sender_name_enc":"  abc  "}`)
 	msg, err := decodeIncoming(data)
 	if err != nil {
 		t.Fatalf("decodeIncoming() error = %v", err)
@@ -99,7 +99,7 @@ func TestDecodeIncoming_WhitespaceTrimming(t *testing.T) {
 }
 
 func TestDecodeIncoming_PublicKeyField(t *testing.T) {
-	data := []byte(`{"type":"message.broadcast","body":"hi","public_key":"abc123"}`)
+	data := []byte(`{"type":"message.broadcast","body":"hi","public_key":"abc123","sender_name_enc":"abc"}`)
 	msg, err := decodeIncoming(data)
 	if err != nil {
 		t.Fatalf("decodeIncoming() error = %v", err)
@@ -114,7 +114,7 @@ func TestOutboundMessage_JSON(t *testing.T) {
 		Type:            "message.broadcast",
 		MessageID:       "msg-1",
 		Sender:          "user-1",
-		SenderName:      "alice",
+		SenderNameEnc:   "enc-name",
 		SenderPublicKey: "pubkey",
 		Body:            "hello",
 		SentAt:          "2026-01-01T00:00:00Z",

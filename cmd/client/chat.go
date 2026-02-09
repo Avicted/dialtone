@@ -254,10 +254,20 @@ func (m *chatModel) sendCurrentMessage() {
 	}
 
 	if m.activeRoom != "" {
+		key, ok := m.roomKeys[m.activeRoom]
+		if !ok || len(key) == 0 {
+			m.errMsg = "missing room key"
+			return
+		}
+		encryptedBody, err := encryptRoomField(key, body)
+		if err != nil {
+			m.errMsg = fmt.Sprintf("encrypt room message: %v", err)
+			return
+		}
 		_ = m.ws.Send(SendMessage{
 			Type:   "room.message.send",
 			RoomID: m.activeRoom,
-			Body:   body,
+			Body:   encryptedBody,
 		})
 		m.input.Reset()
 		return
@@ -284,6 +294,11 @@ func (m *chatModel) sendCurrentMessage() {
 		return
 	}
 	encryptedBody := base64.StdEncoding.EncodeToString(ct)
+	senderNameEnc, err := encryptRoomField(contentKey, m.auth.Username)
+	if err != nil {
+		m.errMsg = fmt.Sprintf("encrypt sender name: %v", err)
+		return
+	}
 
 	envelopes := make(map[string]string, len(keysResp.Keys))
 	for _, key := range keysResp.Keys {
@@ -303,10 +318,11 @@ func (m *chatModel) sendCurrentMessage() {
 	}
 
 	_ = m.ws.Send(SendMessage{
-		Type:         "message.broadcast",
-		Body:         encryptedBody,
-		PublicKey:    crypto.PublicKeyToBase64(m.kp.Public),
-		KeyEnvelopes: envelopes,
+		Type:          "message.broadcast",
+		Body:          encryptedBody,
+		PublicKey:     crypto.PublicKeyToBase64(m.kp.Public),
+		SenderNameEnc: senderNameEnc,
+		KeyEnvelopes:  envelopes,
 	})
 	m.input.Reset()
 }
@@ -474,10 +490,11 @@ func (m *chatModel) joinRoom(token string) {
 
 	for _, msg := range joined.Messages {
 		senderName := m.decryptRoomField(joined.Room.ID, msg.SenderNameEnc)
+		body := m.decryptRoomField(joined.Room.ID, msg.Body)
 		cm := chatMessage{
 			sender:     msg.SenderID,
 			senderName: senderName,
-			body:       msg.Body,
+			body:       body,
 			sentAt:     msg.SentAt,
 			isHistory:  true,
 			isMine:     msg.SenderID == m.auth.UserID,
@@ -529,10 +546,11 @@ func (m *chatModel) loadRoomHistory(roomID string) {
 	loaded := make([]chatMessage, 0, len(msgs))
 	for _, msg := range msgs {
 		senderName := m.decryptRoomField(roomID, msg.SenderNameEnc)
+		body := m.decryptRoomField(roomID, msg.Body)
 		loaded = append(loaded, chatMessage{
 			sender:     msg.SenderID,
 			senderName: senderName,
-			body:       msg.Body,
+			body:       body,
 			sentAt:     msg.SentAt,
 			isHistory:  true,
 			isMine:     msg.SenderID == m.auth.UserID,
@@ -708,9 +726,9 @@ func (m *chatModel) scheduleRoomMembersTick(roomID string) tea.Cmd {
 // tryDecrypt attempts to decrypt a message body from a sender.
 // For broadcast messages the sender encrypts with their own key pair, so the
 // recipient needs the sender's public key to derive the shared secret.
-func (m *chatModel) tryDecrypt(senderID, body, senderPubKey, keyEnvelope string) (string, bool) {
+func (m *chatModel) tryDecrypt(senderID, body, senderPubKey, keyEnvelope string) (string, bool, []byte) {
 	if m.kp == nil || m.kp.Private == nil {
-		return body, false
+		return body, false, nil
 	}
 
 	if senderPubKey != "" && keyEnvelope != "" {
@@ -723,7 +741,7 @@ func (m *chatModel) tryDecrypt(senderID, body, senderPubKey, keyEnvelope string)
 					pt, err := crypto.Decrypt(contentKey, ct)
 					if err == nil {
 						m.peers.set(senderID, pub)
-						return string(pt), true
+						return string(pt), true, contentKey
 					}
 				}
 			}
@@ -738,7 +756,7 @@ func (m *chatModel) tryDecrypt(senderID, body, senderPubKey, keyEnvelope string)
 			if err == nil {
 				// Cache the public key for future messages.
 				m.peers.set(senderID, pub)
-				return string(pt), true
+				return string(pt), true, nil
 			}
 		}
 	}
@@ -748,7 +766,7 @@ func (m *chatModel) tryDecrypt(senderID, body, senderPubKey, keyEnvelope string)
 	if ok {
 		pt, err := crypto.DecryptFromPeer(m.kp.Private, pub, body)
 		if err == nil {
-			return string(pt), true
+			return string(pt), true, nil
 		}
 	}
 
@@ -756,7 +774,7 @@ func (m *chatModel) tryDecrypt(senderID, body, senderPubKey, keyEnvelope string)
 	if senderID == m.auth.UserID {
 		pt, err := crypto.DecryptFromPeer(m.kp.Private, m.kp.Public, body)
 		if err == nil {
-			return string(pt), true
+			return string(pt), true, nil
 		}
 	}
 
@@ -771,23 +789,29 @@ func (m *chatModel) tryDecrypt(senderID, body, senderPubKey, keyEnvelope string)
 			pt, err := crypto.DecryptFromPeer(m.kp.Private, pub, body)
 			if err == nil {
 				m.peers.set(senderID, pub)
-				return string(pt), true
+				return string(pt), true, nil
 			}
 		}
 	}
 
 	// Not encrypted or unable to decrypt – treat as plaintext.
-	return body, false
+	return body, false, nil
 }
 
 func (m *chatModel) handleServerMessage(msg ServerMessage) {
 	switch msg.Type {
 	case "message.new", "message.history", "message.broadcast":
-		body, encrypted := m.tryDecrypt(msg.Sender, msg.Body, msg.SenderPubKey, msg.KeyEnvelope)
+		body, encrypted, contentKey := m.tryDecrypt(msg.Sender, msg.Body, msg.SenderPubKey, msg.KeyEnvelope)
+		senderName := msg.SenderName
+		if msg.SenderNameEnc != "" && len(contentKey) > 0 {
+			if name, err := decryptRoomFieldWithKey(contentKey, msg.SenderNameEnc); err == nil {
+				senderName = name
+			}
+		}
 
 		cm := chatMessage{
 			sender:     msg.Sender,
-			senderName: msg.SenderName,
+			senderName: senderName,
 			body:       body,
 			sentAt:     msg.SentAt,
 			isHistory:  msg.Type == "message.history",
@@ -798,10 +822,11 @@ func (m *chatModel) handleServerMessage(msg ServerMessage) {
 
 	case "room.message.new":
 		senderName := m.decryptRoomField(msg.RoomID, msg.SenderNameEnc)
+		body := m.decryptRoomField(msg.RoomID, msg.Body)
 		cm := chatMessage{
 			sender:     msg.Sender,
 			senderName: senderName,
-			body:       msg.Body,
+			body:       body,
 			sentAt:     msg.SentAt,
 			isHistory:  false,
 			isMine:     msg.Sender == m.auth.UserID,

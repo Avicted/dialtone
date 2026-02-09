@@ -56,3 +56,11 @@ Migrations:
 - TLS for all transport
 - Message content must be encrypted before reaching the server
 - Use only Go standard library crypto packages
+
+
+## TODO
+- The user should be able to select which server to connect before login.
+- User registration should have 2 password fields for confirming that the user typed what they meant.
+- When creating a invite code, the code should be highlighted in some way, to make it stand out in all the text.
+- Document the server API, so that new clients not TUIs can be created.
+- Testing.

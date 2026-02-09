@@ -2,6 +2,8 @@ package user
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"time"
@@ -32,14 +34,15 @@ func (s *Service) Create(ctx context.Context, username string) (User, error) {
 		return User{}, errors.New("repository is required")
 	}
 
-	name := strings.TrimSpace(username)
+	name := normalizeUsername(username)
 	if name == "" {
 		return User{}, ErrInvalidInput
 	}
+	usernameHash := hashUsername(name)
 
 	u := User{
 		ID:           s.idGen(),
-		Username:     name,
+		UsernameHash: usernameHash,
 		PasswordHash: "",
 		CreatedAt:    s.now().UTC(),
 	}
@@ -55,14 +58,15 @@ func (s *Service) CreateWithPassword(ctx context.Context, username, passwordHash
 		return User{}, errors.New("repository is required")
 	}
 
-	name := strings.TrimSpace(username)
+	name := normalizeUsername(username)
 	if name == "" || strings.TrimSpace(passwordHash) == "" {
 		return User{}, ErrInvalidInput
 	}
+	usernameHash := hashUsername(name)
 
 	u := User{
 		ID:           s.idGen(),
-		Username:     name,
+		UsernameHash: usernameHash,
 		PasswordHash: passwordHash,
 		CreatedAt:    s.now().UTC(),
 	}
@@ -87,9 +91,18 @@ func (s *Service) GetByUsername(ctx context.Context, username string) (User, err
 	if s.repo == nil {
 		return User{}, errors.New("repository is required")
 	}
-	name := strings.TrimSpace(username)
+	name := normalizeUsername(username)
 	if name == "" {
 		return User{}, ErrInvalidInput
 	}
-	return s.repo.GetByUsername(ctx, name)
+	return s.repo.GetByUsernameHash(ctx, hashUsername(name))
+}
+
+func normalizeUsername(username string) string {
+	return strings.ToLower(strings.TrimSpace(username))
+}
+
+func hashUsername(username string) string {
+	sum := sha256.Sum256([]byte(username))
+	return hex.EncodeToString(sum[:])
 }

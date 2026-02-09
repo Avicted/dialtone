@@ -103,7 +103,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		UserID:       createdUser.ID,
 		DeviceID:     createdDevice.ID,
 		ExpiresAt:    session.ExpiresAt.UTC().Format(timeLayout),
-		Username:     createdUser.Username,
+		Username:     session.Username,
 		DevicePubKey: createdDevice.PublicKey,
 	}
 	writeJSON(w, http.StatusCreated, resp)
@@ -144,7 +144,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		UserID:       createdUser.ID,
 		DeviceID:     createdDevice.ID,
 		ExpiresAt:    session.ExpiresAt.UTC().Format(timeLayout),
-		Username:     createdUser.Username,
+		Username:     session.Username,
 		DevicePubKey: createdDevice.PublicKey,
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -200,7 +200,7 @@ func (h *Handler) handleUsers(w http.ResponseWriter, r *http.Request) {
 
 	resp := createUserResponse{
 		ID:        created.ID,
-		Username:  created.Username,
+		Username:  strings.TrimSpace(req.Username),
 		CreatedAt: created.CreatedAt.UTC().Format(timeLayout),
 	}
 	writeJSON(w, http.StatusCreated, resp)

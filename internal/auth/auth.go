@@ -50,6 +50,10 @@ func (s *Service) Register(ctx context.Context, username, password, publicKey st
 	if s.users == nil || s.devices == nil {
 		return user.User{}, device.Device{}, Session{}, errors.New("services are required")
 	}
+	name := normalizeUsername(username)
+	if name == "" {
+		return user.User{}, device.Device{}, Session{}, ErrInvalidInput
+	}
 	if strings.TrimSpace(password) == "" || len(password) < 8 {
 		return user.User{}, device.Device{}, Session{}, ErrInvalidInput
 	}
@@ -62,7 +66,7 @@ func (s *Service) Register(ctx context.Context, username, password, publicKey st
 		return user.User{}, device.Device{}, Session{}, err
 	}
 
-	createdUser, err := s.users.CreateWithPassword(ctx, username, hash)
+	createdUser, err := s.users.CreateWithPassword(ctx, name, hash)
 	if err != nil {
 		return user.User{}, device.Device{}, Session{}, err
 	}
@@ -72,7 +76,7 @@ func (s *Service) Register(ctx context.Context, username, password, publicKey st
 		return user.User{}, device.Device{}, Session{}, err
 	}
 
-	session, err := s.issue(createdUser.ID, createdDevice.ID, createdUser.Username)
+	session, err := s.issue(createdUser.ID, createdDevice.ID, name)
 	if err != nil {
 		return user.User{}, device.Device{}, Session{}, err
 	}
@@ -83,6 +87,10 @@ func (s *Service) Login(ctx context.Context, username, password, publicKey strin
 	if s.users == nil || s.devices == nil {
 		return user.User{}, device.Device{}, Session{}, errors.New("services are required")
 	}
+	name := normalizeUsername(username)
+	if name == "" {
+		return user.User{}, device.Device{}, Session{}, ErrInvalidInput
+	}
 	if strings.TrimSpace(password) == "" || len(password) < 8 {
 		return user.User{}, device.Device{}, Session{}, ErrInvalidInput
 	}
@@ -90,7 +98,7 @@ func (s *Service) Login(ctx context.Context, username, password, publicKey strin
 		return user.User{}, device.Device{}, Session{}, ErrInvalidInput
 	}
 
-	found, err := s.users.GetByUsername(ctx, username)
+	found, err := s.users.GetByUsername(ctx, name)
 	if err != nil {
 		return user.User{}, device.Device{}, Session{}, ErrUnauthorized
 	}
@@ -112,7 +120,7 @@ func (s *Service) Login(ctx context.Context, username, password, publicKey strin
 		}
 	}
 
-	session, err := s.issue(found.ID, createdDevice.ID, found.Username)
+	session, err := s.issue(found.ID, createdDevice.ID, name)
 	if err != nil {
 		return user.User{}, device.Device{}, Session{}, err
 	}
@@ -161,6 +169,10 @@ func randomToken() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func normalizeUsername(username string) string {
+	return strings.ToLower(strings.TrimSpace(username))
 }
 
 type tokenStore struct {

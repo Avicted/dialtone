@@ -16,10 +16,10 @@ func newFakeRepo() *fakeRepo {
 }
 
 func (r *fakeRepo) Create(_ context.Context, u User) error {
-	if _, exists := r.users[u.Username]; exists {
+	if _, exists := r.users[u.UsernameHash]; exists {
 		return errors.New("duplicate username")
 	}
-	r.users[u.Username] = u
+	r.users[u.UsernameHash] = u
 	return nil
 }
 
@@ -32,8 +32,8 @@ func (r *fakeRepo) GetByID(_ context.Context, id ID) (User, error) {
 	return User{}, errors.New("not found")
 }
 
-func (r *fakeRepo) GetByUsername(_ context.Context, username string) (User, error) {
-	u, ok := r.users[username]
+func (r *fakeRepo) GetByUsernameHash(_ context.Context, usernameHash string) (User, error) {
+	u, ok := r.users[usernameHash]
 	if !ok {
 		return User{}, errors.New("not found")
 	}
@@ -55,8 +55,8 @@ func TestCreate_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	if u.Username != "alice" {
-		t.Errorf("username = %q, want %q", u.Username, "alice")
+	if u.UsernameHash == "" {
+		t.Error("UsernameHash should not be empty")
 	}
 	if u.ID == "" {
 		t.Error("ID should not be empty")
@@ -91,8 +91,8 @@ func TestCreate_TrimsWhitespace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	if u.Username != "bob" {
-		t.Errorf("username = %q, want %q", u.Username, "bob")
+	if u.UsernameHash == "" {
+		t.Error("UsernameHash should not be empty")
 	}
 }
 
@@ -134,8 +134,8 @@ func TestGetByID_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByID() error = %v", err)
 	}
-	if got.Username != "alice" {
-		t.Errorf("username = %q, want %q", got.Username, "alice")
+	if got.UsernameHash == "" {
+		t.Error("UsernameHash should not be empty")
 	}
 }
 
@@ -156,8 +156,8 @@ func TestGetByUsername_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByUsername() error = %v", err)
 	}
-	if got.Username != "carol" {
-		t.Errorf("username = %q, want %q", got.Username, "carol")
+	if got.UsernameHash == "" {
+		t.Error("UsernameHash should not be empty")
 	}
 }
 

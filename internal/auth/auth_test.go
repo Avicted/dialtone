@@ -22,10 +22,10 @@ func newFakeUserRepo() *fakeUserRepo {
 }
 
 func (r *fakeUserRepo) Create(_ context.Context, u user.User) error {
-	if _, exists := r.users[u.Username]; exists {
+	if _, exists := r.users[u.UsernameHash]; exists {
 		return errors.New("duplicate username")
 	}
-	r.users[u.Username] = u
+	r.users[u.UsernameHash] = u
 	return nil
 }
 
@@ -38,8 +38,8 @@ func (r *fakeUserRepo) GetByID(_ context.Context, id user.ID) (user.User, error)
 	return user.User{}, errors.New("not found")
 }
 
-func (r *fakeUserRepo) GetByUsername(_ context.Context, username string) (user.User, error) {
-	u, ok := r.users[username]
+func (r *fakeUserRepo) GetByUsernameHash(_ context.Context, usernameHash string) (user.User, error) {
+	u, ok := r.users[usernameHash]
 	if !ok {
 		return user.User{}, errors.New("not found")
 	}
@@ -119,8 +119,11 @@ func TestRegister_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
-	if u.Username != "alice" {
-		t.Errorf("username = %q, want %q", u.Username, "alice")
+	if u.UsernameHash == "" {
+		t.Error("UsernameHash should not be empty")
+	}
+	if session.Username != "alice" {
+		t.Errorf("session.Username = %q, want %q", session.Username, "alice")
 	}
 	if d.UserID != u.ID {
 		t.Errorf("device.UserID = %q, want %q", d.UserID, u.ID)
@@ -188,8 +191,11 @@ func TestLogin_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login() error = %v", err)
 	}
-	if u.Username != "carol" {
-		t.Errorf("username = %q, want %q", u.Username, "carol")
+	if u.UsernameHash == "" {
+		t.Error("UsernameHash should not be empty")
+	}
+	if session.Username != "carol" {
+		t.Errorf("session.Username = %q, want %q", session.Username, "carol")
 	}
 	if d.UserID != u.ID {
 		t.Errorf("device.UserID = %q, want %q", d.UserID, u.ID)

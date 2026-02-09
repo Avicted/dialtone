@@ -35,12 +35,13 @@ type ServerMessage struct {
 }
 
 type SendMessage struct {
-	Type         string            `json:"type"`
-	RoomID       string            `json:"room_id,omitempty"`
-	Body         string            `json:"body"`
-	MessageID    string            `json:"message_id,omitempty"`
-	PublicKey    string            `json:"public_key,omitempty"`
-	KeyEnvelopes map[string]string `json:"key_envelopes,omitempty"`
+	Type          string            `json:"type"`
+	RoomID        string            `json:"room_id,omitempty"`
+	Body          string            `json:"body"`
+	MessageID     string            `json:"message_id,omitempty"`
+	PublicKey     string            `json:"public_key,omitempty"`
+	SenderNameEnc string            `json:"sender_name_enc,omitempty"`
+	KeyEnvelopes  map[string]string `json:"key_envelopes,omitempty"`
 }
 
 func ConnectWS(serverURL, token string) (*WSClient, error) {

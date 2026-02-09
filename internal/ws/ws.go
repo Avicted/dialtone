@@ -248,14 +248,15 @@ type incomingMessage struct {
 }
 
 type inboundMessage struct {
-	Type       string            `json:"type"`
-	Recipient  user.ID           `json:"recipient"`
-	RoomID     room.ID           `json:"room_id"`
-	Body       string            `json:"body"`
-	MessageID  string            `json:"message_id"`
-	ClientTime string            `json:"client_time"`
-	PublicKey  string            `json:"public_key"`
-	Envelopes  map[string]string `json:"key_envelopes,omitempty"`
+	Type          string            `json:"type"`
+	Recipient     user.ID           `json:"recipient"`
+	RoomID        room.ID           `json:"room_id"`
+	Body          string            `json:"body"`
+	MessageID     string            `json:"message_id"`
+	ClientTime    string            `json:"client_time"`
+	PublicKey     string            `json:"public_key"`
+	SenderNameEnc string            `json:"sender_name_enc,omitempty"`
+	Envelopes     map[string]string `json:"key_envelopes,omitempty"`
 }
 
 type outboundMessage struct {
@@ -324,8 +325,8 @@ func decodeIncoming(data []byte) (inboundMessage, error) {
 			return inboundMessage{}, errors.New("recipient and body are required")
 		}
 	case "message.broadcast":
-		if msg.Body == "" {
-			return inboundMessage{}, errors.New("body is required")
+		if msg.Body == "" || strings.TrimSpace(msg.SenderNameEnc) == "" {
+			return inboundMessage{}, errors.New("body and sender_name_enc are required")
 		}
 	case "room.message.send":
 		if msg.RoomID == "" || msg.Body == "" {
@@ -440,8 +441,8 @@ func (h *Hub) handleBroadcast(ctx context.Context, sender *Client, msg inboundMe
 	if sender == nil || sender.userID == "" {
 		return
 	}
-	if msg.Body == "" {
-		sender.sendError("invalid_message", "body is required")
+	if msg.Body == "" || strings.TrimSpace(msg.SenderNameEnc) == "" {
+		sender.sendError("invalid_message", "body and sender_name_enc are required")
 		return
 	}
 	if strings.TrimSpace(msg.PublicKey) == "" {
@@ -460,7 +461,7 @@ func (h *Hub) handleBroadcast(ctx context.Context, sender *Client, msg inboundMe
 		record := message.BroadcastMessage{
 			ID:              message.ID(msgID),
 			SenderID:        sender.userID,
-			SenderName:      sender.username,
+			SenderNameEnc:   strings.TrimSpace(msg.SenderNameEnc),
 			SenderPublicKey: msg.PublicKey,
 			Body:            msg.Body,
 			Envelopes:       msg.Envelopes,
@@ -476,7 +477,7 @@ func (h *Hub) handleBroadcast(ctx context.Context, sender *Client, msg inboundMe
 		Type:            "message.broadcast",
 		MessageID:       msgID,
 		Sender:          sender.userID,
-		SenderName:      sender.username,
+		SenderNameEnc:   strings.TrimSpace(msg.SenderNameEnc),
 		SenderPublicKey: msg.PublicKey,
 		Body:            msg.Body,
 		SentAt:          sentAt.Format(time.RFC3339Nano),
@@ -589,7 +590,7 @@ func (h *Hub) sendHistory(ctx context.Context, client *Client) {
 					Type:            "message.history",
 					MessageID:       string(msg.ID),
 					Sender:          msg.SenderID,
-					SenderName:      msg.SenderName,
+					SenderNameEnc:   msg.SenderNameEnc,
 					SenderPublicKey: msg.SenderPublicKey,
 					KeyEnvelope:     keyEnvelope,
 					Body:            msg.Body,
