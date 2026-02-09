@@ -433,13 +433,3 @@ func clampMin(v, minimum int) int {
 	}
 	return v
 }
-
-// isBase64 returns true if s looks like valid base64 (a quick heuristic to
-// distinguish encrypted bodies from plaintext).
-func isBase64(s string) bool {
-	if len(s) < 20 {
-		return false
-	}
-	_, err := base64.StdEncoding.DecodeString(s)
-	return err == nil
-}

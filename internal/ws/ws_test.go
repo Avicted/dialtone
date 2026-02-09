@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -326,7 +327,7 @@ func TestWithAuthValidator(t *testing.T) {
 
 func TestHub_SendHistory_NilClient(t *testing.T) {
 	hub := NewHub(nil, nil, nil)
-	hub.sendHistory(nil, nil)
+	hub.sendHistory(context.TODO(), nil)
 }
 
 func TestHub_HandleIncoming_UnknownType(t *testing.T) {
@@ -335,7 +336,7 @@ func TestHub_HandleIncoming_UnknownType(t *testing.T) {
 		send:   make(chan []byte, 8),
 		userID: "user-1",
 	}
-	hub.handleIncoming(nil, incomingMessage{
+	hub.handleIncoming(context.TODO(), incomingMessage{
 		client: c,
 		msg:    inboundMessage{Type: "unknown.type"},
 	})

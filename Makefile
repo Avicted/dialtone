@@ -12,9 +12,9 @@ test:
 	go test ./...
 
 build:
-	go build ./cmd/server
+	go build -o ./bin/server ./cmd/server
 
 build-client:
-	go build ./cmd/client
+	go build -o ./bin/client ./cmd/client
 
 build-all: build build-client
