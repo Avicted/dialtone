@@ -1,0 +1,9 @@
+bin/
+*.log
+*.tmp
+.DS_Store
+.vscode/
+
+.github/
+
+server
