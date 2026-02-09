@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/user"
@@ -54,8 +56,8 @@ func (s *Service) Register(ctx context.Context, username, password, publicKey st
 	if name == "" {
 		return user.User{}, device.Device{}, Session{}, ErrInvalidInput
 	}
-	if strings.TrimSpace(password) == "" || len(password) < 8 {
-		return user.User{}, device.Device{}, Session{}, ErrInvalidInput
+	if err := validateRegisterPassword(password); err != nil {
+		return user.User{}, device.Device{}, Session{}, err
 	}
 	if strings.TrimSpace(publicKey) == "" {
 		return user.User{}, device.Device{}, Session{}, ErrInvalidInput
@@ -161,6 +163,31 @@ func hashPassword(password string) (string, error) {
 
 func checkPassword(hashed, password string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hashed), []byte(password))
+}
+
+func validateRegisterPassword(password string) error {
+	trimmed := strings.TrimSpace(password)
+	if trimmed == "" {
+		return fmt.Errorf("%w: password is required", ErrInvalidInput)
+	}
+	if len(password) < 8 {
+		return fmt.Errorf("%w: password must be at least 8 characters", ErrInvalidInput)
+	}
+	var hasLetter bool
+	var hasDigit bool
+	for _, r := range password {
+		if unicode.IsLetter(r) {
+			hasLetter = true
+			continue
+		}
+		if unicode.IsDigit(r) {
+			hasDigit = true
+		}
+	}
+	if !hasLetter || !hasDigit {
+		return fmt.Errorf("%w: password must include a letter and a number", ErrInvalidInput)
+	}
+	return nil
 }
 
 func randomToken() (string, error) {

@@ -58,3 +58,5 @@ Migrations:
 - Use only Go standard library crypto packages
 
 
+## Database diagram
+![dialtone_db_diagram.png](dialtone_db_diagram.png)
