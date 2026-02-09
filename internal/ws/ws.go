@@ -112,7 +112,7 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithCancel(r.Context())
+	ctx, cancel := context.WithCancel(context.Background())
 	client := &Client{
 		conn:     conn,
 		hub:      h,
@@ -121,6 +121,7 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		send:     make(chan []byte, sendBuffer),
 		userID:   clientSession.UserID,
 		deviceID: clientSession.DeviceID,
+		username: clientSession.Username,
 	}
 
 	h.register <- client
@@ -140,6 +141,7 @@ type Client struct {
 	closeOnce sync.Once
 	userID    user.ID
 	deviceID  device.ID
+	username  string
 }
 
 func (c *Client) Send(msg []byte) bool {
@@ -233,11 +235,12 @@ type inboundMessage struct {
 }
 
 type outboundMessage struct {
-	Type      string  `json:"type"`
-	MessageID string  `json:"message_id"`
-	Sender    user.ID `json:"sender"`
-	Body      string  `json:"body"`
-	SentAt    string  `json:"sent_at"`
+	Type       string  `json:"type"`
+	MessageID  string  `json:"message_id"`
+	Sender     user.ID `json:"sender"`
+	SenderName string  `json:"sender_name"`
+	Body       string  `json:"body"`
+	SentAt     string  `json:"sent_at"`
 }
 
 type errorEvent struct {
@@ -287,9 +290,14 @@ func decodeIncoming(data []byte) (inboundMessage, error) {
 	}
 	msg.Type = strings.TrimSpace(msg.Type)
 	msg.Body = strings.TrimSpace(msg.Body)
-	if msg.Type == "message.send" {
+	switch msg.Type {
+	case "message.send":
 		if msg.Recipient == "" || msg.Body == "" {
 			return inboundMessage{}, errors.New("recipient and body are required")
+		}
+	case "message.broadcast":
+		if msg.Body == "" {
+			return inboundMessage{}, errors.New("body is required")
 		}
 	}
 	return msg, nil
@@ -299,6 +307,8 @@ func (h *Hub) handleIncoming(ctx context.Context, incoming incomingMessage) {
 	switch incoming.msg.Type {
 	case "message.send":
 		h.handleSend(ctx, incoming.client, incoming.msg)
+	case "message.broadcast":
+		h.handleBroadcast(ctx, incoming.client, incoming.msg)
 	default:
 		incoming.client.sendError("unsupported_type", "unsupported message type")
 	}
@@ -356,11 +366,12 @@ func (h *Hub) handleSend(ctx context.Context, sender *Client, msg inboundMessage
 				envelopeID = uuid.NewString()
 			}
 			client.sendEvent(outboundMessage{
-				Type:      "message.new",
-				MessageID: envelopeID,
-				Sender:    sender.userID,
-				Body:      msg.Body,
-				SentAt:    sentAt.Format(time.RFC3339Nano),
+				Type:       "message.new",
+				MessageID:  envelopeID,
+				Sender:     sender.userID,
+				SenderName: sender.username,
+				Body:       msg.Body,
+				SentAt:     sentAt.Format(time.RFC3339Nano),
 			})
 		}
 	}
@@ -377,12 +388,39 @@ func (h *Hub) handleSend(ctx context.Context, sender *Client, msg inboundMessage
 		}
 	}
 	sender.sendEvent(outboundMessage{
-		Type:      "message.new",
-		MessageID: ackID,
-		Sender:    sender.userID,
-		Body:      msg.Body,
-		SentAt:    sentAt.Format(time.RFC3339Nano),
+		Type:       "message.new",
+		MessageID:  ackID,
+		Sender:     sender.userID,
+		SenderName: sender.username,
+		Body:       msg.Body,
+		SentAt:     sentAt.Format(time.RFC3339Nano),
 	})
+}
+
+func (h *Hub) handleBroadcast(ctx context.Context, sender *Client, msg inboundMessage) {
+	if sender == nil || sender.userID == "" {
+		return
+	}
+	if msg.Body == "" {
+		sender.sendError("invalid_message", "body is required")
+		return
+	}
+
+	sentAt := time.Now().UTC()
+	msgID := uuid.NewString()
+
+	out := outboundMessage{
+		Type:       "message.broadcast",
+		MessageID:  msgID,
+		Sender:     sender.userID,
+		SenderName: sender.username,
+		Body:       msg.Body,
+		SentAt:     sentAt.Format(time.RFC3339Nano),
+	}
+
+	for client := range h.clients {
+		client.sendEvent(out)
+	}
 }
 
 func (h *Hub) sendHistory(ctx context.Context, client *Client) {

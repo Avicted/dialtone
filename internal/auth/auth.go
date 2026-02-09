@@ -24,6 +24,7 @@ type Session struct {
 	Token     string
 	UserID    user.ID
 	DeviceID  device.ID
+	Username  string
 	ExpiresAt time.Time
 }
 
@@ -71,7 +72,7 @@ func (s *Service) Register(ctx context.Context, username, password, publicKey st
 		return user.User{}, device.Device{}, Session{}, err
 	}
 
-	session, err := s.issue(createdUser.ID, createdDevice.ID)
+	session, err := s.issue(createdUser.ID, createdDevice.ID, createdUser.Username)
 	if err != nil {
 		return user.User{}, device.Device{}, Session{}, err
 	}
@@ -105,7 +106,7 @@ func (s *Service) Login(ctx context.Context, username, password, publicKey strin
 		return user.User{}, device.Device{}, Session{}, err
 	}
 
-	session, err := s.issue(found.ID, createdDevice.ID)
+	session, err := s.issue(found.ID, createdDevice.ID, found.Username)
 	if err != nil {
 		return user.User{}, device.Device{}, Session{}, err
 	}
@@ -119,7 +120,7 @@ func (s *Service) ValidateToken(token string) (Session, error) {
 	return s.tokens.validate(s.now(), token)
 }
 
-func (s *Service) issue(userID user.ID, deviceID device.ID) (Session, error) {
+func (s *Service) issue(userID user.ID, deviceID device.ID, username string) (Session, error) {
 	value, err := randomToken()
 	if err != nil {
 		return Session{}, err
@@ -129,6 +130,7 @@ func (s *Service) issue(userID user.ID, deviceID device.ID) (Session, error) {
 		Token:     value,
 		UserID:    userID,
 		DeviceID:  deviceID,
+		Username:  username,
 		ExpiresAt: expires,
 	}
 	s.tokens.store(session)
