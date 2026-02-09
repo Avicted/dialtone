@@ -101,9 +101,15 @@ func (s *Service) Login(ctx context.Context, username, password, publicKey strin
 		return user.User{}, device.Device{}, Session{}, ErrUnauthorized
 	}
 
-	createdDevice, err := s.devices.Create(ctx, found.ID, publicKey)
+	createdDevice, err := s.devices.GetByUserAndPublicKey(ctx, found.ID, publicKey)
 	if err != nil {
-		return user.User{}, device.Device{}, Session{}, err
+		if !errors.Is(err, device.ErrNotFound) {
+			return user.User{}, device.Device{}, Session{}, err
+		}
+		createdDevice, err = s.devices.Create(ctx, found.ID, publicKey)
+		if err != nil {
+			return user.User{}, device.Device{}, Session{}, err
+		}
 	}
 
 	session, err := s.issue(found.ID, createdDevice.ID, found.Username)

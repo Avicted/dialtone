@@ -9,11 +9,13 @@ import (
 
 // BroadcastMessage is a message sent to all connected clients.
 type BroadcastMessage struct {
-	ID         ID
-	SenderID   user.ID
-	SenderName string
-	Body       string
-	SentAt     time.Time
+	ID              ID
+	SenderID        user.ID
+	SenderName      string
+	SenderPublicKey string
+	Body            string
+	Envelopes       map[string]string
+	SentAt          time.Time
 }
 
 // BroadcastRepository persists and retrieves broadcast messages.

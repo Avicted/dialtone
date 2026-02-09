@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -93,9 +94,27 @@ func (r *deviceRepo) GetByID(ctx context.Context, id device.ID) (device.Device, 
 	var lastSeen sql.NullTime
 	if err := row.Scan(&d.ID, &d.UserID, &d.PublicKey, &d.CreatedAt, &lastSeen); err != nil {
 		if err == sql.ErrNoRows {
-			return device.Device{}, ErrNotFound
+			return device.Device{}, device.ErrNotFound
 		}
 		return device.Device{}, fmt.Errorf("select device by id: %w", err)
+	}
+	if lastSeen.Valid {
+		t := lastSeen.Time
+		d.LastSeenAt = &t
+	}
+	return d, nil
+}
+
+func (r *deviceRepo) GetByUserAndPublicKey(ctx context.Context, userID user.ID, publicKey string) (device.Device, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT id, user_id, public_key, created_at, last_seen_at
+		FROM devices WHERE user_id = $1 AND public_key = $2`, userID, publicKey)
+	var d device.Device
+	var lastSeen sql.NullTime
+	if err := row.Scan(&d.ID, &d.UserID, &d.PublicKey, &d.CreatedAt, &lastSeen); err != nil {
+		if err == sql.ErrNoRows {
+			return device.Device{}, device.ErrNotFound
+		}
+		return device.Device{}, fmt.Errorf("select device by user and public key: %w", err)
 	}
 	if lastSeen.Valid {
 		t := lastSeen.Time
@@ -109,6 +128,33 @@ func (r *deviceRepo) ListByUser(ctx context.Context, userID user.ID) ([]device.D
 		FROM devices WHERE user_id = $1 ORDER BY created_at`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list devices by user: %w", err)
+	}
+	defer rows.Close()
+
+	var devices []device.Device
+	for rows.Next() {
+		var d device.Device
+		var lastSeen sql.NullTime
+		if err := rows.Scan(&d.ID, &d.UserID, &d.PublicKey, &d.CreatedAt, &lastSeen); err != nil {
+			return nil, fmt.Errorf("scan device: %w", err)
+		}
+		if lastSeen.Valid {
+			t := lastSeen.Time
+			d.LastSeenAt = &t
+		}
+		devices = append(devices, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate devices: %w", err)
+	}
+	return devices, nil
+}
+
+func (r *deviceRepo) ListAll(ctx context.Context) ([]device.Device, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id, user_id, public_key, created_at, last_seen_at
+		FROM devices ORDER BY created_at`)
+	if err != nil {
+		return nil, fmt.Errorf("list devices: %w", err)
 	}
 	defer rows.Close()
 
@@ -146,7 +192,7 @@ func (r *deviceRepo) UpdateLastSeen(ctx context.Context, id device.ID, lastSeenA
 		return fmt.Errorf("rows affected: %w", err)
 	}
 	if rows == 0 {
-		return ErrNotFound
+		return device.ErrNotFound
 	}
 	return nil
 }
@@ -211,10 +257,19 @@ func (r *broadcastRepo) Save(ctx context.Context, msg message.BroadcastMessage) 
 		return fmt.Errorf("broadcast message fields are required")
 	}
 
+	var envelopes any
+	if msg.Envelopes != nil {
+		data, err := json.Marshal(msg.Envelopes)
+		if err != nil {
+			return fmt.Errorf("encode envelopes: %w", err)
+		}
+		envelopes = data
+	}
+
 	_, err := r.db.ExecContext(ctx, `INSERT INTO broadcast_messages
-		(id, sender_id, sender_name, body, sent_at)
-		VALUES ($1, $2, $3, $4, $5)`,
-		msg.ID, msg.SenderID, msg.SenderName, msg.Body, msg.SentAt)
+		(id, sender_id, sender_name, sender_public_key, body, key_envelopes, sent_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		msg.ID, msg.SenderID, msg.SenderName, msg.SenderPublicKey, msg.Body, envelopes, msg.SentAt)
 	if err != nil {
 		return fmt.Errorf("insert broadcast message: %w", err)
 	}
@@ -226,7 +281,7 @@ func (r *broadcastRepo) ListRecent(ctx context.Context, limit int) ([]message.Br
 		return nil, fmt.Errorf("limit must be positive")
 	}
 
-	rows, err := r.db.QueryContext(ctx, `SELECT id, sender_id, sender_name, body, sent_at
+	rows, err := r.db.QueryContext(ctx, `SELECT id, sender_id, sender_name, sender_public_key, body, key_envelopes, sent_at
 		FROM broadcast_messages ORDER BY sent_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list broadcasts: %w", err)
@@ -236,8 +291,16 @@ func (r *broadcastRepo) ListRecent(ctx context.Context, limit int) ([]message.Br
 	var msgs []message.BroadcastMessage
 	for rows.Next() {
 		var msg message.BroadcastMessage
-		if err := rows.Scan(&msg.ID, &msg.SenderID, &msg.SenderName, &msg.Body, &msg.SentAt); err != nil {
+		var envelopes sql.NullString
+		if err := rows.Scan(&msg.ID, &msg.SenderID, &msg.SenderName, &msg.SenderPublicKey, &msg.Body, &envelopes, &msg.SentAt); err != nil {
 			return nil, fmt.Errorf("scan broadcast: %w", err)
+		}
+		if envelopes.Valid && envelopes.String != "" {
+			var decoded map[string]string
+			if err := json.Unmarshal([]byte(envelopes.String), &decoded); err != nil {
+				return nil, fmt.Errorf("decode envelopes: %w", err)
+			}
+			msg.Envelopes = decoded
 		}
 		msgs = append(msgs, msg)
 	}

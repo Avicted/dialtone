@@ -61,3 +61,23 @@ func (s *Service) ListByUser(ctx context.Context, userID user.ID) ([]Device, err
 	}
 	return s.repo.ListByUser(ctx, userID)
 }
+
+// ListAll returns all devices in the system.
+func (s *Service) ListAll(ctx context.Context) ([]Device, error) {
+	if s.repo == nil {
+		return nil, errors.New("repository is required")
+	}
+	return s.repo.ListAll(ctx)
+}
+
+// GetByUserAndPublicKey returns a device matching a user and public key.
+func (s *Service) GetByUserAndPublicKey(ctx context.Context, userID user.ID, publicKey string) (Device, error) {
+	if s.repo == nil {
+		return Device{}, errors.New("repository is required")
+	}
+	key := strings.TrimSpace(publicKey)
+	if userID == "" || key == "" {
+		return Device{}, ErrInvalidInput
+	}
+	return s.repo.GetByUserAndPublicKey(ctx, userID, key)
+}

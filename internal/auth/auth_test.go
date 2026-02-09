@@ -65,7 +65,16 @@ func (r *fakeDeviceRepo) GetByID(_ context.Context, id device.ID) (device.Device
 			return d, nil
 		}
 	}
-	return device.Device{}, errors.New("not found")
+	return device.Device{}, device.ErrNotFound
+}
+
+func (r *fakeDeviceRepo) GetByUserAndPublicKey(_ context.Context, userID user.ID, publicKey string) (device.Device, error) {
+	for _, d := range r.devices {
+		if d.UserID == userID && d.PublicKey == publicKey {
+			return d, nil
+		}
+	}
+	return device.Device{}, device.ErrNotFound
 }
 
 func (r *fakeDeviceRepo) ListByUser(_ context.Context, userID user.ID) ([]device.Device, error) {
@@ -76,6 +85,10 @@ func (r *fakeDeviceRepo) ListByUser(_ context.Context, userID user.ID) ([]device
 		}
 	}
 	return result, nil
+}
+
+func (r *fakeDeviceRepo) ListAll(_ context.Context) ([]device.Device, error) {
+	return append([]device.Device(nil), r.devices...), nil
 }
 
 func (r *fakeDeviceRepo) UpdateLastSeen(_ context.Context, id device.ID, t time.Time) error {

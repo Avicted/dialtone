@@ -248,13 +248,22 @@ func (h *Handler) handleDeviceKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	all := r.URL.Query().Get("all") == "1"
 	userID := user.ID(r.URL.Query().Get("user_id"))
-	if userID == "" {
+	if !all && userID == "" {
 		writeError(w, http.StatusBadRequest, errors.New("user_id query parameter is required"))
 		return
 	}
 
-	devices, err := h.devices.ListByUser(r.Context(), userID)
+	var (
+		devices []device.Device
+		err     error
+	)
+	if all {
+		devices, err = h.devices.ListAll(r.Context())
+	} else {
+		devices, err = h.devices.ListByUser(r.Context(), userID)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -268,10 +277,11 @@ func (h *Handler) handleDeviceKeys(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeJSON(w, http.StatusOK, deviceKeysResponse{
-		UserID: userID,
-		Keys:   keys,
-	})
+	resp := deviceKeysResponse{Keys: keys}
+	if !all {
+		resp.UserID = userID
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {

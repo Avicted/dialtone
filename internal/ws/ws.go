@@ -228,12 +228,13 @@ type incomingMessage struct {
 }
 
 type inboundMessage struct {
-	Type       string  `json:"type"`
-	Recipient  user.ID `json:"recipient"`
-	Body       string  `json:"body"`
-	MessageID  string  `json:"message_id"`
-	ClientTime string  `json:"client_time"`
-	PublicKey  string  `json:"public_key"`
+	Type       string            `json:"type"`
+	Recipient  user.ID           `json:"recipient"`
+	Body       string            `json:"body"`
+	MessageID  string            `json:"message_id"`
+	ClientTime string            `json:"client_time"`
+	PublicKey  string            `json:"public_key"`
+	Envelopes  map[string]string `json:"key_envelopes,omitempty"`
 }
 
 type outboundMessage struct {
@@ -242,6 +243,7 @@ type outboundMessage struct {
 	Sender          user.ID `json:"sender"`
 	SenderName      string  `json:"sender_name"`
 	SenderPublicKey string  `json:"sender_public_key,omitempty"`
+	KeyEnvelope     string  `json:"key_envelope,omitempty"`
 	Body            string  `json:"body"`
 	SentAt          string  `json:"sent_at"`
 }
@@ -408,17 +410,27 @@ func (h *Hub) handleBroadcast(ctx context.Context, sender *Client, msg inboundMe
 		sender.sendError("invalid_message", "body is required")
 		return
 	}
+	if strings.TrimSpace(msg.PublicKey) == "" {
+		sender.sendError("invalid_message", "public_key is required")
+		return
+	}
+	if len(msg.Envelopes) == 0 {
+		sender.sendError("invalid_message", "key_envelopes are required")
+		return
+	}
 
 	sentAt := time.Now().UTC()
 	msgID := uuid.NewString()
 
 	if h.broadcasts != nil {
 		record := message.BroadcastMessage{
-			ID:         message.ID(msgID),
-			SenderID:   sender.userID,
-			SenderName: sender.username,
-			Body:       msg.Body,
-			SentAt:     sentAt,
+			ID:              message.ID(msgID),
+			SenderID:        sender.userID,
+			SenderName:      sender.username,
+			SenderPublicKey: msg.PublicKey,
+			Body:            msg.Body,
+			Envelopes:       msg.Envelopes,
+			SentAt:          sentAt,
 		}
 		if err := h.broadcasts.Save(ctx, record); err != nil {
 			sender.sendError("server_error", "failed to store message")
@@ -437,7 +449,11 @@ func (h *Hub) handleBroadcast(ctx context.Context, sender *Client, msg inboundMe
 	}
 
 	for client := range h.clients {
-		client.sendEvent(out)
+		perClient := out
+		if msg.Envelopes != nil {
+			perClient.KeyEnvelope = msg.Envelopes[string(client.deviceID)]
+		}
+		client.sendEvent(perClient)
 	}
 }
 
@@ -451,13 +467,19 @@ func (h *Hub) sendHistory(ctx context.Context, client *Client) {
 		msgs, err := h.broadcasts.ListRecent(ctx, 100)
 		if err == nil {
 			for _, msg := range msgs {
+				keyEnvelope := ""
+				if msg.Envelopes != nil {
+					keyEnvelope = msg.Envelopes[string(client.deviceID)]
+				}
 				client.sendEvent(outboundMessage{
-					Type:       "message.history",
-					MessageID:  string(msg.ID),
-					Sender:     msg.SenderID,
-					SenderName: msg.SenderName,
-					Body:       msg.Body,
-					SentAt:     msg.SentAt.UTC().Format(time.RFC3339Nano),
+					Type:            "message.history",
+					MessageID:       string(msg.ID),
+					Sender:          msg.SenderID,
+					SenderName:      msg.SenderName,
+					SenderPublicKey: msg.SenderPublicKey,
+					KeyEnvelope:     keyEnvelope,
+					Body:            msg.Body,
+					SentAt:          msg.SentAt.UTC().Format(time.RFC3339Nano),
 				})
 			}
 		}
