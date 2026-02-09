@@ -2,7 +2,10 @@ module github.com/Avicted/dialtone
 
 go 1.22
 
-require github.com/jackc/pgx/v5 v5.5.5
+require (
+	github.com/jackc/pgx/v5 v5.5.5
+	nhooyr.io/websocket v1.8.10
+)
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect

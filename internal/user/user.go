@@ -1,12 +1,20 @@
 package user
 
+import (
+	"context"
+	"time"
+)
+
 type ID string
 
 type User struct {
-	ID   ID
-	Name string
+	ID        ID
+	Username  string
+	CreatedAt time.Time
 }
 
 type Repository interface {
-	GetByID(id ID) (User, error)
+	Create(ctx context.Context, user User) error
+	GetByID(ctx context.Context, id ID) (User, error)
+	GetByUsername(ctx context.Context, username string) (User, error)
 }

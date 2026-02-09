@@ -5,11 +5,17 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/Avicted/dialtone/internal/device"
+	"github.com/Avicted/dialtone/internal/message"
+	"github.com/Avicted/dialtone/internal/user"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 type PostgresStore struct {
-	db *sql.DB
+	db       *sql.DB
+	users    *userRepo
+	devices  *deviceRepo
+	messages *messageRepo
 }
 
 func NewPostgresStore(ctx context.Context, dbURL string) (*PostgresStore, error) {
@@ -27,7 +33,11 @@ func NewPostgresStore(ctx context.Context, dbURL string) (*PostgresStore, error)
 		return nil, fmt.Errorf("ping db: %w", err)
 	}
 
-	return &PostgresStore{db: db}, nil
+	store := &PostgresStore{db: db}
+	store.users = &userRepo{db: db}
+	store.devices = &deviceRepo{db: db}
+	store.messages = &messageRepo{db: db}
+	return store, nil
 }
 
 func (s *PostgresStore) Close(ctx context.Context) error {
@@ -38,4 +48,16 @@ func (s *PostgresStore) Close(ctx context.Context) error {
 func (s *PostgresStore) Migrate(ctx context.Context) error {
 	migrator := NewMigrator(s.db, migrationsFS)
 	return migrator.Up(ctx)
+}
+
+func (s *PostgresStore) Users() user.Repository {
+	return s.users
+}
+
+func (s *PostgresStore) Devices() device.Repository {
+	return s.devices
+}
+
+func (s *PostgresStore) Messages() message.Repository {
+	return s.messages
 }
