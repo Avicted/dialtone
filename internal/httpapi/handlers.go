@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Avicted/dialtone/internal/auth"
 	"github.com/Avicted/dialtone/internal/device"
+	"github.com/Avicted/dialtone/internal/storage"
 	"github.com/Avicted/dialtone/internal/user"
 )
 
@@ -18,18 +20,117 @@ const (
 type Handler struct {
 	users   *user.Service
 	devices *device.Service
+	auth    *auth.Service
 }
 
-func NewHandler(users *user.Service, devices *device.Service) *Handler {
+func NewHandler(users *user.Service, devices *device.Service, auth *auth.Service) *Handler {
 	return &Handler{
 		users:   users,
 		devices: devices,
+		auth:    auth,
 	}
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/users", h.handleUsers)
 	mux.HandleFunc("/devices", h.handleDevices)
+	mux.HandleFunc("/auth/register", h.handleRegister)
+	mux.HandleFunc("/auth/login", h.handleLogin)
+}
+
+type authRequest struct {
+	Username  string `json:"username"`
+	Password  string `json:"password"`
+	PublicKey string `json:"public_key"`
+}
+
+type authResponse struct {
+	Token        string    `json:"token"`
+	UserID       user.ID   `json:"user_id"`
+	DeviceID     device.ID `json:"device_id"`
+	ExpiresAt    string    `json:"expires_at"`
+	Username     string    `json:"username"`
+	DevicePubKey string    `json:"device_public_key"`
+}
+
+func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.auth == nil {
+		writeError(w, http.StatusInternalServerError, errors.New("auth service not configured"))
+		return
+	}
+
+	var req authRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	createdUser, createdDevice, session, err := h.auth.Register(r.Context(), req.Username, req.Password, req.PublicKey)
+	if err != nil {
+		switch {
+		case errors.Is(err, user.ErrInvalidInput), errors.Is(err, device.ErrInvalidInput), errors.Is(err, auth.ErrInvalidInput):
+			writeError(w, http.StatusBadRequest, err)
+		default:
+			writeError(w, http.StatusInternalServerError, err)
+		}
+		return
+	}
+
+	resp := authResponse{
+		Token:        session.Token,
+		UserID:       createdUser.ID,
+		DeviceID:     createdDevice.ID,
+		ExpiresAt:    session.ExpiresAt.UTC().Format(timeLayout),
+		Username:     createdUser.Username,
+		DevicePubKey: createdDevice.PublicKey,
+	}
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.auth == nil {
+		writeError(w, http.StatusInternalServerError, errors.New("auth service not configured"))
+		return
+	}
+
+	var req authRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	createdUser, createdDevice, session, err := h.auth.Login(r.Context(), req.Username, req.Password, req.PublicKey)
+	if err != nil {
+		switch {
+		case errors.Is(err, auth.ErrUnauthorized):
+			writeError(w, http.StatusUnauthorized, err)
+		case errors.Is(err, user.ErrInvalidInput), errors.Is(err, device.ErrInvalidInput), errors.Is(err, auth.ErrInvalidInput):
+			writeError(w, http.StatusBadRequest, err)
+		default:
+			writeError(w, http.StatusInternalServerError, err)
+		}
+		return
+	}
+
+	resp := authResponse{
+		Token:        session.Token,
+		UserID:       createdUser.ID,
+		DeviceID:     createdDevice.ID,
+		ExpiresAt:    session.ExpiresAt.UTC().Format(timeLayout),
+		Username:     createdUser.Username,
+		DevicePubKey: createdDevice.PublicKey,
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 type createUserRequest struct {
@@ -93,6 +194,19 @@ func (h *Handler) handleDevices(w http.ResponseWriter, r *http.Request) {
 	var req createDeviceRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	if _, err := h.users.GetByID(r.Context(), req.UserID); err != nil {
+		if errors.Is(err, user.ErrInvalidInput) {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 

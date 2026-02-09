@@ -20,8 +20,13 @@ func (r *userRepo) Create(ctx context.Context, u user.User) error {
 		return fmt.Errorf("user id, username, and created_at are required")
 	}
 
-	_, err := r.db.ExecContext(ctx, `INSERT INTO users (id, username, created_at) VALUES ($1, $2, $3)`,
-		u.ID, u.Username, u.CreatedAt)
+	var passwordHash any
+	if u.PasswordHash != "" {
+		passwordHash = u.PasswordHash
+	}
+
+	_, err := r.db.ExecContext(ctx, `INSERT INTO users (id, username, password_hash, created_at)
+		VALUES ($1, $2, $3, $4)`, u.ID, u.Username, passwordHash, u.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert user: %w", err)
 	}
@@ -29,25 +34,33 @@ func (r *userRepo) Create(ctx context.Context, u user.User) error {
 }
 
 func (r *userRepo) GetByID(ctx context.Context, id user.ID) (user.User, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT id, username, created_at FROM users WHERE id = $1`, id)
+	row := r.db.QueryRowContext(ctx, `SELECT id, username, password_hash, created_at FROM users WHERE id = $1`, id)
 	var u user.User
-	if err := row.Scan(&u.ID, &u.Username, &u.CreatedAt); err != nil {
+	var passwordHash sql.NullString
+	if err := row.Scan(&u.ID, &u.Username, &passwordHash, &u.CreatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return user.User{}, ErrNotFound
 		}
 		return user.User{}, fmt.Errorf("select user by id: %w", err)
 	}
+	if passwordHash.Valid {
+		u.PasswordHash = passwordHash.String
+	}
 	return u, nil
 }
 
 func (r *userRepo) GetByUsername(ctx context.Context, username string) (user.User, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT id, username, created_at FROM users WHERE username = $1`, username)
+	row := r.db.QueryRowContext(ctx, `SELECT id, username, password_hash, created_at FROM users WHERE username = $1`, username)
 	var u user.User
-	if err := row.Scan(&u.ID, &u.Username, &u.CreatedAt); err != nil {
+	var passwordHash sql.NullString
+	if err := row.Scan(&u.ID, &u.Username, &passwordHash, &u.CreatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return user.User{}, ErrNotFound
 		}
 		return user.User{}, fmt.Errorf("select user by username: %w", err)
+	}
+	if passwordHash.Valid {
+		u.PasswordHash = passwordHash.String
 	}
 	return u, nil
 }
