@@ -50,3 +50,14 @@ func (s *Service) Create(ctx context.Context, userID user.ID, publicKey string) 
 	}
 	return d, nil
 }
+
+// ListByUser returns all devices for a given user.
+func (s *Service) ListByUser(ctx context.Context, userID user.ID) ([]Device, error) {
+	if s.repo == nil {
+		return nil, errors.New("repository is required")
+	}
+	if userID == "" {
+		return nil, ErrInvalidInput
+	}
+	return s.repo.ListByUser(ctx, userID)
+}

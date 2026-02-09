@@ -34,6 +34,7 @@ func NewHandler(users *user.Service, devices *device.Service, auth *auth.Service
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/users", h.handleUsers)
 	mux.HandleFunc("/devices", h.handleDevices)
+	mux.HandleFunc("/devices/keys", h.handleDeviceKeys)
 	mux.HandleFunc("/auth/register", h.handleRegister)
 	mux.HandleFunc("/auth/login", h.handleLogin)
 }
@@ -227,6 +228,50 @@ func (h *Handler) handleDevices(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: created.CreatedAt.UTC().Format(timeLayout),
 	}
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+type deviceKeyInfo struct {
+	DeviceID  device.ID `json:"device_id"`
+	PublicKey string    `json:"public_key"`
+}
+
+type deviceKeysResponse struct {
+	UserID user.ID         `json:"user_id"`
+	Keys   []deviceKeyInfo `json:"keys"`
+}
+
+// handleDeviceKeys returns the public keys of all devices belonging to a user.
+// GET /devices/keys?user_id=<id>
+func (h *Handler) handleDeviceKeys(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID := user.ID(r.URL.Query().Get("user_id"))
+	if userID == "" {
+		writeError(w, http.StatusBadRequest, errors.New("user_id query parameter is required"))
+		return
+	}
+
+	devices, err := h.devices.ListByUser(r.Context(), userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	keys := make([]deviceKeyInfo, 0, len(devices))
+	for _, d := range devices {
+		keys = append(keys, deviceKeyInfo{
+			DeviceID:  d.ID,
+			PublicKey: d.PublicKey,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, deviceKeysResponse{
+		UserID: userID,
+		Keys:   keys,
+	})
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {

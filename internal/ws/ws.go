@@ -233,15 +233,17 @@ type inboundMessage struct {
 	Body       string  `json:"body"`
 	MessageID  string  `json:"message_id"`
 	ClientTime string  `json:"client_time"`
+	PublicKey  string  `json:"public_key"`
 }
 
 type outboundMessage struct {
-	Type       string  `json:"type"`
-	MessageID  string  `json:"message_id"`
-	Sender     user.ID `json:"sender"`
-	SenderName string  `json:"sender_name"`
-	Body       string  `json:"body"`
-	SentAt     string  `json:"sent_at"`
+	Type            string  `json:"type"`
+	MessageID       string  `json:"message_id"`
+	Sender          user.ID `json:"sender"`
+	SenderName      string  `json:"sender_name"`
+	SenderPublicKey string  `json:"sender_public_key,omitempty"`
+	Body            string  `json:"body"`
+	SentAt          string  `json:"sent_at"`
 }
 
 type errorEvent struct {
@@ -425,12 +427,13 @@ func (h *Hub) handleBroadcast(ctx context.Context, sender *Client, msg inboundMe
 	}
 
 	out := outboundMessage{
-		Type:       "message.broadcast",
-		MessageID:  msgID,
-		Sender:     sender.userID,
-		SenderName: sender.username,
-		Body:       msg.Body,
-		SentAt:     sentAt.Format(time.RFC3339Nano),
+		Type:            "message.broadcast",
+		MessageID:       msgID,
+		Sender:          sender.userID,
+		SenderName:      sender.username,
+		SenderPublicKey: msg.PublicKey,
+		Body:            msg.Body,
+		SentAt:          sentAt.Format(time.RFC3339Nano),
 	}
 
 	for client := range h.clients {
