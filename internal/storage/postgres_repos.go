@@ -372,11 +372,11 @@ type roomRepo struct {
 }
 
 func (r *roomRepo) CreateRoom(ctx context.Context, rm room.Room) error {
-	if rm.ID == "" || rm.Name == "" || rm.CreatedBy == "" || rm.CreatedAt.IsZero() {
+	if rm.ID == "" || rm.NameEnc == "" || rm.CreatedBy == "" || rm.CreatedAt.IsZero() {
 		return fmt.Errorf("room fields are required")
 	}
-	_, err := r.db.ExecContext(ctx, `INSERT INTO rooms (id, name, created_by, created_at)
-		VALUES ($1, $2, $3, $4)`, rm.ID, rm.Name, rm.CreatedBy, rm.CreatedAt)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO rooms (id, name, name_enc, created_by, created_at)
+		VALUES ($1, $2, $3, $4, $5)`, rm.ID, "", rm.NameEnc, rm.CreatedBy, rm.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert room: %w", err)
 	}
@@ -384,9 +384,9 @@ func (r *roomRepo) CreateRoom(ctx context.Context, rm room.Room) error {
 }
 
 func (r *roomRepo) GetRoom(ctx context.Context, id room.ID) (room.Room, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT id, name, created_by, created_at FROM rooms WHERE id = $1`, id)
+	row := r.db.QueryRowContext(ctx, `SELECT id, name, name_enc, created_by, created_at FROM rooms WHERE id = $1`, id)
 	var rm room.Room
-	if err := row.Scan(&rm.ID, &rm.Name, &rm.CreatedBy, &rm.CreatedAt); err != nil {
+	if err := row.Scan(&rm.ID, &rm.Name, &rm.NameEnc, &rm.CreatedBy, &rm.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return room.Room{}, ErrNotFound
 		}
@@ -396,7 +396,7 @@ func (r *roomRepo) GetRoom(ctx context.Context, id room.ID) (room.Room, error) {
 }
 
 func (r *roomRepo) ListRoomsForUser(ctx context.Context, userID user.ID) ([]room.Room, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT r.id, r.name, r.created_by, r.created_at
+	rows, err := r.db.QueryContext(ctx, `SELECT r.id, r.name, r.name_enc, r.created_by, r.created_at
 		FROM rooms r
 		JOIN room_members m ON m.room_id = r.id
 		WHERE m.user_id = $1
@@ -409,7 +409,7 @@ func (r *roomRepo) ListRoomsForUser(ctx context.Context, userID user.ID) ([]room
 	var rooms []room.Room
 	for rows.Next() {
 		var rm room.Room
-		if err := rows.Scan(&rm.ID, &rm.Name, &rm.CreatedBy, &rm.CreatedAt); err != nil {
+		if err := rows.Scan(&rm.ID, &rm.Name, &rm.NameEnc, &rm.CreatedBy, &rm.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan room: %w", err)
 		}
 		rooms = append(rooms, rm)
@@ -420,13 +420,13 @@ func (r *roomRepo) ListRoomsForUser(ctx context.Context, userID user.ID) ([]room
 	return rooms, nil
 }
 
-func (r *roomRepo) AddMember(ctx context.Context, roomID room.ID, userID user.ID, joinedAt time.Time) error {
-	if roomID == "" || userID == "" || joinedAt.IsZero() {
+func (r *roomRepo) AddMember(ctx context.Context, roomID room.ID, userID user.ID, displayNameEnc string, joinedAt time.Time) error {
+	if roomID == "" || userID == "" || displayNameEnc == "" || joinedAt.IsZero() {
 		return fmt.Errorf("member fields are required")
 	}
-	_, err := r.db.ExecContext(ctx, `INSERT INTO room_members (room_id, user_id, joined_at)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (room_id, user_id) DO NOTHING`, roomID, userID, joinedAt)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO room_members (room_id, user_id, display_name_enc, joined_at)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (room_id, user_id) DO NOTHING`, roomID, userID, displayNameEnc, joinedAt)
 	if err != nil {
 		return fmt.Errorf("insert member: %w", err)
 	}
@@ -445,17 +445,17 @@ func (r *roomRepo) IsMember(ctx context.Context, roomID room.ID, userID user.ID)
 	return true, nil
 }
 
-func (r *roomRepo) ListMembers(ctx context.Context, roomID room.ID) ([]user.ID, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT user_id FROM room_members WHERE room_id = $1`, roomID)
+func (r *roomRepo) ListMembers(ctx context.Context, roomID room.ID) ([]room.Member, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT user_id, display_name_enc FROM room_members WHERE room_id = $1`, roomID)
 	if err != nil {
 		return nil, fmt.Errorf("list members: %w", err)
 	}
 	defer rows.Close()
 
-	var members []user.ID
+	var members []room.Member
 	for rows.Next() {
-		var member user.ID
-		if err := rows.Scan(&member); err != nil {
+		var member room.Member
+		if err := rows.Scan(&member.UserID, &member.DisplayNameEnc); err != nil {
 			return nil, fmt.Errorf("scan member: %w", err)
 		}
 		members = append(members, member)
@@ -464,6 +464,21 @@ func (r *roomRepo) ListMembers(ctx context.Context, roomID room.ID) ([]user.ID, 
 		return nil, fmt.Errorf("iterate members: %w", err)
 	}
 	return members, nil
+}
+
+func (r *roomRepo) GetMemberDisplayNameEnc(ctx context.Context, roomID room.ID, userID user.ID) (string, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT display_name_enc FROM room_members WHERE room_id = $1 AND user_id = $2`, roomID, userID)
+	var displayName string
+	if err := row.Scan(&displayName); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("select display name: %w", err)
+	}
+	if displayName == "" {
+		return "", ErrNotFound
+	}
+	return displayName, nil
 }
 
 func (r *roomRepo) CreateInvite(ctx context.Context, invite room.Invite) error {
@@ -478,8 +493,8 @@ func (r *roomRepo) CreateInvite(ctx context.Context, invite room.Invite) error {
 	return nil
 }
 
-func (r *roomRepo) ConsumeInvite(ctx context.Context, token string, userID user.ID, now time.Time) (room.Invite, error) {
-	if token == "" || userID == "" || now.IsZero() {
+func (r *roomRepo) ConsumeInvite(ctx context.Context, token string, userID user.ID, displayNameEnc string, now time.Time) (room.Invite, error) {
+	if token == "" || userID == "" || displayNameEnc == "" || now.IsZero() {
 		return room.Invite{}, fmt.Errorf("consume fields are required")
 	}
 
@@ -519,9 +534,9 @@ func (r *roomRepo) ConsumeInvite(ctx context.Context, token string, userID user.
 		return room.Invite{}, ErrNotFound
 	}
 
-	if _, err := tx.ExecContext(ctx, `INSERT INTO room_members (room_id, user_id, joined_at)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (room_id, user_id) DO NOTHING`, invite.RoomID, userID, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO room_members (room_id, user_id, display_name_enc, joined_at)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (room_id, user_id) DO NOTHING`, invite.RoomID, userID, displayNameEnc, now); err != nil {
 		_ = tx.Rollback()
 		return room.Invite{}, fmt.Errorf("insert member: %w", err)
 	}
@@ -533,11 +548,11 @@ func (r *roomRepo) ConsumeInvite(ctx context.Context, token string, userID user.
 }
 
 func (r *roomRepo) SaveMessage(ctx context.Context, msg room.Message) error {
-	if msg.ID == "" || msg.RoomID == "" || msg.SenderID == "" || msg.SenderName == "" || msg.Body == "" || msg.SentAt.IsZero() {
+	if msg.ID == "" || msg.RoomID == "" || msg.SenderID == "" || msg.SenderNameEnc == "" || msg.Body == "" || msg.SentAt.IsZero() {
 		return fmt.Errorf("room message fields are required")
 	}
-	_, err := r.db.ExecContext(ctx, `INSERT INTO room_messages (id, room_id, sender_id, sender_name, body, sent_at)
-		VALUES ($1, $2, $3, $4, $5, $6)`, msg.ID, msg.RoomID, msg.SenderID, msg.SenderName, msg.Body, msg.SentAt)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO room_messages (id, room_id, sender_id, sender_name, sender_name_enc, body, sent_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`, msg.ID, msg.RoomID, msg.SenderID, "", msg.SenderNameEnc, msg.Body, msg.SentAt)
 	if err != nil {
 		return fmt.Errorf("insert room message: %w", err)
 	}
@@ -548,7 +563,7 @@ func (r *roomRepo) ListRecentMessages(ctx context.Context, roomID room.ID, limit
 	if roomID == "" || limit <= 0 {
 		return nil, fmt.Errorf("room id and positive limit are required")
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT id, room_id, sender_id, sender_name, body, sent_at
+	rows, err := r.db.QueryContext(ctx, `SELECT id, room_id, sender_id, sender_name, sender_name_enc, body, sent_at
 		FROM room_messages WHERE room_id = $1 ORDER BY sent_at DESC LIMIT $2`, roomID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list room messages: %w", err)
@@ -558,7 +573,7 @@ func (r *roomRepo) ListRecentMessages(ctx context.Context, roomID room.ID, limit
 	var msgs []room.Message
 	for rows.Next() {
 		var msg room.Message
-		if err := rows.Scan(&msg.ID, &msg.RoomID, &msg.SenderID, &msg.SenderName, &msg.Body, &msg.SentAt); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.RoomID, &msg.SenderID, &msg.SenderName, &msg.SenderNameEnc, &msg.Body, &msg.SentAt); err != nil {
 			return nil, fmt.Errorf("scan room message: %w", err)
 		}
 		msgs = append(msgs, msg)

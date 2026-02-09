@@ -33,7 +33,7 @@ type apiError struct {
 
 type RoomResponse struct {
 	ID        string `json:"id"`
-	Name      string `json:"name"`
+	NameEnc   string `json:"name_enc"`
 	CreatedBy string `json:"created_by"`
 	CreatedAt string `json:"created_at"`
 }
@@ -59,18 +59,18 @@ type JoinRoomResponse struct {
 }
 
 type RoomMessageResponse struct {
-	ID         string `json:"id"`
-	RoomID     string `json:"room_id"`
-	SenderID   string `json:"sender_id"`
-	SenderName string `json:"sender_name"`
-	Body       string `json:"body"`
-	SentAt     string `json:"sent_at"`
+	ID            string `json:"id"`
+	RoomID        string `json:"room_id"`
+	SenderID      string `json:"sender_id"`
+	SenderNameEnc string `json:"sender_name_enc"`
+	Body          string `json:"body"`
+	SentAt        string `json:"sent_at"`
 }
 
 type RoomMemberResponse struct {
-	UserID   string `json:"user_id"`
-	Username string `json:"username"`
-	Online   bool   `json:"online"`
+	UserID         string `json:"user_id"`
+	DisplayNameEnc string `json:"display_name_enc"`
+	Online         bool   `json:"online"`
 }
 
 type RoomMembersResponse struct {
@@ -211,8 +211,8 @@ func (c *APIClient) FetchAllDeviceKeys(ctx context.Context) (*DeviceKeysResponse
 	return &keysResp, nil
 }
 
-func (c *APIClient) CreateRoom(ctx context.Context, token, name string) (*RoomResponse, error) {
-	payload := map[string]string{"name": name}
+func (c *APIClient) CreateRoom(ctx context.Context, token, nameEnc, displayNameEnc string) (*RoomResponse, error) {
+	payload := map[string]string{"name_enc": nameEnc, "display_name_enc": displayNameEnc}
 	var resp CreateRoomResponse
 	if err := c.doJSON(ctx, http.MethodPost, "/rooms", token, payload, &resp); err != nil {
 		return nil, err
@@ -237,8 +237,8 @@ func (c *APIClient) CreateRoomInvite(ctx context.Context, token, roomID string) 
 	return &resp, nil
 }
 
-func (c *APIClient) JoinRoom(ctx context.Context, token, inviteToken string) (*JoinRoomResponse, error) {
-	payload := map[string]string{"token": inviteToken}
+func (c *APIClient) JoinRoom(ctx context.Context, token, inviteToken, displayNameEnc string) (*JoinRoomResponse, error) {
+	payload := map[string]string{"token": inviteToken, "display_name_enc": displayNameEnc}
 	var resp JoinRoomResponse
 	if err := c.doJSON(ctx, http.MethodPost, "/rooms/join", token, payload, &resp); err != nil {
 		return nil, err

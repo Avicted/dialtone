@@ -20,17 +20,18 @@ type WSClient struct {
 }
 
 type ServerMessage struct {
-	Type         string `json:"type"`
-	MessageID    string `json:"message_id"`
-	Sender       string `json:"sender"`
-	SenderName   string `json:"sender_name"`
-	RoomID       string `json:"room_id,omitempty"`
-	SenderPubKey string `json:"sender_public_key,omitempty"`
-	KeyEnvelope  string `json:"key_envelope,omitempty"`
-	Body         string `json:"body"`
-	SentAt       string `json:"sent_at"`
-	Code         string `json:"code"`
-	Message      string `json:"message"`
+	Type          string `json:"type"`
+	MessageID     string `json:"message_id"`
+	Sender        string `json:"sender"`
+	SenderName    string `json:"sender_name"`
+	SenderNameEnc string `json:"sender_name_enc,omitempty"`
+	RoomID        string `json:"room_id,omitempty"`
+	SenderPubKey  string `json:"sender_public_key,omitempty"`
+	KeyEnvelope   string `json:"key_envelope,omitempty"`
+	Body          string `json:"body"`
+	SentAt        string `json:"sent_at"`
+	Code          string `json:"code"`
+	Message       string `json:"message"`
 }
 
 type SendMessage struct {

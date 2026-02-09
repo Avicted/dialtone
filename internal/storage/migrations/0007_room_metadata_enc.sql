@@ -1,0 +1,14 @@
+ALTER TABLE rooms
+	ADD COLUMN IF NOT EXISTS name_enc TEXT;
+
+ALTER TABLE rooms
+	ALTER COLUMN name DROP NOT NULL;
+
+ALTER TABLE room_members
+	ADD COLUMN IF NOT EXISTS display_name_enc TEXT;
+
+ALTER TABLE room_messages
+	ADD COLUMN IF NOT EXISTS sender_name_enc TEXT;
+
+ALTER TABLE room_messages
+	ALTER COLUMN sender_name DROP NOT NULL;

@@ -54,6 +54,10 @@ var (
 				Foreground(lipgloss.Color("246")).
 				Bold(true)
 
+	sidebarSectionStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("244")).
+				Bold(true)
+
 	sidebarOnlineStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("114"))
 

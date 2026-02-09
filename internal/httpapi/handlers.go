@@ -318,22 +318,23 @@ func (h *Handler) handleDeviceKeys(w http.ResponseWriter, r *http.Request) {
 
 type roomResponse struct {
 	ID        room.ID `json:"id"`
-	Name      string  `json:"name"`
+	NameEnc   string  `json:"name_enc"`
 	CreatedBy user.ID `json:"created_by"`
 	CreatedAt string  `json:"created_at"`
 }
 
 type roomMessageResponse struct {
-	ID         string  `json:"id"`
-	RoomID     room.ID `json:"room_id"`
-	SenderID   user.ID `json:"sender_id"`
-	SenderName string  `json:"sender_name"`
-	Body       string  `json:"body"`
-	SentAt     string  `json:"sent_at"`
+	ID            string  `json:"id"`
+	RoomID        room.ID `json:"room_id"`
+	SenderID      user.ID `json:"sender_id"`
+	SenderNameEnc string  `json:"sender_name_enc"`
+	Body          string  `json:"body"`
+	SentAt        string  `json:"sent_at"`
 }
 
 type createRoomRequest struct {
-	Name string `json:"name"`
+	NameEnc        string `json:"name_enc"`
+	DisplayNameEnc string `json:"display_name_enc"`
 }
 
 type createRoomResponse struct {
@@ -370,7 +371,7 @@ func (h *Handler) handleRooms(w http.ResponseWriter, r *http.Request) {
 		for _, rm := range rooms {
 			resp.Rooms = append(resp.Rooms, roomResponse{
 				ID:        rm.ID,
-				Name:      rm.Name,
+				NameEnc:   rm.NameEnc,
 				CreatedBy: rm.CreatedBy,
 				CreatedAt: rm.CreatedAt.UTC().Format(timeLayout),
 			})
@@ -385,7 +386,7 @@ func (h *Handler) handleRooms(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := h.rooms.CreateRoom(r.Context(), session.UserID, req.Name)
+	created, err := h.rooms.CreateRoom(r.Context(), session.UserID, req.NameEnc, req.DisplayNameEnc)
 	if err != nil {
 		switch {
 		case errors.Is(err, room.ErrInvalidInput):
@@ -398,7 +399,7 @@ func (h *Handler) handleRooms(w http.ResponseWriter, r *http.Request) {
 
 	resp := createRoomResponse{Room: roomResponse{
 		ID:        created.ID,
-		Name:      created.Name,
+		NameEnc:   created.NameEnc,
 		CreatedBy: created.CreatedBy,
 		CreatedAt: created.CreatedAt.UTC().Format(timeLayout),
 	}}
@@ -459,7 +460,8 @@ func (h *Handler) handleRoomInvites(w http.ResponseWriter, r *http.Request) {
 }
 
 type joinRoomRequest struct {
-	Token string `json:"token"`
+	Token          string `json:"token"`
+	DisplayNameEnc string `json:"display_name_enc"`
 }
 
 type joinRoomResponse struct {
@@ -490,7 +492,7 @@ func (h *Handler) handleRoomJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	joinedRoom, joinedAt, messages, err := h.rooms.JoinWithInvite(r.Context(), session.UserID, req.Token)
+	joinedRoom, joinedAt, messages, err := h.rooms.JoinWithInvite(r.Context(), session.UserID, req.Token, req.DisplayNameEnc)
 	if err != nil {
 		switch {
 		case errors.Is(err, room.ErrInvalidInput):
@@ -508,7 +510,7 @@ func (h *Handler) handleRoomJoin(w http.ResponseWriter, r *http.Request) {
 	resp := joinRoomResponse{
 		Room: roomResponse{
 			ID:        joinedRoom.ID,
-			Name:      joinedRoom.Name,
+			NameEnc:   joinedRoom.NameEnc,
 			CreatedBy: joinedRoom.CreatedBy,
 			CreatedAt: joinedRoom.CreatedAt.UTC().Format(timeLayout),
 		},
@@ -517,12 +519,12 @@ func (h *Handler) handleRoomJoin(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, msg := range messages {
 		resp.Messages = append(resp.Messages, roomMessageResponse{
-			ID:         msg.ID,
-			RoomID:     msg.RoomID,
-			SenderID:   msg.SenderID,
-			SenderName: msg.SenderName,
-			Body:       msg.Body,
-			SentAt:     msg.SentAt.UTC().Format(timeLayout),
+			ID:            msg.ID,
+			RoomID:        msg.RoomID,
+			SenderID:      msg.SenderID,
+			SenderNameEnc: msg.SenderNameEnc,
+			Body:          msg.Body,
+			SentAt:        msg.SentAt.UTC().Format(timeLayout),
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -581,21 +583,21 @@ func (h *Handler) handleRoomMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, msg := range msgs {
 		resp.Messages = append(resp.Messages, roomMessageResponse{
-			ID:         msg.ID,
-			RoomID:     msg.RoomID,
-			SenderID:   msg.SenderID,
-			SenderName: msg.SenderName,
-			Body:       msg.Body,
-			SentAt:     msg.SentAt.UTC().Format(timeLayout),
+			ID:            msg.ID,
+			RoomID:        msg.RoomID,
+			SenderID:      msg.SenderID,
+			SenderNameEnc: msg.SenderNameEnc,
+			Body:          msg.Body,
+			SentAt:        msg.SentAt.UTC().Format(timeLayout),
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
 type roomMemberResponse struct {
-	UserID   user.ID `json:"user_id"`
-	Username string  `json:"username"`
-	Online   bool    `json:"online"`
+	UserID         user.ID `json:"user_id"`
+	DisplayNameEnc string  `json:"display_name_enc"`
+	Online         bool    `json:"online"`
 }
 
 type roomMembersResponse struct {
@@ -642,18 +644,9 @@ func (h *Handler) handleRoomMembers(w http.ResponseWriter, r *http.Request) {
 	for _, member := range members {
 		online := false
 		if h.presence != nil {
-			online = h.presence.IsOnline(member)
+			online = h.presence.IsOnline(member.UserID)
 		}
-		username := ""
-		if h.users != nil {
-			if found, err := h.users.GetByID(r.Context(), member); err == nil {
-				username = found.Username
-			}
-		}
-		if username == "" {
-			username = string(member)
-		}
-		resp.Members = append(resp.Members, roomMemberResponse{UserID: member, Username: username, Online: online})
+		resp.Members = append(resp.Members, roomMemberResponse{UserID: member.UserID, DisplayNameEnc: member.DisplayNameEnc, Online: online})
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

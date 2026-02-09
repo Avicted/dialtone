@@ -263,6 +263,7 @@ type outboundMessage struct {
 	MessageID       string  `json:"message_id"`
 	Sender          user.ID `json:"sender"`
 	SenderName      string  `json:"sender_name"`
+	SenderNameEnc   string  `json:"sender_name_enc,omitempty"`
 	RoomID          room.ID `json:"room_id,omitempty"`
 	SenderPublicKey string  `json:"sender_public_key,omitempty"`
 	KeyEnvelope     string  `json:"key_envelope,omitempty"`
@@ -519,15 +520,21 @@ func (h *Hub) handleRoomMessage(ctx context.Context, sender *Client, msg inbound
 		return
 	}
 
+	senderNameEnc, err := h.rooms.GetMemberDisplayNameEnc(ctx, msg.RoomID, sender.userID)
+	if err != nil {
+		sender.sendError("server_error", "failed to resolve display name")
+		return
+	}
+
 	sentAt := time.Now().UTC()
 	msgID := uuid.NewString()
 	record := room.Message{
-		ID:         msgID,
-		RoomID:     msg.RoomID,
-		SenderID:   sender.userID,
-		SenderName: sender.username,
-		Body:       msg.Body,
-		SentAt:     sentAt,
+		ID:            msgID,
+		RoomID:        msg.RoomID,
+		SenderID:      sender.userID,
+		SenderNameEnc: senderNameEnc,
+		Body:          msg.Body,
+		SentAt:        sentAt,
 	}
 	if err := h.rooms.SaveMessage(ctx, record); err != nil {
 		sender.sendError("server_error", "failed to store room message")
@@ -541,18 +548,18 @@ func (h *Hub) handleRoomMessage(ctx context.Context, sender *Client, msg inbound
 	}
 
 	out := outboundMessage{
-		Type:       "room.message.new",
-		MessageID:  msgID,
-		RoomID:     msg.RoomID,
-		Sender:     sender.userID,
-		SenderName: sender.username,
-		Body:       msg.Body,
-		SentAt:     sentAt.Format(time.RFC3339Nano),
+		Type:          "room.message.new",
+		MessageID:     msgID,
+		RoomID:        msg.RoomID,
+		Sender:        sender.userID,
+		SenderNameEnc: senderNameEnc,
+		Body:          msg.Body,
+		SentAt:        sentAt.Format(time.RFC3339Nano),
 	}
 
-	for _, memberID := range members {
+	for _, member := range members {
 		h.mu.RLock()
-		recipients := h.byUser[memberID]
+		recipients := h.byUser[member.UserID]
 		clients := make([]*Client, 0, len(recipients))
 		for client := range recipients {
 			clients = append(clients, client)

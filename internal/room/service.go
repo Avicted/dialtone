@@ -26,28 +26,27 @@ func NewService(repo Repository) *Service {
 	}
 }
 
-func (s *Service) CreateRoom(ctx context.Context, userID user.ID, name string) (Room, error) {
+func (s *Service) CreateRoom(ctx context.Context, userID user.ID, nameEnc, displayNameEnc string) (Room, error) {
 	if s.repo == nil {
 		return Room{}, errors.New("repository is required")
 	}
 	if userID == "" {
 		return Room{}, ErrInvalidInput
 	}
-	trimmed := strings.TrimSpace(name)
-	if trimmed == "" {
+	if strings.TrimSpace(nameEnc) == "" || strings.TrimSpace(displayNameEnc) == "" {
 		return Room{}, ErrInvalidInput
 	}
 
 	room := Room{
 		ID:        ID(s.idGen()),
-		Name:      trimmed,
+		NameEnc:   strings.TrimSpace(nameEnc),
 		CreatedBy: userID,
 		CreatedAt: s.now().UTC(),
 	}
 	if err := s.repo.CreateRoom(ctx, room); err != nil {
 		return Room{}, err
 	}
-	if err := s.repo.AddMember(ctx, room.ID, userID, s.now().UTC()); err != nil {
+	if err := s.repo.AddMember(ctx, room.ID, userID, strings.TrimSpace(displayNameEnc), s.now().UTC()); err != nil {
 		return Room{}, err
 	}
 	return room, nil
@@ -93,15 +92,15 @@ func (s *Service) CreateInvite(ctx context.Context, userID user.ID, roomID ID) (
 	return invite, nil
 }
 
-func (s *Service) JoinWithInvite(ctx context.Context, userID user.ID, token string) (Room, time.Time, []Message, error) {
+func (s *Service) JoinWithInvite(ctx context.Context, userID user.ID, token, displayNameEnc string) (Room, time.Time, []Message, error) {
 	if s.repo == nil {
 		return Room{}, time.Time{}, nil, errors.New("repository is required")
 	}
-	if userID == "" || strings.TrimSpace(token) == "" {
+	if userID == "" || strings.TrimSpace(token) == "" || strings.TrimSpace(displayNameEnc) == "" {
 		return Room{}, time.Time{}, nil, ErrInvalidInput
 	}
 
-	invite, err := s.repo.ConsumeInvite(ctx, strings.TrimSpace(token), userID, s.now().UTC())
+	invite, err := s.repo.ConsumeInvite(ctx, strings.TrimSpace(token), userID, strings.TrimSpace(displayNameEnc), s.now().UTC())
 	if err != nil {
 		return Room{}, time.Time{}, nil, err
 	}
@@ -145,7 +144,7 @@ func (s *Service) ListMessages(ctx context.Context, userID user.ID, roomID ID, l
 	return s.repo.ListRecentMessages(ctx, roomID, limit)
 }
 
-func (s *Service) ListMembers(ctx context.Context, userID user.ID, roomID ID) ([]user.ID, error) {
+func (s *Service) ListMembers(ctx context.Context, userID user.ID, roomID ID) ([]Member, error) {
 	if s.repo == nil {
 		return nil, errors.New("repository is required")
 	}

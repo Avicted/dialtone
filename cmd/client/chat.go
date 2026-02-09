@@ -78,6 +78,7 @@ type chatModel struct {
 	roomHistoryLoaded map[string]bool
 	roomMembers       map[string][]roomMember
 	userNames         map[string]string
+	roomKeys          map[string][]byte
 	activeRoom        string
 	sidebarVisible    bool
 	selectActive      bool
@@ -132,6 +133,7 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width,
 		roomHistoryLoaded: make(map[string]bool),
 		roomMembers:       make(map[string][]roomMember),
 		userNames:         make(map[string]string),
+		roomKeys:          loadRoomKeys(),
 	}
 }
 
@@ -377,13 +379,15 @@ func (m *chatModel) fetchRooms() {
 		return
 	}
 	for _, rm := range rooms {
-		m.rooms[rm.ID] = roomInfo{ID: rm.ID, Name: rm.Name}
+		name := m.decryptRoomName(rm.ID, rm.NameEnc)
+		m.rooms[rm.ID] = roomInfo{ID: rm.ID, Name: name}
 	}
 	var b strings.Builder
 	b.WriteString("rooms:")
 	for _, rm := range rooms {
+		name := m.decryptRoomName(rm.ID, rm.NameEnc)
 		b.WriteString("\n  ")
-		b.WriteString(rm.Name)
+		b.WriteString(name)
 		b.WriteString(" (")
 		b.WriteString(shortID(rm.ID))
 		b.WriteString(")")
@@ -394,21 +398,42 @@ func (m *chatModel) fetchRooms() {
 func (m *chatModel) createRoom(name string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	created, err := m.api.CreateRoom(ctx, m.auth.Token, name)
+	key := make([]byte, crypto.KeySize)
+	if _, err := rand.Read(key); err != nil {
+		m.errMsg = fmt.Sprintf("room key: %v", err)
+		return
+	}
+	nameEnc, err := encryptRoomField(key, name)
+	if err != nil {
+		m.errMsg = fmt.Sprintf("encrypt room name: %v", err)
+		return
+	}
+	displayNameEnc, err := encryptRoomField(key, m.auth.Username)
+	if err != nil {
+		m.errMsg = fmt.Sprintf("encrypt display name: %v", err)
+		return
+	}
+	created, err := m.api.CreateRoom(ctx, m.auth.Token, nameEnc, displayNameEnc)
 	if err != nil {
 		m.errMsg = fmt.Sprintf("create room: %v", err)
 		return
 	}
-	info := roomInfo{ID: created.ID, Name: created.Name}
+	m.setRoomKey(created.ID, key)
+	info := roomInfo{ID: created.ID, Name: name}
 	m.rooms[created.ID] = info
 	m.activeRoom = created.ID
-	m.appendSystemMessage(fmt.Sprintf("created room '%s' (%s)", created.Name, shortID(created.ID)))
+	m.appendSystemMessage(fmt.Sprintf("created room '%s' (%s)", name, shortID(created.ID)))
 	m.refreshViewport()
 }
 
 func (m *chatModel) createInvite(nameOrID string) {
 	resolvedID, info, ok := m.resolveRoom(nameOrID, false)
 	if !ok {
+		return
+	}
+	key, ok := m.roomKeys[resolvedID]
+	if !ok || len(key) == 0 {
+		m.errMsg = "missing room key"
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -418,26 +443,40 @@ func (m *chatModel) createInvite(nameOrID string) {
 		m.errMsg = fmt.Sprintf("create invite: %v", err)
 		return
 	}
-	m.appendSystemMessage(fmt.Sprintf("invite token: %s (room '%s', expires %s)", invite.Token, info.Name, formatTime(invite.ExpiresAt)))
+	fullToken := formatInviteToken(invite.Token, key)
+	m.appendSystemMessage(fmt.Sprintf("invite token: %s (room '%s', expires %s)", fullToken, info.Name, formatTime(invite.ExpiresAt)))
 }
 
 func (m *chatModel) joinRoom(token string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	joined, err := m.api.JoinRoom(ctx, m.auth.Token, token)
+	inviteToken, key, err := parseInviteToken(token)
+	if err != nil {
+		m.errMsg = fmt.Sprintf("invite token: %v", err)
+		return
+	}
+	displayNameEnc, err := encryptRoomField(key, m.auth.Username)
+	if err != nil {
+		m.errMsg = fmt.Sprintf("encrypt display name: %v", err)
+		return
+	}
+	joined, err := m.api.JoinRoom(ctx, m.auth.Token, inviteToken, displayNameEnc)
 	if err != nil {
 		m.errMsg = fmt.Sprintf("join room: %v", err)
 		return
 	}
-	info := roomInfo{ID: joined.Room.ID, Name: joined.Room.Name}
+	m.setRoomKey(joined.Room.ID, key)
+	name := m.decryptRoomName(joined.Room.ID, joined.Room.NameEnc)
+	info := roomInfo{ID: joined.Room.ID, Name: name}
 	m.rooms[joined.Room.ID] = info
 	m.activeRoom = joined.Room.ID
-	m.appendSystemMessage(fmt.Sprintf("joined room '%s'", joined.Room.Name))
+	m.appendSystemMessage(fmt.Sprintf("joined room '%s'", name))
 
 	for _, msg := range joined.Messages {
+		senderName := m.decryptRoomField(joined.Room.ID, msg.SenderNameEnc)
 		cm := chatMessage{
 			sender:     msg.SenderID,
-			senderName: msg.SenderName,
+			senderName: senderName,
 			body:       msg.Body,
 			sentAt:     msg.SentAt,
 			isHistory:  true,
@@ -489,9 +528,10 @@ func (m *chatModel) loadRoomHistory(roomID string) {
 
 	loaded := make([]chatMessage, 0, len(msgs))
 	for _, msg := range msgs {
+		senderName := m.decryptRoomField(roomID, msg.SenderNameEnc)
 		loaded = append(loaded, chatMessage{
 			sender:     msg.SenderID,
-			senderName: msg.SenderName,
+			senderName: senderName,
 			body:       msg.Body,
 			sentAt:     msg.SentAt,
 			isHistory:  true,
@@ -527,20 +567,23 @@ func (m *chatModel) resolveRoom(nameOrID string, allowSelect bool) (string, room
 		return "", roomInfo{}, false
 	}
 	for _, rm := range rooms {
-		m.rooms[rm.ID] = roomInfo{ID: rm.ID, Name: rm.Name}
+		name := m.decryptRoomName(rm.ID, rm.NameEnc)
+		m.rooms[rm.ID] = roomInfo{ID: rm.ID, Name: name}
 	}
 
 	needle := strings.ToLower(strings.TrimSpace(nameOrID))
 	var matches []roomInfo
 	for _, rm := range rooms {
-		if strings.ToLower(rm.Name) == needle {
-			matches = append(matches, roomInfo{ID: rm.ID, Name: rm.Name})
+		name := m.decryptRoomName(rm.ID, rm.NameEnc)
+		if strings.ToLower(name) == needle {
+			matches = append(matches, roomInfo{ID: rm.ID, Name: name})
 		}
 	}
 	if len(matches) == 0 {
 		for _, rm := range rooms {
 			if strings.HasPrefix(strings.ToLower(rm.ID), needle) {
-				matches = append(matches, roomInfo{ID: rm.ID, Name: rm.Name})
+				name := m.decryptRoomName(rm.ID, rm.NameEnc)
+				matches = append(matches, roomInfo{ID: rm.ID, Name: name})
 			}
 		}
 	}
@@ -632,9 +675,10 @@ func (m *chatModel) fetchRoomMembers(roomID string) {
 	}
 	roomMembers := make([]roomMember, 0, len(members))
 	for _, member := range members {
+		displayName := m.decryptRoomField(roomID, member.DisplayNameEnc)
 		roomMembers = append(roomMembers, roomMember{
 			UserID:   member.UserID,
-			Username: member.Username,
+			Username: displayName,
 			Online:   member.Online,
 		})
 	}
@@ -753,9 +797,10 @@ func (m *chatModel) handleServerMessage(msg ServerMessage) {
 		m.messages = append(m.messages, cm)
 
 	case "room.message.new":
+		senderName := m.decryptRoomField(msg.RoomID, msg.SenderNameEnc)
 		cm := chatMessage{
 			sender:     msg.Sender,
-			senderName: msg.SenderName,
+			senderName: senderName,
 			body:       msg.Body,
 			sentAt:     msg.SentAt,
 			isHistory:  false,
@@ -835,21 +880,43 @@ func (m *chatModel) renderMessages() string {
 
 func (m *chatModel) renderSidebar() string {
 	members := m.roomMembers[m.activeRoom]
-	lines := make([]string, 0, len(members)+2)
-	lines = append(lines, sidebarTitleStyle.Render("Members"))
+	lines := make([]string, 0, len(members)+6)
+	lines = append(lines, sidebarTitleStyle.Render("Members"), "")
 	if len(members) == 0 {
 		lines = append(lines, labelStyle.Render("(none)"))
 	} else {
+		var online []roomMember
+		var offline []roomMember
 		for _, member := range members {
-			status := sidebarOfflineStyle.Render("o")
 			if member.Online {
-				status = sidebarOnlineStyle.Render("*")
+				online = append(online, member)
+			} else {
+				offline = append(offline, member)
 			}
-			display := member.Username
-			if display == "" {
-				display = shortID(member.UserID)
+		}
+		lines = append(lines, sidebarSectionStyle.Render("Online"))
+		if len(online) == 0 {
+			lines = append(lines, labelStyle.Render("(none)"))
+		} else {
+			for _, member := range online {
+				display := member.Username
+				if display == "" {
+					display = shortID(member.UserID)
+				}
+				lines = append(lines, fmt.Sprintf("%s %s", sidebarOnlineStyle.Render("*"), display))
 			}
-			lines = append(lines, fmt.Sprintf("%s %s", status, display))
+		}
+		lines = append(lines, "", sidebarSectionStyle.Render("Offline"))
+		if len(offline) == 0 {
+			lines = append(lines, labelStyle.Render("(none)"))
+		} else {
+			for _, member := range offline {
+				display := member.Username
+				if display == "" {
+					display = shortID(member.UserID)
+				}
+				lines = append(lines, fmt.Sprintf("%s %s", sidebarOfflineStyle.Render("o"), display))
+			}
 		}
 	}
 	content := strings.Join(lines, "\n")
@@ -1060,4 +1127,73 @@ func wrapText(text string, width int) []string {
 	}
 	lines = append(lines, current)
 	return lines
+}
+
+func encryptRoomField(key []byte, plaintext string) (string, error) {
+	ct, err := crypto.Encrypt(key, []byte(plaintext))
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(ct), nil
+}
+
+func decryptRoomFieldWithKey(key []byte, encoded string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", err
+	}
+	pt, err := crypto.Decrypt(key, raw)
+	if err != nil {
+		return "", err
+	}
+	return string(pt), nil
+}
+
+func formatInviteToken(token string, key []byte) string {
+	if token == "" || len(key) == 0 {
+		return token
+	}
+	return token + "." + base64.StdEncoding.EncodeToString(key)
+}
+
+func parseInviteToken(value string) (string, []byte, error) {
+	parts := strings.SplitN(strings.TrimSpace(value), ".", 2)
+	if len(parts) != 2 {
+		return "", nil, fmt.Errorf("token must include room key")
+	}
+	key, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", nil, fmt.Errorf("invalid room key")
+	}
+	return parts[0], key, nil
+}
+
+func (m *chatModel) setRoomKey(roomID string, key []byte) {
+	if roomID == "" || len(key) == 0 {
+		return
+	}
+	m.roomKeys[roomID] = key
+	_ = saveRoomKeys(m.roomKeys)
+}
+
+func (m *chatModel) decryptRoomField(roomID, encoded string) string {
+	if encoded == "" {
+		return ""
+	}
+	key, ok := m.roomKeys[roomID]
+	if !ok || len(key) == 0 {
+		return "<encrypted>"
+	}
+	value, err := decryptRoomFieldWithKey(key, encoded)
+	if err != nil {
+		return "<encrypted>"
+	}
+	return value
+}
+
+func (m *chatModel) decryptRoomName(roomID, encoded string) string {
+	if encoded == "" {
+		return "<encrypted>"
+	}
+	return m.decryptRoomField(roomID, encoded)
 }
