@@ -59,8 +59,10 @@ Migrations:
 
 
 ## TODO
-- The user should be able to select which server to connect before login.
+- The user should be able to select which server to connect before login. By specifying a URL, or selecting from previously used URLs that the
+user connected to successfully.
 - User registration should have 2 password fields for confirming that the user typed what they meant.
 - When creating a invite code, the code should be highlighted in some way, to make it stand out in all the text.
+
 - Document the server API, so that new clients not TUIs can be created.
 - Testing.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -37,7 +38,7 @@ func newRootModel(api *APIClient) rootModel {
 	return rootModel{
 		api:   api,
 		state: stateLogin,
-		login: newLoginModel(),
+		login: newLoginModel(api.serverURL),
 	}
 }
 
@@ -59,6 +60,11 @@ func (m rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if auth, ok := msg.(authSuccessMsg); ok {
+		serverURL := strings.TrimSpace(m.login.serverURL())
+		if serverURL != "" {
+			m.login.serverHistory = updateServerHistory(m.login.serverHistory, serverURL, 8)
+			_ = saveServerHistory(m.login.serverHistory)
+		}
 		m.state = stateChat
 		m.chat = newChatModel(m.api, auth.auth, auth.kp, m.width, m.height)
 		return m, m.chat.Init()
@@ -70,6 +76,7 @@ func (m rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.login, cmd = m.login.Update(msg)
 		if m.login.submitting {
 			m.login.submitting = false
+			m.api.serverURL = strings.TrimSpace(m.login.serverURL())
 			return m, tea.Batch(cmd, m.doAuth(m.login.isRegister, m.login.username(), m.login.password()))
 		}
 		return m, cmd

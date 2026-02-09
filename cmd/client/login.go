@@ -9,20 +9,34 @@ import (
 )
 
 type loginModel struct {
-	inputs     [2]textinput.Model
-	focusIdx   int
-	isRegister bool
-	submitting bool
-	errMsg     string
-	loading    bool
-	width      int
-	height     int
+	serverInput   textinput.Model
+	usernameInput textinput.Model
+	passwordInput textinput.Model
+	confirmInput  textinput.Model
+	focusIdx      int
+	isRegister    bool
+	submitting    bool
+	errMsg        string
+	loading       bool
+	width         int
+	height        int
+	serverHistory []string
+	selectActive  bool
+	selectIndex   int
 }
 
-func newLoginModel() loginModel {
+func newLoginModel(defaultServer string) loginModel {
+	server := textinput.New()
+	server.Placeholder = "http://localhost:8080"
+	server.CharLimit = 256
+	server.Width = 40
+	if strings.TrimSpace(defaultServer) != "" {
+		server.SetValue(strings.TrimSpace(defaultServer))
+	}
+	server.Focus()
+
 	username := textinput.New()
 	username.Placeholder = "username"
-	username.Focus()
 	username.CharLimit = 64
 	username.Width = 30
 
@@ -33,9 +47,20 @@ func newLoginModel() loginModel {
 	password.CharLimit = 128
 	password.Width = 30
 
+	confirm := textinput.New()
+	confirm.Placeholder = "confirm password"
+	confirm.EchoMode = textinput.EchoPassword
+	confirm.EchoCharacter = '*'
+	confirm.CharLimit = 128
+	confirm.Width = 30
+
 	return loginModel{
-		inputs:   [2]textinput.Model{username, password},
-		focusIdx: 0,
+		serverInput:   server,
+		usernameInput: username,
+		passwordInput: password,
+		confirmInput:  confirm,
+		focusIdx:      0,
+		serverHistory: loadServerHistory(),
 	}
 }
 
@@ -43,8 +68,20 @@ func (m loginModel) Init() tea.Cmd {
 	return textinput.Blink
 }
 
-func (m loginModel) username() string { return m.inputs[0].Value() }
-func (m loginModel) password() string { return m.inputs[1].Value() }
+func (m loginModel) serverURL() string { return m.serverInput.Value() }
+func (m loginModel) username() string  { return m.usernameInput.Value() }
+func (m loginModel) password() string  { return m.passwordInput.Value() }
+func (m loginModel) confirmPassword() string {
+	return m.confirmInput.Value()
+}
+
+func (m loginModel) inputCount() int {
+	count := 3
+	if m.isRegister {
+		count = 4
+	}
+	return count
+}
 
 func (m loginModel) Update(msg tea.Msg) (loginModel, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -60,33 +97,58 @@ func (m loginModel) Update(msg tea.Msg) (loginModel, tea.Cmd) {
 
 	case tea.KeyMsg:
 		m.errMsg = ""
+		if m.selectActive {
+			m.handleServerSelectKey(msg)
+			return m, nil
+		}
 
-		switch msg.String() {
-		case "tab", "shift+tab", "down", "up":
+		switch msg.Type {
+		case tea.KeyTab, tea.KeyShiftTab, tea.KeyUp, tea.KeyDown, tea.KeyCtrlN, tea.KeyCtrlP:
 			dir := 1
-			if msg.String() == "up" || msg.String() == "shift+tab" {
+			if msg.Type == tea.KeyUp || msg.Type == tea.KeyShiftTab || msg.Type == tea.KeyCtrlP {
 				dir = -1
 			}
-			m.focusIdx = (m.focusIdx + dir + len(m.inputs)) % len(m.inputs)
-			for i := range m.inputs {
-				if i == m.focusIdx {
-					m.inputs[i].Focus()
-				} else {
-					m.inputs[i].Blur()
-				}
+			m.moveFocus(dir)
+			return m, nil
+		}
+
+		switch msg.String() {
+		case "tab", "shift+tab", "down", "up", "ctrl+n", "ctrl+p":
+			dir := 1
+			if msg.String() == "up" || msg.String() == "shift+tab" || msg.String() == "ctrl+p" {
+				dir = -1
 			}
+			m.moveFocus(dir)
 			return m, nil
 
 		case "ctrl+r":
 			m.isRegister = !m.isRegister
+			m.ensureFocusIndex()
+			return m, nil
+
+		case "ctrl+s":
+			if len(m.serverHistory) == 0 {
+				m.errMsg = "no saved servers yet"
+				return m, nil
+			}
+			m.selectActive = true
+			m.selectIndex = 0
 			return m, nil
 
 		case "enter":
 			if m.loading {
 				return m, nil
 			}
+			if strings.TrimSpace(m.serverURL()) == "" {
+				m.errMsg = "server url is required"
+				return m, nil
+			}
 			if m.username() == "" || m.password() == "" {
 				m.errMsg = "username and password are required"
+				return m, nil
+			}
+			if m.isRegister && m.password() != m.confirmPassword() {
+				m.errMsg = "passwords do not match"
 				return m, nil
 			}
 			m.loading = true
@@ -96,8 +158,65 @@ func (m loginModel) Update(msg tea.Msg) (loginModel, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
-	m.inputs[m.focusIdx], cmd = m.inputs[m.focusIdx].Update(msg)
+	switch m.focusIdx {
+	case 0:
+		m.serverInput, cmd = m.serverInput.Update(msg)
+	case 1:
+		m.usernameInput, cmd = m.usernameInput.Update(msg)
+	case 2:
+		m.passwordInput, cmd = m.passwordInput.Update(msg)
+	case 3:
+		m.confirmInput, cmd = m.confirmInput.Update(msg)
+	default:
+		m.serverInput, cmd = m.serverInput.Update(msg)
+	}
 	return m, cmd
+}
+
+func (m *loginModel) handleServerSelectKey(msg tea.KeyMsg) {
+	if len(m.serverHistory) == 0 {
+		m.selectActive = false
+		return
+	}
+	switch msg.String() {
+	case "up", "k":
+		if m.selectIndex > 0 {
+			m.selectIndex--
+		}
+	case "down", "j":
+		if m.selectIndex < len(m.serverHistory)-1 {
+			m.selectIndex++
+		}
+	case "enter":
+		m.serverInput.SetValue(m.serverHistory[m.selectIndex])
+		m.selectActive = false
+	case "esc":
+		m.selectActive = false
+	}
+}
+
+func (m *loginModel) applyFocus() {
+	m.serverInput.Blur()
+	m.usernameInput.Blur()
+	m.passwordInput.Blur()
+	m.confirmInput.Blur()
+
+	switch m.focusIdx {
+	case 0:
+		m.serverInput.Focus()
+	case 1:
+		m.usernameInput.Focus()
+	case 2:
+		m.passwordInput.Focus()
+	case 3:
+		if m.isRegister {
+			m.confirmInput.Focus()
+		} else {
+			m.serverInput.Focus()
+		}
+	default:
+		m.serverInput.Focus()
+	}
 }
 
 func (m loginModel) View() string {
@@ -121,13 +240,33 @@ func (m loginModel) View() string {
 	b.WriteString(centerText(headerStyle.Render(fmt.Sprintf("[ %s ]", mode)), m.width))
 	b.WriteString("\n\n")
 
-	labels := [2]string{"Username", "Password"}
-	for i, input := range m.inputs {
+	labels := []string{"Server", "Username", "Password"}
+	inputs := []textinput.Model{m.serverInput, m.usernameInput, m.passwordInput}
+	if m.isRegister {
+		labels = append(labels, "Confirm Password")
+		inputs = append(inputs, m.confirmInput)
+	}
+	for i, input := range inputs {
 		line := labelStyle.Render(fmt.Sprintf("  %s: ", labels[i])) + input.View()
 		b.WriteString(centerText(line, m.width))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
+
+	if m.selectActive {
+		b.WriteString(centerText(labelStyle.Render("Select server"), m.width))
+		b.WriteString("\n")
+		for i, server := range m.serverHistory {
+			prefix := "  "
+			if i == m.selectIndex {
+				prefix = "> "
+			}
+			line := prefix + trimLine(server, clampMin(m.width-6, 20))
+			b.WriteString(centerText(labelStyle.Render(line), m.width))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
 
 	if m.errMsg != "" {
 		b.WriteString(centerText(errorStyle.Render("  x "+m.errMsg), m.width))
@@ -139,7 +278,29 @@ func (m loginModel) View() string {
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString(centerText(helpStyle.Render("tab: switch field - ctrl+r: register/login - enter: submit - ctrl+q: quit"), m.width))
+	b.WriteString(centerText(helpStyle.Render("up/down or tab: switch field - ctrl+r: register/login - ctrl+s: servers - enter: submit - ctrl+q: quit"), m.width))
 
 	return b.String()
+}
+
+func (m *loginModel) moveFocus(dir int) {
+	count := m.inputCount()
+	if count == 0 {
+		return
+	}
+	m.focusIdx = (m.focusIdx + dir + count) % count
+	m.applyFocus()
+}
+
+func (m *loginModel) ensureFocusIndex() {
+	count := m.inputCount()
+	if count == 0 {
+		m.focusIdx = 0
+		m.applyFocus()
+		return
+	}
+	if m.focusIdx >= count {
+		m.focusIdx = count - 1
+	}
+	m.applyFocus()
 }

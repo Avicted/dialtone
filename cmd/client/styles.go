@@ -69,6 +69,10 @@ var (
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderForeground(lipgloss.Color("238")).
 			PaddingLeft(1)
+
+	inviteTokenStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("214")).
+				Bold(true)
 )
 
 func centerText(text string, width int) string {

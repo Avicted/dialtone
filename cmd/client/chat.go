@@ -53,6 +53,7 @@ type chatMessage struct {
 	isMine     bool
 	encrypted  bool // true if body arrived as ciphertext
 	isSystem   bool
+	highlight  bool
 }
 
 type roomInfo struct {
@@ -460,7 +461,8 @@ func (m *chatModel) createInvite(nameOrID string) {
 		return
 	}
 	fullToken := formatInviteToken(invite.Token, key)
-	m.appendSystemMessage(fmt.Sprintf("invite token: %s (room '%s', expires %s)", fullToken, info.Name, formatTime(invite.ExpiresAt)))
+	m.appendSystemMessage(fmt.Sprintf("invite token (room '%s', expires %s):", info.Name, formatTime(invite.ExpiresAt)))
+	m.appendHighlightedMessage(fullToken)
 }
 
 func (m *chatModel) joinRoom(token string) {
@@ -714,6 +716,17 @@ func (m *chatModel) appendSystemMessage(text string) {
 	m.refreshViewport()
 }
 
+func (m *chatModel) appendHighlightedMessage(text string) {
+	msg := chatMessage{senderName: "system", body: text, sentAt: time.Now().UTC().Format(time.RFC3339Nano), isSystem: true, highlight: true}
+	if m.activeRoom != "" {
+		m.roomMsgs[m.activeRoom] = append(m.roomMsgs[m.activeRoom], msg)
+		m.refreshViewport()
+		return
+	}
+	m.messages = append(m.messages, msg)
+	m.refreshViewport()
+}
+
 func (m *chatModel) scheduleRoomMembersTick(roomID string) tea.Cmd {
 	if roomID == "" {
 		return nil
@@ -885,6 +898,8 @@ func (m *chatModel) renderMessages() string {
 
 		var style lipgloss.Style
 		switch {
+		case msg.highlight:
+			style = inviteTokenStyle
 		case msg.isSystem:
 			style = labelStyle
 		case msg.isHistory:
