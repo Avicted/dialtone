@@ -73,7 +73,3 @@ docker compose up -d
 ```
 
 The compose file reads `.env` and uses `POSTGRES_*` values to configure the database. For local development outside of compose, update `DIALTONE_DB_URL` to point at `localhost` instead of `postgres`.
-
-
-## Database diagram
-![dialtone_db_diagram.png](dialtone_db_diagram.png)
