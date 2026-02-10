@@ -158,7 +158,7 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width,
 func (m chatModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{textinput.Blink, m.connectWS()}
 	if m.isTrusted() {
-		cmds = append(cmds, m.syncDirectoryCmd(), m.scheduleDirectoryTick())
+		cmds = append(cmds, m.syncDirectoryCmd(true), m.scheduleDirectoryTick())
 	}
 	return tea.Batch(cmds...)
 }
@@ -269,13 +269,13 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 			}
 			cmds := []tea.Cmd{waitForWSMsg(m.wsCh), m.shareKnownChannelKeysCmd()}
 			if m.isTrusted() {
-				cmds = append(cmds, m.shareDirectoryKeyCmd(), m.syncDirectoryCmd())
+				cmds = append(cmds, m.shareDirectoryKeyCmd(), m.syncDirectoryCmd(false))
 			}
 			m.refreshViewport()
 			return m, tea.Batch(cmds...)
 		}
 		if serverMsg.Type == "user.profile.updated" && m.isTrusted() {
-			return m, tea.Batch(waitForWSMsg(m.wsCh), m.syncDirectoryCmd())
+			return m, tea.Batch(waitForWSMsg(m.wsCh), m.syncDirectoryCmd(false))
 		}
 		m.handleServerMessage(serverMsg)
 		m.refreshViewport()
@@ -306,7 +306,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 
 	case directoryTick:
 		if m.isTrusted() {
-			return m, tea.Batch(m.syncDirectoryCmd(), m.scheduleDirectoryTick())
+			return m, tea.Batch(m.syncDirectoryCmd(false), m.scheduleDirectoryTick())
 		}
 		return m, nil
 
@@ -684,17 +684,17 @@ func (m *chatModel) shareDirectoryKey() error {
 	return m.api.PutDirectoryKeyEnvelopes(ctx, m.auth.Token, envelopes)
 }
 
-func (m *chatModel) syncDirectoryCmd() tea.Cmd {
+func (m *chatModel) syncDirectoryCmd(pushProfile bool) tea.Cmd {
 	if !m.isTrusted() {
 		return nil
 	}
 	return func() tea.Msg {
-		profiles, err := m.syncDirectory()
+		profiles, err := m.syncDirectory(pushProfile)
 		return directorySyncMsg{profiles: profiles, err: err}
 	}
 }
 
-func (m *chatModel) syncDirectory() ([]UserProfile, error) {
+func (m *chatModel) syncDirectory(pushProfile bool) ([]UserProfile, error) {
 	key, err := m.ensureDirectoryKey()
 	if err != nil {
 		return nil, err
@@ -702,14 +702,16 @@ func (m *chatModel) syncDirectory() ([]UserProfile, error) {
 	if m.auth == nil {
 		return nil, fmt.Errorf("missing auth")
 	}
-	nameEnc, err := encryptChannelField(key, m.auth.Username)
-	if err != nil {
-		return nil, fmt.Errorf("encrypt username: %w", err)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := m.api.UpsertUserProfile(ctx, m.auth.Token, nameEnc); err != nil {
-		return nil, err
+	if pushProfile {
+		nameEnc, err := encryptChannelField(key, m.auth.Username)
+		if err != nil {
+			return nil, fmt.Errorf("encrypt username: %w", err)
+		}
+		if err := m.api.UpsertUserProfile(ctx, m.auth.Token, nameEnc); err != nil {
+			return nil, err
+		}
 	}
 	return m.api.ListUserProfiles(ctx, m.auth.Token)
 }
