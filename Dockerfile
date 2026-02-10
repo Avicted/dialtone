@@ -3,7 +3,6 @@ FROM golang:1.25.6-alpine3.23 AS builder
 WORKDIR /src
 
 RUN apk add --no-cache ca-certificates
-RUN apk add --no-cache curl
 
 COPY go.mod go.sum ./
 RUN go mod download
@@ -14,7 +13,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/dialtone-server ./cmd
 
 FROM alpine:3.23
 
-RUN apk add --no-cache ca-certificates && \
+RUN apk add --no-cache ca-certificates curl && \
 	adduser -D -H -u 10001 -s /sbin/nologin dialtone
 
 COPY --from=builder /out/dialtone-server /usr/local/bin/dialtone-server
