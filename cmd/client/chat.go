@@ -69,6 +69,7 @@ type chatModel struct {
 	userAdmins           map[string]bool
 	channelKeys          map[string][]byte
 	directoryKey         []byte
+	pendingProfilePush   bool
 	activeChannel        string
 	channelUnread        map[string]int
 	sidebarVisible       bool
@@ -104,6 +105,7 @@ type shareDirectoryMsg struct{ err error }
 
 type directorySyncMsg struct {
 	profiles []UserProfile
+	pushed   bool
 	err      error
 }
 
@@ -146,6 +148,9 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width,
 		sidebarMode:          sidebarChannels,
 		sidebarIndex:         0,
 	}
+	if auth != nil && auth.IsTrusted {
+		model.pendingProfilePush = true
+	}
 	model.updateLayout()
 	if keysErr != nil {
 		model.errMsg = "failed to load channel keys"
@@ -159,7 +164,7 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width,
 func (m chatModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{textinput.Blink, m.connectWS()}
 	if m.isTrusted() {
-		cmds = append(cmds, m.syncDirectoryCmd(true), m.scheduleDirectoryTick())
+		cmds = append(cmds, m.syncDirectoryCmd(m.pendingProfilePush), m.scheduleDirectoryTick())
 	}
 	return tea.Batch(cmds...)
 }
@@ -270,7 +275,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 			}
 			cmds := []tea.Cmd{waitForWSMsg(m.wsCh), m.shareKnownChannelKeysCmd()}
 			if m.isTrusted() {
-				cmds = append(cmds, m.shareDirectoryKeyCmd(), m.syncDirectoryCmd(false))
+				cmds = append(cmds, m.shareDirectoryKeyCmd(), m.syncDirectoryCmd(m.pendingProfilePush))
 			}
 			m.refreshViewport()
 			return m, tea.Batch(cmds...)
@@ -294,6 +299,9 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if msg.pushed {
+			m.pendingProfilePush = false
+		}
 		for _, profile := range msg.profiles {
 			name := m.decryptDirectoryName(profile.NameEnc)
 			if name != "" {
@@ -307,7 +315,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 
 	case directoryTick:
 		if m.isTrusted() {
-			return m, tea.Batch(m.syncDirectoryCmd(false), m.scheduleDirectoryTick())
+			return m, tea.Batch(m.syncDirectoryCmd(m.pendingProfilePush), m.scheduleDirectoryTick())
 		}
 		return m, nil
 
@@ -690,31 +698,35 @@ func (m *chatModel) syncDirectoryCmd(pushProfile bool) tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		profiles, err := m.syncDirectory(pushProfile)
-		return directorySyncMsg{profiles: profiles, err: err}
+		profiles, pushed, err := m.syncDirectory(pushProfile)
+		return directorySyncMsg{profiles: profiles, pushed: pushed, err: err}
 	}
 }
 
-func (m *chatModel) syncDirectory(pushProfile bool) ([]UserProfile, error) {
+func (m *chatModel) syncDirectory(pushProfile bool) ([]UserProfile, bool, error) {
 	key, err := m.ensureDirectoryKey()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if m.auth == nil {
-		return nil, fmt.Errorf("missing auth")
+		return nil, false, fmt.Errorf("missing auth")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if pushProfile {
 		nameEnc, err := encryptChannelField(key, m.auth.Username)
 		if err != nil {
-			return nil, fmt.Errorf("encrypt username: %w", err)
+			return nil, false, fmt.Errorf("encrypt username: %w", err)
 		}
 		if err := m.api.UpsertUserProfile(ctx, m.auth.Token, nameEnc); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
-	return m.api.ListUserProfiles(ctx, m.auth.Token)
+	profiles, err := m.api.ListUserProfiles(ctx, m.auth.Token)
+	if err != nil {
+		return nil, false, err
+	}
+	return profiles, pushProfile, nil
 }
 
 func (m *chatModel) ensureDirectoryKey() ([]byte, error) {
