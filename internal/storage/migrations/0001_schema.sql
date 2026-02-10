@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS users (
 	username_hash TEXT NOT NULL,
 	password_hash TEXT,
 	is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+	is_trusted BOOLEAN NOT NULL DEFAULT FALSE,
 	created_at TIMESTAMPTZ NOT NULL
 );
 
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS channels (
 	created_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
 	created_at TIMESTAMPTZ NOT NULL
 );
+
 CREATE TABLE IF NOT EXISTS channel_messages (
 	id TEXT PRIMARY KEY,
 	channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
@@ -52,6 +54,40 @@ CREATE TABLE IF NOT EXISTS channel_messages (
 CREATE INDEX IF NOT EXISTS idx_channel_messages_channel_id ON channel_messages(channel_id);
 CREATE INDEX IF NOT EXISTS idx_channel_messages_sent_at ON channel_messages(sent_at);
 
+-- Channel key envelopes (per-device encrypted channel keys)
+CREATE TABLE IF NOT EXISTS channel_key_envelopes (
+	channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+	device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+	sender_device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+	sender_public_key TEXT NOT NULL,
+	envelope TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL,
+	PRIMARY KEY (channel_id, device_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_channel_key_envelopes_channel_id ON channel_key_envelopes(channel_id);
+CREATE INDEX IF NOT EXISTS idx_channel_key_envelopes_device_id ON channel_key_envelopes(device_id);
+
+-- User directory profiles
+CREATE TABLE IF NOT EXISTS user_profiles (
+	user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+	name_enc TEXT NOT NULL,
+	updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_profiles_updated_at ON user_profiles(updated_at);
+
+-- Directory key envelopes
+CREATE TABLE IF NOT EXISTS directory_key_envelopes (
+	device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+	sender_device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+	sender_public_key TEXT NOT NULL,
+	envelope TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_directory_key_envelopes_device_id ON directory_key_envelopes(device_id);
+
 -- Server invites (invite-only registration)
 CREATE TABLE IF NOT EXISTS server_invites (
 	id TEXT PRIMARY KEY,
@@ -62,3 +98,6 @@ CREATE TABLE IF NOT EXISTS server_invites (
 );
 
 CREATE INDEX IF NOT EXISTS idx_server_invites_expires_at ON server_invites(expires_at);
+
+-- Legacy cleanup
+DROP TABLE IF EXISTS message_envelopes;
