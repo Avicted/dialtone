@@ -302,11 +302,37 @@ func (c *APIClient) GetChannelKeyEnvelope(ctx context.Context, token, channelID 
 }
 
 func (c *APIClient) GetDirectoryKeyEnvelope(ctx context.Context, token string) (*DirectoryKeyEnvelope, error) {
-	var resp DirectoryKeyEnvelope
-	if err := c.doJSON(ctx, http.MethodGet, "/directory/keys", token, nil, &resp); err != nil {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.serverURL+"/directory/keys", nil)
+	if err != nil {
 		return nil, err
 	}
-	return &resp, nil
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNoContent {
+		return nil, fmt.Errorf("not found")
+	}
+	if resp.StatusCode >= 400 {
+		var apiErr apiError
+		_ = json.NewDecoder(resp.Body).Decode(&apiErr)
+		if apiErr.Error != "" {
+			return nil, fmt.Errorf("server: %s", apiErr.Error)
+		}
+		return nil, fmt.Errorf("server returned %d", resp.StatusCode)
+	}
+
+	var body DirectoryKeyEnvelope
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &body, nil
 }
 
 func (c *APIClient) PutDirectoryKeyEnvelopes(ctx context.Context, token string, envelopes []DirectoryKeyEnvelopeRequest) error {

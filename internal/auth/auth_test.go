@@ -51,6 +51,22 @@ func (r *fakeUserRepo) Count(_ context.Context) (int, error) {
 	return len(r.users), nil
 }
 
+func (r *fakeUserRepo) UpsertProfile(_ context.Context, _ user.Profile) error {
+	return nil
+}
+
+func (r *fakeUserRepo) ListProfiles(_ context.Context) ([]user.Profile, error) {
+	return nil, nil
+}
+
+func (r *fakeUserRepo) UpsertDirectoryKeyEnvelope(_ context.Context, _ user.DirectoryKeyEnvelope) error {
+	return nil
+}
+
+func (r *fakeUserRepo) GetDirectoryKeyEnvelope(_ context.Context, _ string) (user.DirectoryKeyEnvelope, error) {
+	return user.DirectoryKeyEnvelope{}, errors.New("not found")
+}
+
 type fakeDeviceRepo struct {
 	devices []device.Device
 }

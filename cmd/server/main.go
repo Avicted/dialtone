@@ -25,7 +25,7 @@ import (
 func main() {
 	if err := run(); err != nil {
 		securelog.Error("server.run", err)
-		log.Printf("fatal: server error")
+		log.Printf("fatal: %v", err)
 		os.Exit(1)
 	}
 }

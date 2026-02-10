@@ -508,7 +508,7 @@ func (h *Handler) handleDirectoryKeys(w http.ResponseWriter, r *http.Request) {
 			case errors.Is(err, user.ErrInvalidInput):
 				writeError(w, http.StatusBadRequest, err)
 			case errors.Is(err, storage.ErrNotFound):
-				writeError(w, http.StatusNotFound, err)
+				w.WriteHeader(http.StatusNoContent)
 			default:
 				writeError(w, http.StatusInternalServerError, err)
 			}
@@ -1023,6 +1023,8 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
-	securelog.Error("httpapi", err)
+	if status >= http.StatusInternalServerError {
+		securelog.Error("httpapi", err)
+	}
 	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
