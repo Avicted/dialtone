@@ -256,6 +256,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 
 	case shareTick:
 		if m.connected {
+			m.refreshChannels(false)
 			return m, tea.Batch(m.shareKnownChannelKeysCmd(), m.scheduleShareTick())
 		}
 		return m, nil
@@ -394,31 +395,6 @@ func (m *chatModel) handleCommand(raw string) {
 			return
 		}
 		m.renameChannel(strings.TrimSpace(bits[0]), strings.TrimSpace(bits[1]))
-	case "share":
-		if len(parts) < 3 {
-			if m.activeChannel == "" {
-				m.appendSystemMessage("usage: /channel share <channel_id|name>")
-				return
-			}
-			if err := m.shareChannelKey(m.activeChannel); err != nil {
-				m.errMsg = fmt.Sprintf("share channel key: %v", err)
-				return
-			}
-			m.appendSystemMessage("shared channel key")
-			return
-		}
-		nameOrID := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
-		resolvedID, _, ok := m.resolveChannel(nameOrID, false)
-		if !ok {
-			return
-		}
-		if err := m.shareChannelKey(resolvedID); err != nil {
-			m.errMsg = fmt.Sprintf("share channel key: %v", err)
-			return
-		}
-		m.appendSystemMessage("shared channel key")
-	case "leave", "clear":
-		m.leaveChannel()
 	default:
 		m.appendSystemMessage("unknown channel command")
 	}
@@ -426,16 +402,16 @@ func (m *chatModel) handleCommand(raw string) {
 
 func (m *chatModel) helpText() string {
 	if m.auth.IsAdmin {
-		return "commands: /help | /channel list | /channel create <name> | /channel rename <channel_id|name> <new name> | /channel delete <channel_id|name> | /channel share <channel_id|name> | /channel leave | /server invite"
+		return "commands: /help | /channel list | /channel create <name> | /channel rename <channel_id|name> <new name> | /channel delete <channel_id|name> | /server invite"
 	}
-	return "commands: /help | /channel list | /channel share <channel_id|name> | /channel leave"
+	return "commands: /help | /channel list"
 }
 
 func (m *chatModel) channelHelpText() string {
 	if m.auth.IsAdmin {
-		return "channel commands: /channel list | create <name> | rename <channel_id|name> <new name> | delete <channel_id|name> | share <channel_id|name> | leave"
+		return "channel commands: /channel list | create <name> | rename <channel_id|name> <new name> | delete <channel_id|name>"
 	}
-	return "channel commands: /channel list | share <channel_id|name> | leave"
+	return "channel commands: /channel list"
 }
 
 func (m *chatModel) serverHelpText() string {
@@ -651,10 +627,6 @@ func (m *chatModel) renameChannel(nameOrID, newName string) {
 	m.appendSystemMessage(fmt.Sprintf("renamed channel '%s'", shortID(resolvedID)))
 }
 func (m *chatModel) useChannel(channelID string) {
-	if strings.EqualFold(channelID, "global") {
-		m.leaveChannel()
-		return
-	}
 	resolvedID, info, ok := m.resolveChannel(channelID, true)
 	if !ok {
 		return
@@ -664,13 +636,6 @@ func (m *chatModel) useChannel(channelID string) {
 		return
 	}
 	m.applyChannelSelection(resolvedID, info)
-}
-
-func (m *chatModel) leaveChannel() {
-	m.activeChannel = ""
-	m.updateLayout()
-	m.appendSystemMessage("left channel; use the sidebar or /channel list")
-	m.refreshViewport()
 }
 
 func (m *chatModel) loadChannelHistory(channelID string) {
@@ -888,6 +853,7 @@ func (m *chatModel) handleServerMessage(msg ServerMessage) {
 			return
 		}
 		prev := m.channels[msg.ChannelID]
+		_, _ = m.ensureChannelKey(msg.ChannelID)
 		name := m.decryptChannelName(msg.ChannelID, msg.ChannelNameEnc)
 		m.channels[msg.ChannelID] = channelInfo{ID: msg.ChannelID, Name: name}
 		if m.activeChannel == msg.ChannelID && name != "" && prev.Name != "" && prev.Name != name {
