@@ -17,7 +17,10 @@ import (
 	"github.com/Avicted/dialtone/internal/crypto"
 )
 
-const sidebarWidth = 26
+const (
+	sidebarWidth      = 26
+	shareKeysInterval = 30 * time.Second
+)
 
 type chatMessage struct {
 	sender     string
@@ -90,6 +93,8 @@ type wsMessageMsg ServerMessage
 type wsErrorMsg struct{ err error }
 
 type presenceTick struct{}
+
+type shareTick struct{}
 
 type shareKeysMsg struct{ err error }
 
@@ -231,7 +236,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		if m.activeChannel == "" && len(m.messages) == 0 {
 			m.appendSystemMessage("no global chat; select a channel with the sidebar or /channel list")
 		}
-		return m, tea.Batch(waitForWSMsg(m.wsCh), m.shareKnownChannelKeysCmd())
+		return m, tea.Batch(waitForWSMsg(m.wsCh), m.shareKnownChannelKeysCmd(), m.scheduleShareTick())
 
 	case wsMessageMsg:
 		m.handleServerMessage(ServerMessage(msg))
@@ -246,6 +251,12 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 	case shareKeysMsg:
 		if msg.err != nil {
 			m.errMsg = fmt.Sprintf("share channel keys: %v", msg.err)
+		}
+		return m, nil
+
+	case shareTick:
+		if m.connected {
+			return m, tea.Batch(m.shareKnownChannelKeysCmd(), m.scheduleShareTick())
 		}
 		return m, nil
 
@@ -424,6 +435,7 @@ func (m *chatModel) refreshChannels(showMessage bool) {
 		return
 	}
 	for _, ch := range channels {
+		_, _ = m.ensureChannelKey(ch.ID)
 		name := m.decryptChannelName(ch.ID, ch.NameEnc)
 		m.channels[ch.ID] = channelInfo{ID: ch.ID, Name: name}
 	}
@@ -687,6 +699,7 @@ func (m *chatModel) resolveChannel(nameOrID string, allowSelect bool) (string, c
 		return "", channelInfo{}, false
 	}
 	for _, ch := range channels {
+		_, _ = m.ensureChannelKey(ch.ID)
 		name := m.decryptChannelName(ch.ID, ch.NameEnc)
 		m.channels[ch.ID] = channelInfo{ID: ch.ID, Name: name}
 	}
@@ -1095,6 +1108,12 @@ func (m *chatModel) refreshPresence() {
 func (m *chatModel) schedulePresenceTick() tea.Cmd {
 	return tea.Tick(5*time.Second, func(time.Time) tea.Msg {
 		return presenceTick{}
+	})
+}
+
+func (m *chatModel) scheduleShareTick() tea.Cmd {
+	return tea.Tick(shareKeysInterval, func(time.Time) tea.Msg {
+		return shareTick{}
 	})
 }
 
