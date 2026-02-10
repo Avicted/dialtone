@@ -25,6 +25,7 @@ type AuthResponse struct {
 	ExpiresAt    string `json:"expires_at"`
 	Username     string `json:"username"`
 	DevicePubKey string `json:"device_public_key"`
+	IsAdmin      bool   `json:"is_admin"`
 }
 
 type apiError struct {

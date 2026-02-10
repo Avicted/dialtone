@@ -14,6 +14,7 @@ import (
 	"github.com/Avicted/dialtone/internal/channel"
 	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/message"
+	"github.com/Avicted/dialtone/internal/securelog"
 	"github.com/Avicted/dialtone/internal/storage"
 	"github.com/Avicted/dialtone/internal/user"
 	"github.com/google/uuid"
@@ -130,6 +131,7 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
 
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
+		securelog.Error("ws.accept", err)
 		return
 	}
 
@@ -182,10 +184,14 @@ func (c *Client) readLoop() {
 	for {
 		_, data, err := c.conn.Read(c.ctx)
 		if err != nil {
+			if websocket.CloseStatus(err) == -1 {
+				securelog.Error("ws.read", err)
+			}
 			return
 		}
 		msg, err := decodeIncoming(data)
 		if err != nil {
+			securelog.Error("ws.decodeIncoming", err)
 			c.sendError("invalid_message", err.Error())
 			continue
 		}
@@ -206,6 +212,9 @@ func (c *Client) writeLoop() {
 			err := c.conn.Write(ctx, websocket.MessageText, msg)
 			cancel()
 			if err != nil {
+				if websocket.CloseStatus(err) == -1 {
+					securelog.Error("ws.write", err)
+				}
 				c.hub.unregister <- c
 				return
 			}
@@ -436,6 +445,7 @@ func (h *Hub) handleChannelMessage(ctx context.Context, sender *Client, msg inbo
 			sender.sendError("channel_not_found", "channel does not exist")
 			return
 		}
+		securelog.Error("ws.getChannel", err)
 		sender.sendError("server_error", "failed to resolve channel")
 		return
 	}
@@ -453,6 +463,7 @@ func (h *Hub) handleChannelMessage(ctx context.Context, sender *Client, msg inbo
 		SentAt:        sentAt,
 	}
 	if err := h.channels.SaveMessage(ctx, record); err != nil {
+		securelog.Error("ws.saveMessage", err)
 		sender.sendError("server_error", "failed to store channel message")
 		return
 	}

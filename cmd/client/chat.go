@@ -320,12 +320,16 @@ func (m *chatModel) handleCommand(raw string) {
 	}
 	cmd := strings.ToLower(parts[0])
 	if cmd == "/help" {
-		m.appendSystemMessage("commands: /help | /channel list | /channel create <name> | /channel rename <channel_id|name> <new name> | /channel delete <channel_id|name> | /channel share <channel_id|name> | /channel leave | /server invite")
+		m.appendSystemMessage(m.helpText())
 		return
 	}
 	if cmd == "/server" {
 		if len(parts) < 2 {
-			m.appendSystemMessage("server commands: /server invite")
+			m.appendSystemMessage(m.serverHelpText())
+			return
+		}
+		if !m.auth.IsAdmin {
+			m.appendSystemMessage("admin only: server invites")
 			return
 		}
 		action := strings.ToLower(parts[1])
@@ -342,17 +346,21 @@ func (m *chatModel) handleCommand(raw string) {
 		return
 	}
 	if len(parts) < 2 {
-		m.appendSystemMessage("channel commands: /channel list | create <name> | rename <channel_id|name> <new name> | delete <channel_id|name> | share <channel_id|name> | leave")
+		m.appendSystemMessage(m.channelHelpText())
 		return
 	}
 	action := strings.ToLower(parts[1])
 
 	switch action {
 	case "help":
-		m.appendSystemMessage("/channel list | /channel create <name> | /channel rename <channel_id|name> <new name> | /channel delete <channel_id|name> | /channel share <channel_id|name> | /channel leave")
+		m.appendSystemMessage(m.channelHelpText())
 	case "list":
 		m.refreshChannels(true)
 	case "create":
+		if !m.auth.IsAdmin {
+			m.appendSystemMessage("admin only")
+			return
+		}
 		if len(parts) < 3 {
 			m.appendSystemMessage("usage: /channel create <name>")
 			return
@@ -360,6 +368,10 @@ func (m *chatModel) handleCommand(raw string) {
 		name := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
 		m.createChannel(name)
 	case "delete":
+		if !m.auth.IsAdmin {
+			m.appendSystemMessage("admin only")
+			return
+		}
 		if len(parts) < 3 {
 			m.appendSystemMessage("usage: /channel delete <channel_id|name>")
 			return
@@ -367,6 +379,10 @@ func (m *chatModel) handleCommand(raw string) {
 		nameOrID := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
 		m.deleteChannel(nameOrID)
 	case "rename":
+		if !m.auth.IsAdmin {
+			m.appendSystemMessage("admin only")
+			return
+		}
 		remaining := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
 		if remaining == "" {
 			m.appendSystemMessage("usage: /channel rename <channel_id|name> <new name>")
@@ -406,6 +422,27 @@ func (m *chatModel) handleCommand(raw string) {
 	default:
 		m.appendSystemMessage("unknown channel command")
 	}
+}
+
+func (m *chatModel) helpText() string {
+	if m.auth.IsAdmin {
+		return "commands: /help | /channel list | /channel create <name> | /channel rename <channel_id|name> <new name> | /channel delete <channel_id|name> | /channel share <channel_id|name> | /channel leave | /server invite"
+	}
+	return "commands: /help | /channel list | /channel share <channel_id|name> | /channel leave"
+}
+
+func (m *chatModel) channelHelpText() string {
+	if m.auth.IsAdmin {
+		return "channel commands: /channel list | create <name> | rename <channel_id|name> <new name> | delete <channel_id|name> | share <channel_id|name> | leave"
+	}
+	return "channel commands: /channel list | share <channel_id|name> | leave"
+}
+
+func (m *chatModel) serverHelpText() string {
+	if m.auth.IsAdmin {
+		return "server commands: /server invite"
+	}
+	return "admin only: server invites"
 }
 
 func (m *chatModel) createServerInvite() {

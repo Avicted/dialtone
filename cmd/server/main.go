@@ -15,6 +15,7 @@ import (
 	"github.com/Avicted/dialtone/internal/config"
 	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/httpapi"
+	"github.com/Avicted/dialtone/internal/securelog"
 	"github.com/Avicted/dialtone/internal/serverinvite"
 	"github.com/Avicted/dialtone/internal/storage"
 	"github.com/Avicted/dialtone/internal/user"
@@ -23,7 +24,8 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		log.Printf("fatal: %v", err)
+		securelog.Error("server.run", err)
+		log.Printf("fatal: server error")
 		os.Exit(1)
 	}
 }

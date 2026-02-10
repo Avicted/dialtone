@@ -11,6 +11,7 @@ import (
 	"github.com/Avicted/dialtone/internal/auth"
 	"github.com/Avicted/dialtone/internal/channel"
 	"github.com/Avicted/dialtone/internal/device"
+	"github.com/Avicted/dialtone/internal/securelog"
 	"github.com/Avicted/dialtone/internal/serverinvite"
 	"github.com/Avicted/dialtone/internal/storage"
 	"github.com/Avicted/dialtone/internal/user"
@@ -81,6 +82,7 @@ type authResponse struct {
 	ExpiresAt    string    `json:"expires_at"`
 	Username     string    `json:"username"`
 	DevicePubKey string    `json:"device_public_key"`
+	IsAdmin      bool      `json:"is_admin"`
 }
 
 func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -122,6 +124,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:    session.ExpiresAt.UTC().Format(timeLayout),
 		Username:     session.Username,
 		DevicePubKey: createdDevice.PublicKey,
+		IsAdmin:      createdUser.IsAdmin,
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -163,6 +166,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:    session.ExpiresAt.UTC().Format(timeLayout),
 		Username:     session.Username,
 		DevicePubKey: createdDevice.PublicKey,
+		IsAdmin:      createdUser.IsAdmin,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -682,6 +686,9 @@ func (h *Handler) handleChannels(w http.ResponseWriter, r *http.Request) {
 		CreatedBy: created.CreatedBy,
 		CreatedAt: created.CreatedAt.UTC().Format(timeLayout),
 	}}
+	if h.notifier != nil {
+		h.notifier.NotifyChannelUpdated(created)
+	}
 	writeJSON(w, http.StatusCreated, resp)
 }
 
@@ -814,5 +821,6 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
+	securelog.Error("httpapi", err)
 	writeJSON(w, status, map[string]string{"error": err.Error()})
 }

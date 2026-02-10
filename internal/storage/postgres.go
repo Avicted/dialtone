@@ -8,6 +8,7 @@ import (
 	"github.com/Avicted/dialtone/internal/channel"
 	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/message"
+	"github.com/Avicted/dialtone/internal/securelog"
 	"github.com/Avicted/dialtone/internal/serverinvite"
 	"github.com/Avicted/dialtone/internal/user"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -29,11 +30,13 @@ func NewPostgresStore(ctx context.Context, dbURL string) (*PostgresStore, error)
 
 	db, err := sql.Open("pgx", dbURL)
 	if err != nil {
+		securelog.Error("storage.open", err)
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
+		securelog.Error("storage.ping", err)
 		return nil, fmt.Errorf("ping db: %w", err)
 	}
 
@@ -53,7 +56,11 @@ func (s *PostgresStore) Close(ctx context.Context) error {
 
 func (s *PostgresStore) Migrate(ctx context.Context) error {
 	migrator := NewMigrator(s.db, migrationsFS)
-	return migrator.Up(ctx)
+	if err := migrator.Up(ctx); err != nil {
+		securelog.Error("storage.migrate", err)
+		return err
+	}
+	return nil
 }
 
 func (s *PostgresStore) Users() user.Repository {

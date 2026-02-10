@@ -31,8 +31,11 @@ func newLoginModel(defaultServer string) loginModel {
 	server.Placeholder = "http://localhost:8080"
 	server.CharLimit = 256
 	server.Width = 40
+	serverHistory := loadServerHistory()
 	if strings.TrimSpace(defaultServer) != "" {
 		server.SetValue(strings.TrimSpace(defaultServer))
+	} else if len(serverHistory) > 0 {
+		server.SetValue(serverHistory[0])
 	}
 	server.Focus()
 
@@ -67,7 +70,7 @@ func newLoginModel(defaultServer string) loginModel {
 		confirmInput:  confirm,
 		inviteInput:   invite,
 		focusIdx:      0,
-		serverHistory: loadServerHistory(),
+		serverHistory: serverHistory,
 	}
 }
 
