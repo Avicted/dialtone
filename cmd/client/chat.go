@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"sort"
@@ -62,7 +63,7 @@ type chatModel struct {
 	userNames            map[string]string
 	userPresence         map[string]bool
 	userAdmins           map[string]bool
-	channelKey           []byte
+	channelKeys          map[string][]byte
 	activeChannel        string
 	channelUnread        map[string]int
 	sidebarVisible       bool
@@ -101,12 +102,6 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width,
 	vpWidth := clampMin(width-4, 10)
 	vp := viewport.New(vpWidth, vpHeight)
 
-	var channelKey []byte
-	var keyErr error
-	if auth != nil {
-		channelKey, keyErr = decodeChannelKey(auth.ChannelKey)
-	}
-
 	model := chatModel{
 		api:                  api,
 		auth:                 auth,
@@ -121,14 +116,11 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width,
 		userNames:            make(map[string]string),
 		userPresence:         make(map[string]bool),
 		userAdmins:           make(map[string]bool),
-		channelKey:           channelKey,
+		channelKeys:          make(map[string][]byte),
 		channelUnread:        make(map[string]int),
 		sidebarVisible:       true,
 		sidebarMode:          sidebarChannels,
 		sidebarIndex:         0,
-	}
-	if keyErr != nil {
-		model.errMsg = "invalid channel key"
 	}
 	return model
 }
@@ -270,16 +262,17 @@ func (m *chatModel) sendCurrentMessage() {
 	}
 
 	if m.activeChannel != "" {
-		if len(m.channelKey) == 0 {
-			m.errMsg = "missing channel key"
+		key, err := m.ensureChannelKey(m.activeChannel)
+		if err != nil {
+			m.errMsg = fmt.Sprintf("channel key: %v", err)
 			return
 		}
-		encryptedBody, err := encryptChannelField(m.channelKey, body)
+		encryptedBody, err := encryptChannelField(key, body)
 		if err != nil {
 			m.errMsg = fmt.Sprintf("encrypt channel message: %v", err)
 			return
 		}
-		senderNameEnc, err := encryptChannelField(m.channelKey, m.auth.Username)
+		senderNameEnc, err := encryptChannelField(key, m.auth.Username)
 		if err != nil {
 			m.errMsg = fmt.Sprintf("encrypt sender name: %v", err)
 			return
@@ -303,7 +296,7 @@ func (m *chatModel) handleCommand(raw string) {
 	}
 	cmd := strings.ToLower(parts[0])
 	if cmd == "/help" {
-		m.appendSystemMessage("commands: /help | /channel list | /channel create <name> | /channel rename <channel_id|name> <new name> | /channel delete <channel_id|name> | /channel leave | /server invite")
+		m.appendSystemMessage("commands: /help | /channel list | /channel create <name> | /channel rename <channel_id|name> <new name> | /channel delete <channel_id|name> | /channel share <channel_id|name> | /channel leave | /server invite")
 		return
 	}
 	if cmd == "/server" {
@@ -325,14 +318,14 @@ func (m *chatModel) handleCommand(raw string) {
 		return
 	}
 	if len(parts) < 2 {
-		m.appendSystemMessage("channel commands: /channel list | create <name> | rename <channel_id|name> <new name> | delete <channel_id|name> | leave")
+		m.appendSystemMessage("channel commands: /channel list | create <name> | rename <channel_id|name> <new name> | delete <channel_id|name> | share <channel_id|name> | leave")
 		return
 	}
 	action := strings.ToLower(parts[1])
 
 	switch action {
 	case "help":
-		m.appendSystemMessage("/channel list | /channel create <name> | /channel rename <channel_id|name> <new name> | /channel delete <channel_id|name> | /channel leave")
+		m.appendSystemMessage("/channel list | /channel create <name> | /channel rename <channel_id|name> <new name> | /channel delete <channel_id|name> | /channel share <channel_id|name> | /channel leave")
 	case "list":
 		m.refreshChannels(true)
 	case "create":
@@ -361,6 +354,29 @@ func (m *chatModel) handleCommand(raw string) {
 			return
 		}
 		m.renameChannel(strings.TrimSpace(bits[0]), strings.TrimSpace(bits[1]))
+	case "share":
+		if len(parts) < 3 {
+			if m.activeChannel == "" {
+				m.appendSystemMessage("usage: /channel share <channel_id|name>")
+				return
+			}
+			if err := m.shareChannelKey(m.activeChannel); err != nil {
+				m.errMsg = fmt.Sprintf("share channel key: %v", err)
+				return
+			}
+			m.appendSystemMessage("shared channel key")
+			return
+		}
+		nameOrID := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
+		resolvedID, _, ok := m.resolveChannel(nameOrID, false)
+		if !ok {
+			return
+		}
+		if err := m.shareChannelKey(resolvedID); err != nil {
+			m.errMsg = fmt.Sprintf("share channel key: %v", err)
+			return
+		}
+		m.appendSystemMessage("shared channel key")
 	case "leave", "clear":
 		m.leaveChannel()
 	default:
@@ -395,14 +411,14 @@ func (m *chatModel) refreshChannels(showMessage bool) {
 		return
 	}
 	for _, ch := range channels {
-		name := m.decryptChannelName(ch.NameEnc)
+		name := m.decryptChannelName(ch.ID, ch.NameEnc)
 		m.channels[ch.ID] = channelInfo{ID: ch.ID, Name: name}
 	}
 	if showMessage {
 		var b strings.Builder
 		b.WriteString("channels:")
 		for _, ch := range channels {
-			name := m.decryptChannelName(ch.NameEnc)
+			name := m.decryptChannelName(ch.ID, ch.NameEnc)
 			b.WriteString("\n  ")
 			b.WriteString(name)
 			b.WriteString(" (")
@@ -417,11 +433,12 @@ func (m *chatModel) refreshChannels(showMessage bool) {
 func (m *chatModel) createChannel(name string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if len(m.channelKey) == 0 {
-		m.errMsg = "missing channel key"
+	key, err := generateChannelKey()
+	if err != nil {
+		m.errMsg = fmt.Sprintf("generate channel key: %v", err)
 		return
 	}
-	nameEnc, err := encryptChannelField(m.channelKey, name)
+	nameEnc, err := encryptChannelField(key, name)
 	if err != nil {
 		m.errMsg = fmt.Sprintf("encrypt channel name: %v", err)
 		return
@@ -431,12 +448,66 @@ func (m *chatModel) createChannel(name string) {
 		m.errMsg = fmt.Sprintf("create channel: %v", err)
 		return
 	}
+	m.setChannelKey(created.ID, key)
+	if err := m.shareChannelKey(created.ID); err != nil {
+		m.errMsg = fmt.Sprintf("share channel key: %v", err)
+	}
 	info := channelInfo{ID: created.ID, Name: name}
 	m.channels[created.ID] = info
 	m.activeChannel = created.ID
 	m.ensureSidebarIndex()
 	m.appendSystemMessage(fmt.Sprintf("created channel '%s' (%s)", name, shortID(created.ID)))
 	m.refreshViewport()
+}
+
+func (m *chatModel) shareChannelKey(channelID string) error {
+	if channelID == "" {
+		return fmt.Errorf("missing channel id")
+	}
+	key := m.getChannelKey(channelID)
+	if len(key) != crypto.KeySize {
+		return fmt.Errorf("missing channel key")
+	}
+	if m.kp == nil || m.kp.Private == nil || m.kp.Public == nil {
+		return fmt.Errorf("missing device key")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	devices, err := m.api.ListAllDeviceKeys(ctx, m.auth.Token)
+	if err != nil {
+		return err
+	}
+	if len(devices) == 0 {
+		return fmt.Errorf("no devices available")
+	}
+
+	senderPub := crypto.PublicKeyToBase64(m.kp.Public)
+	envelopes := make([]ChannelKeyEnvelopeRequest, 0, len(devices))
+	for _, d := range devices {
+		if strings.TrimSpace(d.DeviceID) == "" || strings.TrimSpace(d.PublicKey) == "" {
+			continue
+		}
+		pub, err := crypto.PublicKeyFromBase64(d.PublicKey)
+		if err != nil {
+			return fmt.Errorf("invalid device public key: %v", err)
+		}
+		ct, err := crypto.EncryptForPeer(m.kp.Private, pub, key)
+		if err != nil {
+			return fmt.Errorf("encrypt key for device: %v", err)
+		}
+		envelopes = append(envelopes, ChannelKeyEnvelopeRequest{
+			DeviceID:        d.DeviceID,
+			SenderDeviceID:  m.auth.DeviceID,
+			SenderPublicKey: senderPub,
+			Envelope:        ct,
+		})
+	}
+	if len(envelopes) == 0 {
+		return fmt.Errorf("no valid devices for key share")
+	}
+
+	return m.api.PutChannelKeyEnvelopes(ctx, m.auth.Token, channelID, envelopes)
 }
 
 func (m *chatModel) deleteChannel(nameOrID string) {
@@ -470,11 +541,12 @@ func (m *chatModel) renameChannel(nameOrID, newName string) {
 	if !ok {
 		return
 	}
-	if len(m.channelKey) == 0 {
-		m.errMsg = "missing channel key"
+	key, err := m.ensureChannelKey(resolvedID)
+	if err != nil {
+		m.errMsg = fmt.Sprintf("channel key: %v", err)
 		return
 	}
-	nameEnc, err := encryptChannelField(m.channelKey, newName)
+	nameEnc, err := encryptChannelField(key, newName)
 	if err != nil {
 		m.errMsg = fmt.Sprintf("encrypt channel name: %v", err)
 		return
@@ -486,7 +558,7 @@ func (m *chatModel) renameChannel(nameOrID, newName string) {
 		m.errMsg = fmt.Sprintf("rename channel: %v", err)
 		return
 	}
-	name := m.decryptChannelName(updated.NameEnc)
+	name := m.decryptChannelName(updated.ID, updated.NameEnc)
 	m.channels[resolvedID] = channelInfo{ID: resolvedID, Name: name}
 	m.ensureSidebarIndex()
 	if info.Name != "" {
@@ -521,6 +593,10 @@ func (m *chatModel) leaveChannel() {
 func (m *chatModel) loadChannelHistory(channelID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if _, err := m.ensureChannelKey(channelID); err != nil {
+		m.errMsg = fmt.Sprintf("channel key: %v", err)
+		return
+	}
 	msgs, err := m.api.ListChannelMessages(ctx, m.auth.Token, channelID, 100)
 	if err != nil {
 		m.errMsg = fmt.Sprintf("channel history: %v", err)
@@ -533,8 +609,8 @@ func (m *chatModel) loadChannelHistory(channelID string) {
 
 	loaded := make([]chatMessage, 0, len(msgs))
 	for _, msg := range msgs {
-		senderName := m.decryptChannelField(msg.SenderNameEnc)
-		body := m.decryptChannelField(msg.Body)
+		senderName := m.decryptChannelField(channelID, msg.SenderNameEnc)
+		body := m.decryptChannelField(channelID, msg.Body)
 		if senderName != "" {
 			m.userNames[msg.SenderID] = senderName
 		}
@@ -577,14 +653,14 @@ func (m *chatModel) resolveChannel(nameOrID string, allowSelect bool) (string, c
 		return "", channelInfo{}, false
 	}
 	for _, ch := range channels {
-		name := m.decryptChannelName(ch.NameEnc)
+		name := m.decryptChannelName(ch.ID, ch.NameEnc)
 		m.channels[ch.ID] = channelInfo{ID: ch.ID, Name: name}
 	}
 
 	needle := strings.ToLower(strings.TrimSpace(nameOrID))
 	var matches []channelInfo
 	for _, ch := range channels {
-		name := m.decryptChannelName(ch.NameEnc)
+		name := m.decryptChannelName(ch.ID, ch.NameEnc)
 		if strings.ToLower(name) == needle {
 			matches = append(matches, channelInfo{ID: ch.ID, Name: name})
 		}
@@ -592,7 +668,7 @@ func (m *chatModel) resolveChannel(nameOrID string, allowSelect bool) (string, c
 	if len(matches) == 0 {
 		for _, ch := range channels {
 			if strings.HasPrefix(strings.ToLower(ch.ID), needle) {
-				name := m.decryptChannelName(ch.NameEnc)
+				name := m.decryptChannelName(ch.ID, ch.NameEnc)
 				matches = append(matches, channelInfo{ID: ch.ID, Name: name})
 			}
 		}
@@ -699,8 +775,8 @@ func (m *chatModel) appendHighlightedMessage(text string) {
 func (m *chatModel) handleServerMessage(msg ServerMessage) {
 	switch msg.Type {
 	case "channel.message.new":
-		senderName := m.decryptChannelField(msg.SenderNameEnc)
-		body := m.decryptChannelField(msg.Body)
+		senderName := m.decryptChannelField(msg.ChannelID, msg.SenderNameEnc)
+		body := m.decryptChannelField(msg.ChannelID, msg.Body)
 		if senderName != "" {
 			m.userNames[msg.Sender] = senderName
 		}
@@ -728,7 +804,7 @@ func (m *chatModel) handleServerMessage(msg ServerMessage) {
 			return
 		}
 		prev := m.channels[msg.ChannelID]
-		name := m.decryptChannelName(msg.ChannelNameEnc)
+		name := m.decryptChannelName(msg.ChannelID, msg.ChannelNameEnc)
 		m.channels[msg.ChannelID] = channelInfo{ID: msg.ChannelID, Name: name}
 		if m.activeChannel == msg.ChannelID && name != "" && prev.Name != "" && prev.Name != name {
 			m.appendSystemMessage(fmt.Sprintf("channel renamed to '%s'", name))
@@ -1246,18 +1322,56 @@ func wrapText(text string, width int) []string {
 	return lines
 }
 
-func decodeChannelKey(encoded string) ([]byte, error) {
-	if strings.TrimSpace(encoded) == "" {
-		return nil, fmt.Errorf("missing channel key")
+func generateChannelKey() ([]byte, error) {
+	key := make([]byte, crypto.KeySize)
+	if _, err := rand.Read(key); err != nil {
+		return nil, err
 	}
-	raw, err := base64.StdEncoding.DecodeString(encoded)
+	return key, nil
+}
+
+func (m *chatModel) getChannelKey(channelID string) []byte {
+	if channelID == "" {
+		return nil
+	}
+	return m.channelKeys[channelID]
+}
+
+func (m *chatModel) setChannelKey(channelID string, key []byte) {
+	if channelID == "" || len(key) != crypto.KeySize {
+		return
+	}
+	stored := make([]byte, len(key))
+	copy(stored, key)
+	m.channelKeys[channelID] = stored
+}
+
+func (m *chatModel) ensureChannelKey(channelID string) ([]byte, error) {
+	if channelID == "" {
+		return nil, fmt.Errorf("missing channel id")
+	}
+	if existing := m.getChannelKey(channelID); len(existing) == crypto.KeySize {
+		return existing, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	env, err := m.api.GetChannelKeyEnvelope(ctx, m.auth.Token, channelID)
 	if err != nil {
 		return nil, err
 	}
-	if len(raw) != crypto.KeySize {
+	senderPub, err := crypto.PublicKeyFromBase64(env.SenderPublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid sender public key: %v", err)
+	}
+	key, err := crypto.DecryptFromPeer(m.kp.Private, senderPub, env.Envelope)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt key envelope: %v", err)
+	}
+	if len(key) != crypto.KeySize {
 		return nil, fmt.Errorf("invalid channel key size")
 	}
-	return raw, nil
+	m.setChannelKey(channelID, key)
+	return key, nil
 }
 
 func encryptChannelField(key []byte, plaintext string) (string, error) {
@@ -1280,23 +1394,24 @@ func decryptFieldWithKey(key []byte, encoded string) (string, error) {
 	return string(pt), nil
 }
 
-func (m *chatModel) decryptChannelField(encoded string) string {
+func (m *chatModel) decryptChannelField(channelID, encoded string) string {
 	if encoded == "" {
 		return ""
 	}
-	if len(m.channelKey) == 0 {
+	key := m.getChannelKey(channelID)
+	if len(key) != crypto.KeySize {
 		return "<encrypted>"
 	}
-	value, err := decryptFieldWithKey(m.channelKey, encoded)
+	value, err := decryptFieldWithKey(key, encoded)
 	if err != nil {
 		return "<encrypted>"
 	}
 	return value
 }
 
-func (m *chatModel) decryptChannelName(encoded string) string {
+func (m *chatModel) decryptChannelName(channelID, encoded string) string {
 	if encoded == "" {
 		return "<encrypted>"
 	}
-	return m.decryptChannelField(encoded)
+	return m.decryptChannelField(channelID, encoded)
 }

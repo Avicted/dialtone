@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/user"
 )
 
@@ -26,6 +27,15 @@ type Message struct {
 	SentAt        time.Time
 }
 
+type KeyEnvelope struct {
+	ChannelID       ID
+	DeviceID        device.ID
+	SenderDeviceID  device.ID
+	SenderPublicKey string
+	Envelope        string
+	CreatedAt       time.Time
+}
+
 var (
 	ErrNotFound     = errors.New("not found")
 	ErrInvalidInput = errors.New("invalid input")
@@ -40,4 +50,6 @@ type Repository interface {
 	DeleteChannel(ctx context.Context, id ID) error
 	SaveMessage(ctx context.Context, msg Message) error
 	ListRecentMessages(ctx context.Context, channelID ID, limit int) ([]Message, error)
+	UpsertKeyEnvelope(ctx context.Context, env KeyEnvelope) error
+	GetKeyEnvelope(ctx context.Context, channelID ID, deviceID device.ID) (KeyEnvelope, error)
 }

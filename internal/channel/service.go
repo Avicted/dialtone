@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/user"
 	"github.com/google/uuid"
 )
@@ -121,4 +122,30 @@ func (s *Service) ListMessages(ctx context.Context, userID user.ID, channelID ID
 		limit = defaultHistoryLimit
 	}
 	return s.repo.ListRecentMessages(ctx, channelID, limit)
+}
+
+func (s *Service) UpsertKeyEnvelope(ctx context.Context, userID user.ID, env KeyEnvelope) error {
+	if s.repo == nil {
+		return errors.New("repository is required")
+	}
+	if userID == "" || env.ChannelID == "" || env.DeviceID == "" || env.SenderDeviceID == "" {
+		return ErrInvalidInput
+	}
+	if strings.TrimSpace(env.SenderPublicKey) == "" || strings.TrimSpace(env.Envelope) == "" {
+		return ErrInvalidInput
+	}
+	if env.CreatedAt.IsZero() {
+		env.CreatedAt = s.now().UTC()
+	}
+	return s.repo.UpsertKeyEnvelope(ctx, env)
+}
+
+func (s *Service) GetKeyEnvelope(ctx context.Context, userID user.ID, channelID ID, deviceID device.ID) (KeyEnvelope, error) {
+	if s.repo == nil {
+		return KeyEnvelope{}, errors.New("repository is required")
+	}
+	if userID == "" || channelID == "" || deviceID == "" {
+		return KeyEnvelope{}, ErrInvalidInput
+	}
+	return s.repo.GetKeyEnvelope(ctx, channelID, deviceID)
 }

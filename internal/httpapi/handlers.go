@@ -29,7 +29,6 @@ type Handler struct {
 	invites    *serverinvite.Service
 	presence   PresenceProvider
 	notifier   ChannelNotifier
-	channelKey string
 	adminToken string
 }
 
@@ -42,7 +41,7 @@ type ChannelNotifier interface {
 	NotifyChannelDeleted(id channel.ID)
 }
 
-func NewHandler(users *user.Service, devices *device.Service, channels *channel.Service, auth *auth.Service, invites *serverinvite.Service, presence PresenceProvider, notifier ChannelNotifier, channelKey, adminToken string) *Handler {
+func NewHandler(users *user.Service, devices *device.Service, channels *channel.Service, auth *auth.Service, invites *serverinvite.Service, presence PresenceProvider, notifier ChannelNotifier, adminToken string) *Handler {
 	return &Handler{
 		users:      users,
 		devices:    devices,
@@ -51,7 +50,6 @@ func NewHandler(users *user.Service, devices *device.Service, channels *channel.
 		invites:    invites,
 		presence:   presence,
 		notifier:   notifier,
-		channelKey: channelKey,
 		adminToken: adminToken,
 	}
 }
@@ -64,6 +62,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/auth/login", h.handleLogin)
 	mux.HandleFunc("/channels", h.handleChannels)
 	mux.HandleFunc("/channels/messages", h.handleChannelMessages)
+	mux.HandleFunc("/channels/keys", h.handleChannelKeys)
 	mux.HandleFunc("/presence", h.handlePresence)
 	mux.HandleFunc("/server/invites", h.handleServerInvites)
 }
@@ -82,7 +81,6 @@ type authResponse struct {
 	ExpiresAt    string    `json:"expires_at"`
 	Username     string    `json:"username"`
 	DevicePubKey string    `json:"device_public_key"`
-	ChannelKey   string    `json:"channel_key"`
 }
 
 func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -124,7 +122,6 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:    session.ExpiresAt.UTC().Format(timeLayout),
 		Username:     session.Username,
 		DevicePubKey: createdDevice.PublicKey,
-		ChannelKey:   h.channelKey,
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -166,7 +163,6 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:    session.ExpiresAt.UTC().Format(timeLayout),
 		Username:     session.Username,
 		DevicePubKey: createdDevice.PublicKey,
-		ChannelKey:   h.channelKey,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -292,6 +288,7 @@ func (h *Handler) handleDevices(w http.ResponseWriter, r *http.Request) {
 }
 
 type deviceKeyInfo struct {
+	UserID    user.ID   `json:"user_id,omitempty"`
 	DeviceID  device.ID `json:"device_id"`
 	PublicKey string    `json:"public_key"`
 }
@@ -317,16 +314,32 @@ func (h *Handler) handleDeviceKeys(w http.ResponseWriter, r *http.Request) {
 
 	all := r.URL.Query().Get("all") == "1"
 	userID := user.ID(r.URL.Query().Get("user_id"))
-	if all {
-		writeError(w, http.StatusForbidden, errors.New("listing all device keys is not allowed"))
-		return
-	}
 	if userID == "" {
-		writeError(w, http.StatusBadRequest, errors.New("user_id query parameter is required"))
+		if !all {
+			writeError(w, http.StatusBadRequest, errors.New("user_id query parameter is required"))
+			return
+		}
+	} else if userID != session.UserID {
+		writeError(w, http.StatusForbidden, errors.New("cannot list devices for another user"))
 		return
 	}
-	if userID != session.UserID {
-		writeError(w, http.StatusForbidden, errors.New("cannot list devices for another user"))
+
+	if all {
+		devices, err := h.devices.ListAll(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		keys := make([]deviceKeyInfo, 0, len(devices))
+		for _, d := range devices {
+			keys = append(keys, deviceKeyInfo{
+				UserID:    d.UserID,
+				DeviceID:  d.ID,
+				PublicKey: d.PublicKey,
+			})
+		}
+		writeJSON(w, http.StatusOK, deviceKeysResponse{Keys: keys})
 		return
 	}
 
@@ -349,6 +362,110 @@ func (h *Handler) handleDeviceKeys(w http.ResponseWriter, r *http.Request) {
 		resp.UserID = userID
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+type channelKeyEnvelopeRequest struct {
+	ChannelID       channel.ID `json:"channel_id"`
+	DeviceID        device.ID  `json:"device_id"`
+	SenderDeviceID  device.ID  `json:"sender_device_id"`
+	SenderPublicKey string     `json:"sender_public_key"`
+	Envelope        string     `json:"envelope"`
+}
+
+type channelKeyEnvelopesRequest struct {
+	ChannelID channel.ID                  `json:"channel_id"`
+	Envelopes []channelKeyEnvelopeRequest `json:"envelopes"`
+}
+
+type channelKeyEnvelopeResponse struct {
+	ChannelID       channel.ID `json:"channel_id"`
+	DeviceID        device.ID  `json:"device_id"`
+	SenderDeviceID  device.ID  `json:"sender_device_id"`
+	SenderPublicKey string     `json:"sender_public_key"`
+	Envelope        string     `json:"envelope"`
+	CreatedAt       string     `json:"created_at"`
+}
+
+func (h *Handler) handleChannelKeys(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if h.channels == nil {
+		writeError(w, http.StatusInternalServerError, errors.New("channel service not configured"))
+		return
+	}
+
+	session, err := h.authenticate(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		channelID := channel.ID(strings.TrimSpace(r.URL.Query().Get("channel_id")))
+		if channelID == "" {
+			writeError(w, http.StatusBadRequest, errors.New("channel_id query parameter is required"))
+			return
+		}
+		env, err := h.channels.GetKeyEnvelope(r.Context(), session.UserID, channelID, session.DeviceID)
+		if err != nil {
+			switch {
+			case errors.Is(err, channel.ErrInvalidInput):
+				writeError(w, http.StatusBadRequest, err)
+			case errors.Is(err, storage.ErrNotFound):
+				writeError(w, http.StatusNotFound, err)
+			default:
+				writeError(w, http.StatusInternalServerError, err)
+			}
+			return
+		}
+
+		resp := channelKeyEnvelopeResponse{
+			ChannelID:       env.ChannelID,
+			DeviceID:        env.DeviceID,
+			SenderDeviceID:  env.SenderDeviceID,
+			SenderPublicKey: env.SenderPublicKey,
+			Envelope:        env.Envelope,
+			CreatedAt:       env.CreatedAt.UTC().Format(timeLayout),
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	var req channelKeyEnvelopesRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.ChannelID == "" || len(req.Envelopes) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("channel_id and envelopes are required"))
+		return
+	}
+	for _, envReq := range req.Envelopes {
+		if envReq.SenderDeviceID != session.DeviceID {
+			writeError(w, http.StatusForbidden, errors.New("sender_device_id must match the current device"))
+			return
+		}
+		env := channel.KeyEnvelope{
+			ChannelID:       req.ChannelID,
+			DeviceID:        envReq.DeviceID,
+			SenderDeviceID:  envReq.SenderDeviceID,
+			SenderPublicKey: strings.TrimSpace(envReq.SenderPublicKey),
+			Envelope:        strings.TrimSpace(envReq.Envelope),
+			CreatedAt:       time.Now().UTC(),
+		}
+		if err := h.channels.UpsertKeyEnvelope(r.Context(), session.UserID, env); err != nil {
+			switch {
+			case errors.Is(err, channel.ErrInvalidInput):
+				writeError(w, http.StatusBadRequest, err)
+			default:
+				writeError(w, http.StatusInternalServerError, err)
+			}
+			return
+		}
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"status": "ok"})
 }
 
 type createServerInviteResponse struct {

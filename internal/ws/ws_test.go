@@ -277,7 +277,7 @@ func TestAuthenticateRequest_NilValidator(t *testing.T) {
 }
 
 func TestNewHub(t *testing.T) {
-	hub := NewHub(nil, nil, nil, nil)
+	hub := NewHub(nil, nil, nil)
 	if hub == nil {
 		t.Fatal("NewHub() returned nil")
 	}
@@ -313,12 +313,12 @@ func TestWithAuthValidator(t *testing.T) {
 }
 
 func TestHub_SendHistory_NilClient(t *testing.T) {
-	hub := NewHub(nil, nil, nil, nil)
+	hub := NewHub(nil, nil, nil)
 	hub.sendHistory(context.TODO(), nil)
 }
 
 func TestHub_HandleIncoming_UnknownType(t *testing.T) {
-	hub := NewHub(nil, nil, nil, nil)
+	hub := NewHub(nil, nil, nil)
 	c := &Client{
 		send:   make(chan []byte, 8),
 		userID: "user-1",

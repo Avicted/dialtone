@@ -453,6 +453,41 @@ func (r *channelRepo) ListRecentMessages(ctx context.Context, channelID channel.
 	return msgs, nil
 }
 
+func (r *channelRepo) UpsertKeyEnvelope(ctx context.Context, env channel.KeyEnvelope) error {
+	if env.ChannelID == "" || env.DeviceID == "" || env.SenderDeviceID == "" || env.SenderPublicKey == "" || env.Envelope == "" || env.CreatedAt.IsZero() {
+		return fmt.Errorf("channel key envelope fields are required")
+	}
+	_, err := r.db.ExecContext(ctx, `INSERT INTO channel_key_envelopes
+		(channel_id, device_id, sender_device_id, sender_public_key, envelope, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (channel_id, device_id) DO UPDATE
+		SET sender_device_id = EXCLUDED.sender_device_id,
+			sender_public_key = EXCLUDED.sender_public_key,
+			envelope = EXCLUDED.envelope,
+			created_at = EXCLUDED.created_at`,
+		env.ChannelID, env.DeviceID, env.SenderDeviceID, env.SenderPublicKey, env.Envelope, env.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("upsert channel key envelope: %w", err)
+	}
+	return nil
+}
+
+func (r *channelRepo) GetKeyEnvelope(ctx context.Context, channelID channel.ID, deviceID device.ID) (channel.KeyEnvelope, error) {
+	if channelID == "" || deviceID == "" {
+		return channel.KeyEnvelope{}, fmt.Errorf("channel id and device id are required")
+	}
+	row := r.db.QueryRowContext(ctx, `SELECT channel_id, device_id, sender_device_id, sender_public_key, envelope, created_at
+		FROM channel_key_envelopes WHERE channel_id = $1 AND device_id = $2`, channelID, deviceID)
+	var env channel.KeyEnvelope
+	if err := row.Scan(&env.ChannelID, &env.DeviceID, &env.SenderDeviceID, &env.SenderPublicKey, &env.Envelope, &env.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return channel.KeyEnvelope{}, ErrNotFound
+		}
+		return channel.KeyEnvelope{}, fmt.Errorf("select channel key envelope: %w", err)
+	}
+	return env, nil
+}
+
 type serverInviteRepo struct {
 	db *sql.DB
 }

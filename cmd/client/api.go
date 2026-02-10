@@ -25,7 +25,6 @@ type AuthResponse struct {
 	ExpiresAt    string `json:"expires_at"`
 	Username     string `json:"username"`
 	DevicePubKey string `json:"device_public_key"`
-	ChannelKey   string `json:"channel_key"`
 }
 
 type apiError struct {
@@ -64,6 +63,38 @@ type CreateServerInviteResponse struct {
 type PresenceResponse struct {
 	Statuses map[string]bool `json:"statuses"`
 	Admins   map[string]bool `json:"admins"`
+}
+
+type DeviceKey struct {
+	UserID    string `json:"user_id,omitempty"`
+	DeviceID  string `json:"device_id"`
+	PublicKey string `json:"public_key"`
+}
+
+type DeviceKeysResponse struct {
+	UserID string      `json:"user_id"`
+	Keys   []DeviceKey `json:"keys"`
+}
+
+type ChannelKeyEnvelope struct {
+	ChannelID       string `json:"channel_id"`
+	DeviceID        string `json:"device_id"`
+	SenderDeviceID  string `json:"sender_device_id"`
+	SenderPublicKey string `json:"sender_public_key"`
+	Envelope        string `json:"envelope"`
+	CreatedAt       string `json:"created_at"`
+}
+
+type ChannelKeyEnvelopeRequest struct {
+	DeviceID        string `json:"device_id"`
+	SenderDeviceID  string `json:"sender_device_id"`
+	SenderPublicKey string `json:"sender_public_key"`
+	Envelope        string `json:"envelope"`
+}
+
+type ChannelKeyEnvelopesRequest struct {
+	ChannelID string                      `json:"channel_id"`
+	Envelopes []ChannelKeyEnvelopeRequest `json:"envelopes"`
 }
 
 func NewAPIClient(serverURL string) *APIClient {
@@ -205,6 +236,30 @@ func (c *APIClient) FetchPresence(ctx context.Context, token string, userIDs []s
 		resp.Admins = map[string]bool{}
 	}
 	return resp.Statuses, resp.Admins, nil
+}
+
+func (c *APIClient) ListAllDeviceKeys(ctx context.Context, token string) ([]DeviceKey, error) {
+	var resp DeviceKeysResponse
+	if err := c.doJSON(ctx, http.MethodGet, "/devices/keys?all=1", token, nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Keys, nil
+}
+
+func (c *APIClient) GetChannelKeyEnvelope(ctx context.Context, token, channelID string) (*ChannelKeyEnvelope, error) {
+	query := url.Values{}
+	query.Set("channel_id", channelID)
+	path := "/channels/keys?" + query.Encode()
+	var resp ChannelKeyEnvelope
+	if err := c.doJSON(ctx, http.MethodGet, path, token, nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *APIClient) PutChannelKeyEnvelopes(ctx context.Context, token, channelID string, envelopes []ChannelKeyEnvelopeRequest) error {
+	payload := ChannelKeyEnvelopesRequest{ChannelID: channelID, Envelopes: envelopes}
+	return c.doJSON(ctx, http.MethodPost, "/channels/keys", token, payload, nil)
 }
 
 func (c *APIClient) doJSON(ctx context.Context, method, path, token string, payload any, out any) error {
