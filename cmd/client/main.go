@@ -9,8 +9,18 @@ import (
 )
 
 func main() {
-	serverAddr := flag.String("server", "http://localhost:8080", "dialtone server address")
+	serverAddr := flag.String("server", "", "dialtone server address")
 	flag.Parse()
+
+	serverSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "server" {
+			serverSet = true
+		}
+	})
+	if !serverSet {
+		*serverAddr = ""
+	}
 
 	api := NewAPIClient(*serverAddr)
 	m := newRootModel(api)

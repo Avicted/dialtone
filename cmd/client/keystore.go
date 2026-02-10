@@ -19,6 +19,10 @@ type storedChannelKeys struct {
 	Keys map[string]string `json:"keys"`
 }
 
+type storedDirectoryKey struct {
+	Key string `json:"key"`
+}
+
 func loadOrCreateKeyPair() (*crypto.KeyPair, error) {
 	path, err := deviceKeyPath()
 	if err == nil {
@@ -140,6 +144,63 @@ func saveChannelKeys(keys map[string][]byte) error {
 		encoded[channelID] = base64.StdEncoding.EncodeToString(key)
 	}
 	data, err := json.Marshal(storedChannelKeys{Keys: encoded})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+func directoryKeyPath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "dialtone", "directory_key.json"), nil
+}
+
+func loadDirectoryKey() ([]byte, error) {
+	path, err := directoryKeyPath()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var stored storedDirectoryKey
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(stored.Key) == "" {
+		return nil, nil
+	}
+	key, err := base64.StdEncoding.DecodeString(stored.Key)
+	if err != nil {
+		return nil, err
+	}
+	if len(key) != crypto.KeySize {
+		return nil, nil
+	}
+	return key, nil
+}
+
+func saveDirectoryKey(key []byte) error {
+	path, err := directoryKeyPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if len(key) != crypto.KeySize {
+		return fmt.Errorf("invalid directory key size")
+	}
+	stored := storedDirectoryKey{Key: base64.StdEncoding.EncodeToString(key)}
+	data, err := json.Marshal(stored)
 	if err != nil {
 		return err
 	}

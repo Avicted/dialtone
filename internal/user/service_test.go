@@ -44,6 +44,22 @@ func (r *fakeRepo) Count(_ context.Context) (int, error) {
 	return len(r.users), nil
 }
 
+func (r *fakeRepo) UpsertProfile(_ context.Context, _ Profile) error {
+	return nil
+}
+
+func (r *fakeRepo) ListProfiles(_ context.Context) ([]Profile, error) {
+	return nil, nil
+}
+
+func (r *fakeRepo) UpsertDirectoryKeyEnvelope(_ context.Context, _ DirectoryKeyEnvelope) error {
+	return nil
+}
+
+func (r *fakeRepo) GetDirectoryKeyEnvelope(_ context.Context, _ string) (DirectoryKeyEnvelope, error) {
+	return DirectoryKeyEnvelope{}, errors.New("not found")
+}
+
 func newTestService() (*Service, *fakeRepo) {
 	repo := newFakeRepo()
 	svc := NewService(repo, "test-pepper")

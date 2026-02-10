@@ -85,7 +85,7 @@ func (s *Service) Register(ctx context.Context, username, password, publicKey, i
 	if err != nil {
 		return user.User{}, device.Device{}, Session{}, err
 	}
-	createdUser, err := s.users.CreateWithPasswordAndID(ctx, userID, name, hash, count == 0)
+	createdUser, err := s.users.CreateWithPasswordAndID(ctx, userID, name, hash, count == 0, true)
 	if err != nil {
 		return user.User{}, device.Device{}, Session{}, err
 	}

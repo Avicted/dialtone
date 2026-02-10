@@ -67,6 +67,7 @@ type chatModel struct {
 	userPresence         map[string]bool
 	userAdmins           map[string]bool
 	channelKeys          map[string][]byte
+	directoryKey         []byte
 	activeChannel        string
 	channelUnread        map[string]int
 	sidebarVisible       bool
@@ -98,6 +99,13 @@ type shareTick struct{}
 
 type shareKeysMsg struct{ err error }
 
+type shareDirectoryMsg struct{ err error }
+
+type directorySyncMsg struct {
+	profiles []UserProfile
+	err      error
+}
+
 func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width, height int) chatModel {
 	input := textinput.New()
 	input.Placeholder = "type a message..."
@@ -110,6 +118,7 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width,
 	vp := viewport.New(vpWidth, vpHeight)
 
 	keys, keysErr := loadChannelKeys()
+	dirKey, dirErr := loadDirectoryKey()
 
 	model := chatModel{
 		api:                  api,
@@ -126,6 +135,7 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width,
 		userPresence:         make(map[string]bool),
 		userAdmins:           make(map[string]bool),
 		channelKeys:          keys,
+		directoryKey:         dirKey,
 		channelUnread:        make(map[string]int),
 		sidebarVisible:       true,
 		sidebarMode:          sidebarChannels,
@@ -134,14 +144,22 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width,
 	if keysErr != nil {
 		model.errMsg = "failed to load channel keys"
 	}
+	if dirErr != nil {
+		model.errMsg = "failed to load directory key"
+	}
 	return model
 }
 
 func (m chatModel) Init() tea.Cmd {
-	return tea.Batch(
-		textinput.Blink,
-		m.connectWS(),
-	)
+	cmds := []tea.Cmd{textinput.Blink, m.connectWS()}
+	if m.isTrusted() {
+		cmds = append(cmds, m.syncDirectoryCmd())
+	}
+	return tea.Batch(cmds...)
+}
+
+func (m *chatModel) isTrusted() bool {
+	return m.auth != nil && m.auth.IsTrusted
 }
 
 func (m chatModel) connectWS() tea.Cmd {
@@ -244,9 +262,12 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 			if serverMsg.DeviceID == m.auth.DeviceID {
 				m.refreshChannels(false)
 			}
-			cmd := m.shareKnownChannelKeysCmd()
+			cmds := []tea.Cmd{waitForWSMsg(m.wsCh), m.shareKnownChannelKeysCmd()}
+			if m.isTrusted() {
+				cmds = append(cmds, m.shareDirectoryKeyCmd(), m.syncDirectoryCmd())
+			}
 			m.refreshViewport()
-			return m, tea.Batch(waitForWSMsg(m.wsCh), cmd)
+			return m, tea.Batch(cmds...)
 		}
 		m.handleServerMessage(serverMsg)
 		m.refreshViewport()
@@ -257,9 +278,31 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		m.errMsg = msg.err.Error()
 		return m, nil
 
+	case directorySyncMsg:
+		if msg.err != nil {
+			m.errMsg = msg.err.Error()
+			return m, nil
+		}
+		for _, profile := range msg.profiles {
+			name := m.decryptDirectoryName(profile.NameEnc)
+			if name != "" {
+				m.userNames[profile.UserID] = name
+			}
+		}
+		if m.sidebarVisible && m.sidebarMode == sidebarUsers {
+			m.refreshPresence()
+		}
+		return m, nil
+
 	case shareKeysMsg:
 		if msg.err != nil {
 			m.errMsg = fmt.Sprintf("share channel keys: %v", msg.err)
+		}
+		return m, nil
+
+	case shareDirectoryMsg:
+		if msg.err != nil {
+			m.errMsg = fmt.Sprintf("share directory key: %v", msg.err)
 		}
 		return m, nil
 
@@ -590,6 +633,130 @@ func (m *chatModel) shareKnownChannelKeys() error {
 	return m.persistChannelKeys()
 }
 
+func (m *chatModel) shareDirectoryKeyCmd() tea.Cmd {
+	if !m.isTrusted() || len(m.directoryKey) != crypto.KeySize {
+		return nil
+	}
+	return func() tea.Msg {
+		return shareDirectoryMsg{err: m.shareDirectoryKey()}
+	}
+}
+
+func (m *chatModel) shareDirectoryKey() error {
+	if m.api == nil || m.auth == nil || m.kp == nil {
+		return nil
+	}
+	if len(m.directoryKey) != crypto.KeySize {
+		return fmt.Errorf("missing directory key")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	devices, err := m.api.ListAllDeviceKeys(ctx, m.auth.Token)
+	if err != nil {
+		return err
+	}
+	if len(devices) == 0 {
+		return nil
+	}
+	envelopes, err := buildDirectoryKeyEnvelopes(m.kp, m.auth.DeviceID, m.directoryKey, devices)
+	if err != nil {
+		return err
+	}
+	if len(envelopes) == 0 {
+		return nil
+	}
+	return m.api.PutDirectoryKeyEnvelopes(ctx, m.auth.Token, envelopes)
+}
+
+func (m *chatModel) syncDirectoryCmd() tea.Cmd {
+	if !m.isTrusted() {
+		return nil
+	}
+	return func() tea.Msg {
+		profiles, err := m.syncDirectory()
+		return directorySyncMsg{profiles: profiles, err: err}
+	}
+}
+
+func (m *chatModel) syncDirectory() ([]UserProfile, error) {
+	key, err := m.ensureDirectoryKey()
+	if err != nil {
+		return nil, err
+	}
+	if m.auth == nil {
+		return nil, fmt.Errorf("missing auth")
+	}
+	nameEnc, err := encryptChannelField(key, m.auth.Username)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt username: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := m.api.UpsertUserProfile(ctx, m.auth.Token, nameEnc); err != nil {
+		return nil, err
+	}
+	return m.api.ListUserProfiles(ctx, m.auth.Token)
+}
+
+func (m *chatModel) ensureDirectoryKey() ([]byte, error) {
+	if len(m.directoryKey) == crypto.KeySize {
+		return m.directoryKey, nil
+	}
+	if m.api == nil || m.auth == nil || m.kp == nil {
+		return nil, fmt.Errorf("missing directory key dependencies")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	env, err := m.api.GetDirectoryKeyEnvelope(ctx, m.auth.Token)
+	if err == nil {
+		senderPub, err := crypto.PublicKeyFromBase64(env.SenderPublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("invalid sender public key: %v", err)
+		}
+		key, err := crypto.DecryptFromPeer(m.kp.Private, senderPub, env.Envelope)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt directory key: %v", err)
+		}
+		if len(key) != crypto.KeySize {
+			return nil, fmt.Errorf("invalid directory key size")
+		}
+		m.setDirectoryKey(key)
+		if err := m.persistDirectoryKey(); err != nil {
+			return nil, err
+		}
+		return key, nil
+	}
+	if !isNotFoundErr(err) {
+		return nil, err
+	}
+
+	key, err := generateChannelKey()
+	if err != nil {
+		return nil, err
+	}
+	m.setDirectoryKey(key)
+	if err := m.persistDirectoryKey(); err != nil {
+		return nil, err
+	}
+	if err := m.shareDirectoryKey(); err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+func (m *chatModel) setDirectoryKey(key []byte) {
+	if len(key) != crypto.KeySize {
+		return
+	}
+	stored := make([]byte, len(key))
+	copy(stored, key)
+	m.directoryKey = stored
+}
+
+func (m *chatModel) persistDirectoryKey() error {
+	return saveDirectoryKey(m.directoryKey)
+}
+
 func (m *chatModel) deleteChannel(nameOrID string) {
 	resolvedID, info, ok := m.resolveChannel(nameOrID, false)
 	if !ok {
@@ -865,7 +1032,7 @@ func (m *chatModel) handleServerMessage(msg ServerMessage) {
 		} else {
 			m.channelUnread[channelID] = 0
 		}
-		if m.sidebarVisible && m.sidebarMode == sidebarUsers && channelID == m.activeChannel {
+		if m.sidebarVisible && m.sidebarMode == sidebarUsers {
 			m.refreshPresence()
 		}
 
@@ -983,7 +1150,31 @@ func (m *chatModel) renderSidebar() string {
 	lines := make([]string, 0, 12)
 	if m.sidebarMode == sidebarUsers {
 		lines = append(lines, sidebarTitleStyle.Render("Users"), "")
-		if m.activeChannel == "" {
+		if m.isTrusted() {
+			users := m.allUserEntries()
+			if len(users) == 0 {
+				lines = append(lines, labelStyle.Render("(none)"))
+			} else {
+				for _, entry := range users {
+					prefix := "?"
+					style := labelStyle
+					if entry.Known {
+						if entry.Online {
+							prefix = "+"
+							style = sidebarOnlineStyle
+						} else {
+							prefix = "-"
+							style = sidebarOfflineStyle
+						}
+					}
+					name := entry.Name
+					if entry.Admin {
+						name = fmt.Sprintf("%s (admin)", name)
+					}
+					lines = append(lines, style.Render(fmt.Sprintf("%s %s", prefix, name)))
+				}
+			}
+		} else if m.activeChannel == "" {
 			lines = append(lines, labelStyle.Render("(no channel)"))
 		} else {
 			users := m.channelUserEntries(m.activeChannel)
@@ -1108,11 +1299,105 @@ func (m *chatModel) channelUserIDs(channelID string) []string {
 	return ids
 }
 
-func (m *chatModel) refreshPresence() {
-	if m.activeChannel == "" {
-		return
+func (m *chatModel) allUserEntries() []userEntry {
+	seen := make(map[string]string)
+	addUser := func(id, name string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if name == "" {
+			if cached := m.userNames[id]; cached != "" {
+				name = cached
+			} else {
+				name = shortID(id)
+			}
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = name
 	}
-	ids := m.channelUserIDs(m.activeChannel)
+
+	if m.auth != nil && m.auth.UserID != "" {
+		name := m.auth.Username
+		if name == "" {
+			name = m.userNames[m.auth.UserID]
+		}
+		addUser(m.auth.UserID, name)
+	}
+
+	for _, msgs := range m.channelMsgs {
+		for _, msg := range msgs {
+			if msg.isSystem || msg.sender == "" {
+				continue
+			}
+			addUser(msg.sender, msg.senderName)
+		}
+	}
+
+	for id, name := range m.userNames {
+		addUser(id, name)
+	}
+
+	entries := make([]userEntry, 0, len(seen))
+	for id, name := range seen {
+		status, ok := m.userPresence[id]
+		admin := m.userAdmins[id]
+		entries = append(entries, userEntry{ID: id, Name: name, Online: status, Known: ok, Admin: admin})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Name == entries[j].Name {
+			return entries[i].ID < entries[j].ID
+		}
+		return entries[i].Name < entries[j].Name
+	})
+	return entries
+}
+
+func (m *chatModel) allUserIDs() []string {
+	seen := make(map[string]struct{})
+	addUser := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		seen[id] = struct{}{}
+	}
+
+	if m.auth != nil {
+		addUser(m.auth.UserID)
+	}
+	for id := range m.userNames {
+		addUser(id)
+	}
+	for _, msgs := range m.channelMsgs {
+		for _, msg := range msgs {
+			if msg.isSystem || msg.sender == "" {
+				continue
+			}
+			addUser(msg.sender)
+		}
+	}
+
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func (m *chatModel) refreshPresence() {
+	var ids []string
+	if m.isTrusted() {
+		ids = m.allUserIDs()
+	} else {
+		if m.activeChannel == "" {
+			return
+		}
+		ids = m.channelUserIDs(m.activeChannel)
+	}
 	if len(ids) == 0 {
 		return
 	}
@@ -1525,6 +1810,37 @@ func buildChannelKeyEnvelopes(kp *crypto.KeyPair, senderDeviceID string, key []b
 	return envelopes, nil
 }
 
+func buildDirectoryKeyEnvelopes(kp *crypto.KeyPair, senderDeviceID string, key []byte, devices []DeviceKey) ([]DirectoryKeyEnvelopeRequest, error) {
+	if kp == nil || kp.Private == nil || kp.Public == nil {
+		return nil, fmt.Errorf("missing device key")
+	}
+	if senderDeviceID == "" {
+		return nil, fmt.Errorf("missing sender device id")
+	}
+	senderPub := crypto.PublicKeyToBase64(kp.Public)
+	envelopes := make([]DirectoryKeyEnvelopeRequest, 0, len(devices))
+	for _, d := range devices {
+		if strings.TrimSpace(d.DeviceID) == "" || strings.TrimSpace(d.PublicKey) == "" {
+			continue
+		}
+		pub, err := crypto.PublicKeyFromBase64(d.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("invalid device public key: %v", err)
+		}
+		ct, err := crypto.EncryptForPeer(kp.Private, pub, key)
+		if err != nil {
+			return nil, fmt.Errorf("encrypt key for device: %v", err)
+		}
+		envelopes = append(envelopes, DirectoryKeyEnvelopeRequest{
+			DeviceID:        d.DeviceID,
+			SenderDeviceID:  senderDeviceID,
+			SenderPublicKey: senderPub,
+			Envelope:        ct,
+		})
+	}
+	return envelopes, nil
+}
+
 func encryptChannelField(key []byte, plaintext string) (string, error) {
 	ct, err := crypto.Encrypt(key, []byte(plaintext))
 	if err != nil {
@@ -1558,6 +1874,24 @@ func (m *chatModel) decryptChannelField(channelID, encoded string) string {
 		return "<encrypted>"
 	}
 	return value
+}
+
+func (m *chatModel) decryptDirectoryName(encoded string) string {
+	if encoded == "" || len(m.directoryKey) != crypto.KeySize {
+		return ""
+	}
+	value, err := decryptFieldWithKey(m.directoryKey, encoded)
+	if err != nil {
+		return ""
+	}
+	return value
+}
+
+func isNotFoundErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "404")
 }
 
 func (m *chatModel) decryptChannelName(channelID, encoded string) string {

@@ -51,6 +51,7 @@ func (s *Service) Create(ctx context.Context, username string) (User, error) {
 		UsernameHash: usernameHash,
 		PasswordHash: "",
 		IsAdmin:      false,
+		IsTrusted:    false,
 		CreatedAt:    s.now().UTC(),
 	}
 
@@ -79,6 +80,7 @@ func (s *Service) CreateWithPassword(ctx context.Context, username, passwordHash
 		UsernameHash: usernameHash,
 		PasswordHash: passwordHash,
 		IsAdmin:      false,
+		IsTrusted:    false,
 		CreatedAt:    s.now().UTC(),
 	}
 
@@ -88,7 +90,7 @@ func (s *Service) CreateWithPassword(ctx context.Context, username, passwordHash
 	return u, nil
 }
 
-func (s *Service) CreateWithPasswordAndID(ctx context.Context, id ID, username, passwordHash string, isAdmin bool) (User, error) {
+func (s *Service) CreateWithPasswordAndID(ctx context.Context, id ID, username, passwordHash string, isAdmin bool, isTrusted bool) (User, error) {
 	if s.repo == nil {
 		return User{}, errors.New("repository is required")
 	}
@@ -109,6 +111,7 @@ func (s *Service) CreateWithPasswordAndID(ctx context.Context, id ID, username, 
 		UsernameHash: usernameHash,
 		PasswordHash: passwordHash,
 		IsAdmin:      isAdmin,
+		IsTrusted:    isTrusted,
 		CreatedAt:    s.now().UTC(),
 	}
 
@@ -151,6 +154,54 @@ func (s *Service) GetByUsername(ctx context.Context, username string) (User, err
 		return User{}, errors.New("username pepper is required")
 	}
 	return s.repo.GetByUsernameHash(ctx, hashUsername(s.pepper, name))
+}
+
+func (s *Service) UpsertProfile(ctx context.Context, userID ID, nameEnc string) error {
+	if s.repo == nil {
+		return errors.New("repository is required")
+	}
+	if userID == "" || strings.TrimSpace(nameEnc) == "" {
+		return ErrInvalidInput
+	}
+	profile := Profile{
+		UserID:    userID,
+		NameEnc:   strings.TrimSpace(nameEnc),
+		UpdatedAt: s.now().UTC(),
+	}
+	return s.repo.UpsertProfile(ctx, profile)
+}
+
+func (s *Service) ListProfiles(ctx context.Context) ([]Profile, error) {
+	if s.repo == nil {
+		return nil, errors.New("repository is required")
+	}
+	return s.repo.ListProfiles(ctx)
+}
+
+func (s *Service) UpsertDirectoryKeyEnvelope(ctx context.Context, env DirectoryKeyEnvelope) error {
+	if s.repo == nil {
+		return errors.New("repository is required")
+	}
+	if strings.TrimSpace(env.DeviceID) == "" || strings.TrimSpace(env.SenderDeviceID) == "" {
+		return ErrInvalidInput
+	}
+	if strings.TrimSpace(env.SenderPublicKey) == "" || strings.TrimSpace(env.Envelope) == "" {
+		return ErrInvalidInput
+	}
+	if env.CreatedAt.IsZero() {
+		env.CreatedAt = s.now().UTC()
+	}
+	return s.repo.UpsertDirectoryKeyEnvelope(ctx, env)
+}
+
+func (s *Service) GetDirectoryKeyEnvelope(ctx context.Context, deviceID string) (DirectoryKeyEnvelope, error) {
+	if s.repo == nil {
+		return DirectoryKeyEnvelope{}, errors.New("repository is required")
+	}
+	if strings.TrimSpace(deviceID) == "" {
+		return DirectoryKeyEnvelope{}, ErrInvalidInput
+	}
+	return s.repo.GetDirectoryKeyEnvelope(ctx, deviceID)
 }
 
 func normalizeUsername(username string) string {

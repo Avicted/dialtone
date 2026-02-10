@@ -57,6 +57,7 @@ func NewHandler(users *user.Service, devices *device.Service, channels *channel.
 
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/users", h.handleUsers)
+	mux.HandleFunc("/users/profiles", h.handleUserProfiles)
 	mux.HandleFunc("/devices", h.handleDevices)
 	mux.HandleFunc("/devices/keys", h.handleDeviceKeys)
 	mux.HandleFunc("/auth/register", h.handleRegister)
@@ -64,6 +65,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/channels", h.handleChannels)
 	mux.HandleFunc("/channels/messages", h.handleChannelMessages)
 	mux.HandleFunc("/channels/keys", h.handleChannelKeys)
+	mux.HandleFunc("/directory/keys", h.handleDirectoryKeys)
 	mux.HandleFunc("/presence", h.handlePresence)
 	mux.HandleFunc("/server/invites", h.handleServerInvites)
 }
@@ -83,6 +85,7 @@ type authResponse struct {
 	Username     string    `json:"username"`
 	DevicePubKey string    `json:"device_public_key"`
 	IsAdmin      bool      `json:"is_admin"`
+	IsTrusted    bool      `json:"is_trusted"`
 }
 
 func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -125,6 +128,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Username:     session.Username,
 		DevicePubKey: createdDevice.PublicKey,
 		IsAdmin:      createdUser.IsAdmin,
+		IsTrusted:    createdUser.IsTrusted,
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -167,8 +171,27 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Username:     session.Username,
 		DevicePubKey: createdDevice.PublicKey,
 		IsAdmin:      createdUser.IsAdmin,
+		IsTrusted:    createdUser.IsTrusted,
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) authenticateTrusted(r *http.Request) (auth.Session, error) {
+	session, err := h.authenticate(r)
+	if err != nil {
+		return auth.Session{}, err
+	}
+	if h.users == nil {
+		return auth.Session{}, errors.New("user service not configured")
+	}
+	current, err := h.users.GetByID(r.Context(), session.UserID)
+	if err != nil {
+		return auth.Session{}, err
+	}
+	if !current.IsTrusted {
+		return auth.Session{}, errors.New("trusted user required")
+	}
+	return session, nil
 }
 
 func (h *Handler) authenticate(r *http.Request) (auth.Session, error) {
@@ -192,6 +215,20 @@ type createUserResponse struct {
 	ID        user.ID `json:"id"`
 	Username  string  `json:"username"`
 	CreatedAt string  `json:"created_at"`
+}
+
+type userProfileRequest struct {
+	NameEnc string `json:"name_enc"`
+}
+
+type userProfileResponse struct {
+	UserID    user.ID `json:"user_id"`
+	NameEnc   string  `json:"name_enc"`
+	UpdatedAt string  `json:"updated_at"`
+}
+
+type listUserProfilesResponse struct {
+	Profiles []userProfileResponse `json:"profiles"`
 }
 
 func (h *Handler) handleUsers(w http.ResponseWriter, r *http.Request) {
@@ -222,6 +259,58 @@ func (h *Handler) handleUsers(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: created.CreatedAt.UTC().Format(timeLayout),
 	}
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (h *Handler) handleUserProfiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if h.users == nil {
+		writeError(w, http.StatusInternalServerError, errors.New("user service not configured"))
+		return
+	}
+
+	session, err := h.authenticateTrusted(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		var req userProfileRequest
+		if err := decodeJSON(w, r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := h.users.UpsertProfile(r.Context(), session.UserID, req.NameEnc); err != nil {
+			switch {
+			case errors.Is(err, user.ErrInvalidInput):
+				writeError(w, http.StatusBadRequest, err)
+			default:
+				writeError(w, http.StatusInternalServerError, err)
+			}
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]string{"status": "ok"})
+		return
+	}
+
+	profiles, err := h.users.ListProfiles(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	resp := listUserProfilesResponse{Profiles: make([]userProfileResponse, 0, len(profiles))}
+	for _, profile := range profiles {
+		resp.Profiles = append(resp.Profiles, userProfileResponse{
+			UserID:    profile.UserID,
+			NameEnc:   profile.NameEnc,
+			UpdatedAt: profile.UpdatedAt.UTC().Format(timeLayout),
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 type createDeviceRequest struct {
@@ -302,6 +391,25 @@ type deviceKeysResponse struct {
 	Keys   []deviceKeyInfo `json:"keys"`
 }
 
+type directoryKeyEnvelopeRequest struct {
+	DeviceID        device.ID `json:"device_id"`
+	SenderDeviceID  device.ID `json:"sender_device_id"`
+	SenderPublicKey string    `json:"sender_public_key"`
+	Envelope        string    `json:"envelope"`
+}
+
+type directoryKeyEnvelopesRequest struct {
+	Envelopes []directoryKeyEnvelopeRequest `json:"envelopes"`
+}
+
+type directoryKeyEnvelopeResponse struct {
+	DeviceID        device.ID `json:"device_id"`
+	SenderDeviceID  device.ID `json:"sender_device_id"`
+	SenderPublicKey string    `json:"sender_public_key"`
+	Envelope        string    `json:"envelope"`
+	CreatedAt       string    `json:"created_at"`
+}
+
 // handleDeviceKeys returns the public keys of all devices belonging to a user.
 // GET /devices/keys?user_id=<id>
 func (h *Handler) handleDeviceKeys(w http.ResponseWriter, r *http.Request) {
@@ -366,6 +474,80 @@ func (h *Handler) handleDeviceKeys(w http.ResponseWriter, r *http.Request) {
 		resp.UserID = userID
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) handleDirectoryKeys(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if h.users == nil {
+		writeError(w, http.StatusInternalServerError, errors.New("user service not configured"))
+		return
+	}
+
+	session, err := h.authenticateTrusted(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		env, err := h.users.GetDirectoryKeyEnvelope(r.Context(), string(session.DeviceID))
+		if err != nil {
+			switch {
+			case errors.Is(err, user.ErrInvalidInput):
+				writeError(w, http.StatusBadRequest, err)
+			case errors.Is(err, storage.ErrNotFound):
+				writeError(w, http.StatusNotFound, err)
+			default:
+				writeError(w, http.StatusInternalServerError, err)
+			}
+			return
+		}
+		resp := directoryKeyEnvelopeResponse{
+			DeviceID:        device.ID(env.DeviceID),
+			SenderDeviceID:  device.ID(env.SenderDeviceID),
+			SenderPublicKey: env.SenderPublicKey,
+			Envelope:        env.Envelope,
+			CreatedAt:       env.CreatedAt.UTC().Format(timeLayout),
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	var req directoryKeyEnvelopesRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(req.Envelopes) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("envelopes are required"))
+		return
+	}
+	for _, envReq := range req.Envelopes {
+		if envReq.SenderDeviceID != session.DeviceID {
+			writeError(w, http.StatusForbidden, errors.New("sender_device_id must match the current device"))
+			return
+		}
+		env := user.DirectoryKeyEnvelope{
+			DeviceID:        string(envReq.DeviceID),
+			SenderDeviceID:  string(envReq.SenderDeviceID),
+			SenderPublicKey: strings.TrimSpace(envReq.SenderPublicKey),
+			Envelope:        strings.TrimSpace(envReq.Envelope),
+			CreatedAt:       time.Now().UTC(),
+		}
+		if err := h.users.UpsertDirectoryKeyEnvelope(r.Context(), env); err != nil {
+			switch {
+			case errors.Is(err, user.ErrInvalidInput):
+				writeError(w, http.StatusBadRequest, err)
+			default:
+				writeError(w, http.StatusInternalServerError, err)
+			}
+			return
+		}
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"status": "ok"})
 }
 
 type channelKeyEnvelopeRequest struct {

@@ -26,6 +26,7 @@ type AuthResponse struct {
 	Username     string `json:"username"`
 	DevicePubKey string `json:"device_public_key"`
 	IsAdmin      bool   `json:"is_admin"`
+	IsTrusted    bool   `json:"is_trusted"`
 }
 
 type apiError struct {
@@ -66,6 +67,16 @@ type PresenceResponse struct {
 	Admins   map[string]bool `json:"admins"`
 }
 
+type UserProfile struct {
+	UserID    string `json:"user_id"`
+	NameEnc   string `json:"name_enc"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+type ListUserProfilesResponse struct {
+	Profiles []UserProfile `json:"profiles"`
+}
+
 type DeviceKey struct {
 	UserID    string `json:"user_id,omitempty"`
 	DeviceID  string `json:"device_id"`
@@ -91,6 +102,25 @@ type ChannelKeyEnvelopeRequest struct {
 	SenderDeviceID  string `json:"sender_device_id"`
 	SenderPublicKey string `json:"sender_public_key"`
 	Envelope        string `json:"envelope"`
+}
+
+type DirectoryKeyEnvelope struct {
+	DeviceID        string `json:"device_id"`
+	SenderDeviceID  string `json:"sender_device_id"`
+	SenderPublicKey string `json:"sender_public_key"`
+	Envelope        string `json:"envelope"`
+	CreatedAt       string `json:"created_at"`
+}
+
+type DirectoryKeyEnvelopeRequest struct {
+	DeviceID        string `json:"device_id"`
+	SenderDeviceID  string `json:"sender_device_id"`
+	SenderPublicKey string `json:"sender_public_key"`
+	Envelope        string `json:"envelope"`
+}
+
+type DirectoryKeyEnvelopesRequest struct {
+	Envelopes []DirectoryKeyEnvelopeRequest `json:"envelopes"`
 }
 
 type ChannelKeyEnvelopesRequest struct {
@@ -239,6 +269,19 @@ func (c *APIClient) FetchPresence(ctx context.Context, token string, userIDs []s
 	return resp.Statuses, resp.Admins, nil
 }
 
+func (c *APIClient) ListUserProfiles(ctx context.Context, token string) ([]UserProfile, error) {
+	var resp ListUserProfilesResponse
+	if err := c.doJSON(ctx, http.MethodGet, "/users/profiles", token, nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Profiles, nil
+}
+
+func (c *APIClient) UpsertUserProfile(ctx context.Context, token, nameEnc string) error {
+	payload := map[string]string{"name_enc": nameEnc}
+	return c.doJSON(ctx, http.MethodPost, "/users/profiles", token, payload, nil)
+}
+
 func (c *APIClient) ListAllDeviceKeys(ctx context.Context, token string) ([]DeviceKey, error) {
 	var resp DeviceKeysResponse
 	if err := c.doJSON(ctx, http.MethodGet, "/devices/keys?all=1", token, nil, &resp); err != nil {
@@ -256,6 +299,19 @@ func (c *APIClient) GetChannelKeyEnvelope(ctx context.Context, token, channelID 
 		return nil, err
 	}
 	return &resp, nil
+}
+
+func (c *APIClient) GetDirectoryKeyEnvelope(ctx context.Context, token string) (*DirectoryKeyEnvelope, error) {
+	var resp DirectoryKeyEnvelope
+	if err := c.doJSON(ctx, http.MethodGet, "/directory/keys", token, nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *APIClient) PutDirectoryKeyEnvelopes(ctx context.Context, token string, envelopes []DirectoryKeyEnvelopeRequest) error {
+	payload := DirectoryKeyEnvelopesRequest{Envelopes: envelopes}
+	return c.doJSON(ctx, http.MethodPost, "/directory/keys", token, payload, nil)
 }
 
 func (c *APIClient) PutChannelKeyEnvelopes(ctx context.Context, token, channelID string, envelopes []ChannelKeyEnvelopeRequest) error {

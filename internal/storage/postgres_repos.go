@@ -30,8 +30,8 @@ func (r *userRepo) Create(ctx context.Context, u user.User) error {
 		passwordHash = u.PasswordHash
 	}
 
-	_, err := r.db.ExecContext(ctx, `INSERT INTO users (id, username_hash, password_hash, is_admin, created_at)
-		VALUES ($1, $2, $3, $4, $5)`, u.ID, u.UsernameHash, passwordHash, u.IsAdmin, u.CreatedAt)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO users (id, username_hash, password_hash, is_admin, is_trusted, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`, u.ID, u.UsernameHash, passwordHash, u.IsAdmin, u.IsTrusted, u.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert user: %w", err)
 	}
@@ -39,12 +39,12 @@ func (r *userRepo) Create(ctx context.Context, u user.User) error {
 }
 
 func (r *userRepo) GetByID(ctx context.Context, id user.ID) (user.User, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT id, username_hash, password_hash, is_admin, created_at
+	row := r.db.QueryRowContext(ctx, `SELECT id, username_hash, password_hash, is_admin, is_trusted, created_at
 		FROM users WHERE id = $1`, id)
 	var u user.User
 	var usernameHash sql.NullString
 	var passwordHash sql.NullString
-	if err := row.Scan(&u.ID, &usernameHash, &passwordHash, &u.IsAdmin, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &usernameHash, &passwordHash, &u.IsAdmin, &u.IsTrusted, &u.CreatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return user.User{}, ErrNotFound
 		}
@@ -63,12 +63,12 @@ func (r *userRepo) GetByID(ctx context.Context, id user.ID) (user.User, error) {
 }
 
 func (r *userRepo) GetByUsernameHash(ctx context.Context, usernameHash string) (user.User, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT id, username_hash, password_hash, is_admin, created_at
+	row := r.db.QueryRowContext(ctx, `SELECT id, username_hash, password_hash, is_admin, is_trusted, created_at
 		FROM users WHERE username_hash = $1`, usernameHash)
 	var u user.User
 	var storedHash sql.NullString
 	var passwordHash sql.NullString
-	if err := row.Scan(&u.ID, &storedHash, &passwordHash, &u.IsAdmin, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &storedHash, &passwordHash, &u.IsAdmin, &u.IsTrusted, &u.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return user.User{}, ErrNotFound
 		}
@@ -93,6 +93,72 @@ func (r *userRepo) Count(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("count users: %w", err)
 	}
 	return count, nil
+}
+
+func (r *userRepo) UpsertProfile(ctx context.Context, profile user.Profile) error {
+	if profile.UserID == "" || strings.TrimSpace(profile.NameEnc) == "" || profile.UpdatedAt.IsZero() {
+		return fmt.Errorf("user_id, name_enc, and updated_at are required")
+	}
+	_, err := r.db.ExecContext(ctx, `INSERT INTO user_profiles (user_id, name_enc, updated_at)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (user_id) DO UPDATE SET name_enc = EXCLUDED.name_enc, updated_at = EXCLUDED.updated_at`, profile.UserID, profile.NameEnc, profile.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("upsert user profile: %w", err)
+	}
+	return nil
+}
+
+func (r *userRepo) ListProfiles(ctx context.Context) ([]user.Profile, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT user_id, name_enc, updated_at FROM user_profiles ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list user profiles: %w", err)
+	}
+	defer rows.Close()
+
+	profiles := make([]user.Profile, 0)
+	for rows.Next() {
+		var p user.Profile
+		if err := rows.Scan(&p.UserID, &p.NameEnc, &p.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan user profile: %w", err)
+		}
+		profiles = append(profiles, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate user profiles: %w", err)
+	}
+	return profiles, nil
+}
+
+func (r *userRepo) UpsertDirectoryKeyEnvelope(ctx context.Context, env user.DirectoryKeyEnvelope) error {
+	if strings.TrimSpace(env.DeviceID) == "" || strings.TrimSpace(env.SenderDeviceID) == "" || env.CreatedAt.IsZero() {
+		return fmt.Errorf("device_id, sender_device_id, and created_at are required")
+	}
+	if strings.TrimSpace(env.SenderPublicKey) == "" || strings.TrimSpace(env.Envelope) == "" {
+		return fmt.Errorf("sender_public_key and envelope are required")
+	}
+	_, err := r.db.ExecContext(ctx, `INSERT INTO directory_key_envelopes (device_id, sender_device_id, sender_public_key, envelope, created_at)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (device_id) DO UPDATE SET sender_device_id = EXCLUDED.sender_device_id,
+			sender_public_key = EXCLUDED.sender_public_key,
+			envelope = EXCLUDED.envelope,
+			created_at = EXCLUDED.created_at`, env.DeviceID, env.SenderDeviceID, env.SenderPublicKey, env.Envelope, env.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("upsert directory key envelope: %w", err)
+	}
+	return nil
+}
+
+func (r *userRepo) GetDirectoryKeyEnvelope(ctx context.Context, deviceID string) (user.DirectoryKeyEnvelope, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT device_id, sender_device_id, sender_public_key, envelope, created_at
+		FROM directory_key_envelopes WHERE device_id = $1`, deviceID)
+	var env user.DirectoryKeyEnvelope
+	if err := row.Scan(&env.DeviceID, &env.SenderDeviceID, &env.SenderPublicKey, &env.Envelope, &env.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return user.DirectoryKeyEnvelope{}, ErrNotFound
+		}
+		return user.DirectoryKeyEnvelope{}, fmt.Errorf("select directory key envelope: %w", err)
+	}
+	return env, nil
 }
 
 type deviceRepo struct {
