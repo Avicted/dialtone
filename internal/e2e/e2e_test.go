@@ -3,6 +3,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/Avicted/dialtone/internal/auth"
 	"github.com/Avicted/dialtone/internal/channel"
+	"github.com/Avicted/dialtone/internal/crypto"
 	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/httpapi"
 	"github.com/Avicted/dialtone/internal/serverinvite"
@@ -76,6 +78,7 @@ type wsEvent struct {
 type wsPayload struct {
 	Type           string `json:"type"`
 	Sender         string `json:"sender"`
+	SenderNameEnc  string `json:"sender_name_enc"`
 	ChannelID      string `json:"channel_id"`
 	ChannelNameEnc string `json:"channel_name_enc"`
 	MessageID      string `json:"message_id"`
@@ -218,6 +221,54 @@ func TestE2E_NewUserSeesNewChannel(t *testing.T) {
 	channels := listChannels(t, ctx, serverURL, userAuth.Token)
 	if !containsChannel(channels, channelID) {
 		t.Fatalf("expected channel %s in list", channelID)
+	}
+}
+
+func TestE2E_EncryptedMessageRoundTrip(t *testing.T) {
+	ctx := context.Background()
+
+	pgURL, cleanup := startPostgres(t, ctx)
+	defer cleanup()
+
+	serverURL, shutdown := startServer(t, ctx, pgURL)
+	defer shutdown()
+
+	adminToken := "test-admin-token"
+	invite := createInvite(t, ctx, serverURL, adminToken)
+	adminAuth := registerUser(t, ctx, serverURL, "admin", "password123", "pubkey-admin", invite)
+	adminWS := connectWS(t, ctx, serverURL, adminAuth.Token)
+	defer adminWS.Close(websocket.StatusNormalClosure, "bye")
+
+	invite2 := createInvite(t, ctx, serverURL, adminToken)
+	userAuth := registerUser(t, ctx, serverURL, "alice", "password123", "pubkey-alice", invite2)
+	userWS := connectWS(t, ctx, serverURL, userAuth.Token)
+	defer userWS.Close(websocket.StatusNormalClosure, "bye")
+
+	channelID := createChannel(t, ctx, serverURL, adminAuth.Token, "enc-secure")
+	waitForWSEvent(t, adminWS, func(evt wsPayload) bool {
+		return evt.Type == "channel.updated" && evt.ChannelID == channelID
+	})
+
+	key := make([]byte, crypto.KeySize)
+	for i := range key {
+		key[i] = byte(i)
+	}
+
+	senderEnc := encryptField(t, key, "admin")
+	bodyEnc := encryptField(t, key, "secret message")
+	sendChannelMessage(t, adminWS, channelID, senderEnc, bodyEnc)
+
+	msg := waitForWSEvent(t, userWS, func(evt wsPayload) bool {
+		return evt.Type == "channel.message.new" && evt.ChannelID == channelID
+	})
+
+	gotSender := decryptField(t, key, msg.SenderNameEnc)
+	gotBody := decryptField(t, key, msg.Body)
+	if gotSender != "admin" {
+		t.Fatalf("sender name = %q, want %q", gotSender, "admin")
+	}
+	if gotBody != "secret message" {
+		t.Fatalf("body = %q, want %q", gotBody, "secret message")
 	}
 }
 
@@ -798,4 +849,28 @@ func containsChannel(ids []string, channelID string) bool {
 		}
 	}
 	return false
+}
+
+func encryptField(t *testing.T, key []byte, plaintext string) string {
+	t.Helper()
+
+	ct, err := crypto.Encrypt(key, []byte(plaintext))
+	if err != nil {
+		t.Fatalf("encrypt field: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(ct)
+}
+
+func decryptField(t *testing.T, key []byte, encoded string) string {
+	t.Helper()
+
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode field: %v", err)
+	}
+	pt, err := crypto.Decrypt(key, raw)
+	if err != nil {
+		t.Fatalf("decrypt field: %v", err)
+	}
+	return string(pt)
 }
