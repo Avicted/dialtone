@@ -88,6 +88,12 @@ Lookup behavior:
 - internal/user: user domain
 - internal/message: message domain
 
+## Client keystore
+The client stores device, channel, and directory keys under `~/.config/dialtone`. These files are encrypted with a passphrase you enter at login. Keep the passphrase consistent across runs; if it is lost, the local keys cannot be recovered.
+
+## API documentation
+See [docs/API.md](docs/API.md).
+
 ## Security constraints
 - TLS for all transport
 - Message content must be encrypted before reaching the server

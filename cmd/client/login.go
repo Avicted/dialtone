@@ -12,6 +12,7 @@ type loginModel struct {
 	serverInput   textinput.Model
 	usernameInput textinput.Model
 	passwordInput textinput.Model
+	passphraseInp textinput.Model
 	confirmInput  textinput.Model
 	inviteInput   textinput.Model
 	focusIdx      int
@@ -51,6 +52,13 @@ func newLoginModel(defaultServer string) loginModel {
 	password.CharLimit = 128
 	password.Width = 30
 
+	passphrase := textinput.New()
+	passphrase.Placeholder = "keystore passphrase"
+	passphrase.EchoMode = textinput.EchoPassword
+	passphrase.EchoCharacter = '*'
+	passphrase.CharLimit = 128
+	passphrase.Width = 30
+
 	confirm := textinput.New()
 	confirm.Placeholder = "confirm password"
 	confirm.EchoMode = textinput.EchoPassword
@@ -67,6 +75,7 @@ func newLoginModel(defaultServer string) loginModel {
 		serverInput:   server,
 		usernameInput: username,
 		passwordInput: password,
+		passphraseInp: passphrase,
 		confirmInput:  confirm,
 		inviteInput:   invite,
 		focusIdx:      0,
@@ -78,9 +87,10 @@ func (m loginModel) Init() tea.Cmd {
 	return textinput.Blink
 }
 
-func (m loginModel) serverURL() string { return m.serverInput.Value() }
-func (m loginModel) username() string  { return m.usernameInput.Value() }
-func (m loginModel) password() string  { return m.passwordInput.Value() }
+func (m loginModel) serverURL() string  { return m.serverInput.Value() }
+func (m loginModel) username() string   { return m.usernameInput.Value() }
+func (m loginModel) password() string   { return m.passwordInput.Value() }
+func (m loginModel) passphrase() string { return m.passphraseInp.Value() }
 func (m loginModel) confirmPassword() string {
 	return m.confirmInput.Value()
 }
@@ -90,9 +100,9 @@ func (m loginModel) inviteToken() string {
 }
 
 func (m loginModel) inputCount() int {
-	count := 3
+	count := 4
 	if m.isRegister {
-		count = 5
+		count = 6
 	}
 	return count
 }
@@ -162,8 +172,10 @@ func (m loginModel) Update(msg tea.Msg) (loginModel, tea.Cmd) {
 	case 2:
 		m.passwordInput, cmd = m.passwordInput.Update(msg)
 	case 3:
-		m.confirmInput, cmd = m.confirmInput.Update(msg)
+		m.passphraseInp, cmd = m.passphraseInp.Update(msg)
 	case 4:
+		m.confirmInput, cmd = m.confirmInput.Update(msg)
+	case 5:
 		m.inviteInput, cmd = m.inviteInput.Update(msg)
 	default:
 		m.serverInput, cmd = m.serverInput.Update(msg)
@@ -197,6 +209,7 @@ func (m *loginModel) applyFocus() {
 	m.serverInput.Blur()
 	m.usernameInput.Blur()
 	m.passwordInput.Blur()
+	m.passphraseInp.Blur()
 	m.confirmInput.Blur()
 	m.inviteInput.Blur()
 
@@ -208,12 +221,14 @@ func (m *loginModel) applyFocus() {
 	case 2:
 		m.passwordInput.Focus()
 	case 3:
+		m.passphraseInp.Focus()
+	case 4:
 		if m.isRegister {
 			m.confirmInput.Focus()
 		} else {
 			m.serverInput.Focus()
 		}
-	case 4:
+	case 5:
 		if m.isRegister {
 			m.inviteInput.Focus()
 		} else {
@@ -245,8 +260,8 @@ func (m loginModel) View() string {
 	b.WriteString(centerText(headerStyle.Render(fmt.Sprintf("[ %s ]", mode)), m.width))
 	b.WriteString("\n\n")
 
-	labels := []string{"Server", "Username", "Password"}
-	inputs := []textinput.Model{m.serverInput, m.usernameInput, m.passwordInput}
+	labels := []string{"Server", "Username", "Password", "Keystore Passphrase"}
+	inputs := []textinput.Model{m.serverInput, m.usernameInput, m.passwordInput, m.passphraseInp}
 	if m.isRegister {
 		labels = append(labels, "Confirm Password", "Invite Token")
 		inputs = append(inputs, m.confirmInput, m.inviteInput)
@@ -294,6 +309,9 @@ func (m loginModel) validateSubmit() string {
 	}
 	if m.username() == "" || m.password() == "" {
 		return "username and password are required"
+	}
+	if len(m.passphrase()) < 8 {
+		return "keystore passphrase must be at least 8 characters"
 	}
 	if m.isRegister && m.password() != m.confirmPassword() {
 		return "passwords do not match"

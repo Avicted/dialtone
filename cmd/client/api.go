@@ -137,16 +137,16 @@ func NewAPIClient(serverURL string) *APIClient {
 	}
 }
 
-func (c *APIClient) Register(ctx context.Context, username, password, inviteToken string) (*AuthResponse, *crypto.KeyPair, error) {
-	return c.authRequest(ctx, "/auth/register", username, password, inviteToken)
+func (c *APIClient) Register(ctx context.Context, username, password, inviteToken, passphrase string) (*AuthResponse, *crypto.KeyPair, error) {
+	return c.authRequest(ctx, "/auth/register", username, password, inviteToken, passphrase)
 }
 
-func (c *APIClient) Login(ctx context.Context, username, password string) (*AuthResponse, *crypto.KeyPair, error) {
-	return c.authRequest(ctx, "/auth/login", username, password, "")
+func (c *APIClient) Login(ctx context.Context, username, password, passphrase string) (*AuthResponse, *crypto.KeyPair, error) {
+	return c.authRequest(ctx, "/auth/login", username, password, "", passphrase)
 }
 
-func (c *APIClient) authRequest(ctx context.Context, path, username, password, inviteToken string) (*AuthResponse, *crypto.KeyPair, error) {
-	kp, err := loadOrCreateKeyPair()
+func (c *APIClient) authRequest(ctx context.Context, path, username, password, inviteToken, passphrase string) (*AuthResponse, *crypto.KeyPair, error) {
+	kp, err := loadOrCreateKeyPair(passphrase)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load device key: %w", err)
 	}

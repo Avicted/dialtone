@@ -60,6 +60,7 @@ type chatModel struct {
 	api                   *APIClient
 	auth                  *AuthResponse
 	kp                    *crypto.KeyPair
+	keystorePassphrase    string
 	ws                    *WSClient
 	wsCh                  chan ServerMessage
 	messages              []chatMessage
@@ -119,7 +120,7 @@ type channelRefreshTick struct{}
 
 var errDirectoryKeyPending = fmt.Errorf("directory key pending")
 
-func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width, height int) chatModel {
+func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, keystorePassphrase string, width, height int) chatModel {
 	input := textinput.New()
 	input.Placeholder = "type a message..."
 	input.CharLimit = 16384
@@ -130,13 +131,14 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width,
 	vpWidth := clampMin(width-4, 10)
 	vp := viewport.New(vpWidth, vpHeight)
 
-	keys, keysErr := loadChannelKeys()
-	dirKey, dirErr := loadDirectoryKey()
+	keys, keysErr := loadChannelKeys(keystorePassphrase)
+	dirKey, dirErr := loadDirectoryKey(keystorePassphrase)
 
 	model := chatModel{
 		api:                  api,
 		auth:                 auth,
 		kp:                   kp,
+		keystorePassphrase:   keystorePassphrase,
 		viewport:             vp,
 		input:                input,
 		width:                width,
@@ -825,7 +827,7 @@ func (m *chatModel) setDirectoryKey(key []byte) {
 }
 
 func (m *chatModel) persistDirectoryKey() error {
-	return saveDirectoryKey(m.directoryKey)
+	return saveDirectoryKey(m.directoryKey, m.keystorePassphrase)
 }
 
 func (m *chatModel) scheduleDirectoryTick() tea.Cmd {
@@ -1859,7 +1861,7 @@ func (m *chatModel) ensureChannelKey(channelID string) ([]byte, error) {
 }
 
 func (m *chatModel) persistChannelKeys() error {
-	return saveChannelKeys(m.channelKeys)
+	return saveChannelKeys(m.channelKeys, m.keystorePassphrase)
 }
 
 func buildChannelKeyEnvelopes(kp *crypto.KeyPair, senderDeviceID string, key []byte, devices []DeviceKey) ([]ChannelKeyEnvelopeRequest, error) {

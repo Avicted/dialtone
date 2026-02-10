@@ -66,7 +66,7 @@ func (m rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = saveServerHistory(m.login.serverHistory)
 		}
 		m.state = stateChat
-		m.chat = newChatModel(m.api, auth.auth, auth.kp, m.width, m.height)
+		m.chat = newChatModel(m.api, auth.auth, auth.kp, m.login.passphrase(), m.width, m.height)
 		return m, m.chat.Init()
 	}
 
@@ -77,7 +77,7 @@ func (m rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.login.submitting {
 			m.login.submitting = false
 			m.api.serverURL = strings.TrimSpace(m.login.serverURL())
-			return m, tea.Batch(cmd, m.doAuth(m.login.isRegister, m.login.username(), m.login.password(), m.login.inviteToken()))
+			return m, tea.Batch(cmd, m.doAuth(m.login.isRegister, m.login.username(), m.login.password(), m.login.inviteToken(), m.login.passphrase()))
 		}
 		return m, cmd
 
@@ -100,7 +100,7 @@ func (m rootModel) View() string {
 	return ""
 }
 
-func (m rootModel) doAuth(register bool, username, password, inviteToken string) tea.Cmd {
+func (m rootModel) doAuth(register bool, username, password, inviteToken, passphrase string) tea.Cmd {
 	api := m.api
 	return func() tea.Msg {
 		ctx := context.Background()
@@ -108,9 +108,9 @@ func (m rootModel) doAuth(register bool, username, password, inviteToken string)
 		var kp *crypto.KeyPair
 		var err error
 		if register {
-			resp, kp, err = api.Register(ctx, username, password, inviteToken)
+			resp, kp, err = api.Register(ctx, username, password, inviteToken, passphrase)
 		} else {
-			resp, kp, err = api.Login(ctx, username, password)
+			resp, kp, err = api.Login(ctx, username, password, passphrase)
 		}
 		if err != nil {
 			return authErrorMsg{err: err}
