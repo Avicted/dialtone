@@ -441,7 +441,8 @@ func (h *Handler) handleDeviceKeys(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, errors.New("user_id query parameter is required"))
 			return
 		}
-	} else if userID != session.UserID {
+	}
+	if userID != "" && userID != session.UserID {
 		writeError(w, http.StatusForbidden, errors.New("cannot list devices for another user"))
 		return
 	}
@@ -480,9 +481,7 @@ func (h *Handler) handleDeviceKeys(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := deviceKeysResponse{Keys: keys}
-	if !all {
-		resp.UserID = userID
-	}
+	resp.UserID = userID
 	writeJSON(w, http.StatusOK, resp)
 }
 

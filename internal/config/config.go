@@ -23,11 +23,6 @@ func LoadFromEnv() (Config, error) {
 		UsernamePepper: os.Getenv("DIALTONE_USERNAME_PEPPER"),
 		AdminToken:     os.Getenv("DIALTONE_ADMIN_TOKEN"),
 	}
-
-	if v := os.Getenv("DIALTONE_LISTEN_ADDR"); v != "" {
-		cfg.ListenAddr = v
-	}
-
 	return cfg, nil
 }
 

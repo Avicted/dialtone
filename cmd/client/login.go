@@ -116,16 +116,6 @@ func (m loginModel) Update(msg tea.Msg) (loginModel, tea.Cmd) {
 			return m, nil
 		}
 
-		switch msg.Type {
-		case tea.KeyTab, tea.KeyShiftTab, tea.KeyUp, tea.KeyDown, tea.KeyCtrlN, tea.KeyCtrlP:
-			dir := 1
-			if msg.Type == tea.KeyUp || msg.Type == tea.KeyShiftTab || msg.Type == tea.KeyCtrlP {
-				dir = -1
-			}
-			m.moveFocus(dir)
-			return m, nil
-		}
-
 		switch msg.String() {
 		case "tab", "shift+tab", "down", "up", "ctrl+n", "ctrl+p":
 			dir := 1
@@ -153,20 +143,8 @@ func (m loginModel) Update(msg tea.Msg) (loginModel, tea.Cmd) {
 			if m.loading {
 				return m, nil
 			}
-			if strings.TrimSpace(m.serverURL()) == "" {
-				m.errMsg = "server url is required"
-				return m, nil
-			}
-			if m.username() == "" || m.password() == "" {
-				m.errMsg = "username and password are required"
-				return m, nil
-			}
-			if m.isRegister && m.password() != m.confirmPassword() {
-				m.errMsg = "passwords do not match"
-				return m, nil
-			}
-			if m.isRegister && strings.TrimSpace(m.inviteToken()) == "" {
-				m.errMsg = "invite token is required"
+			if errMsg := m.validateSubmit(); errMsg != "" {
+				m.errMsg = errMsg
 				return m, nil
 			}
 			m.loading = true
@@ -308,6 +286,22 @@ func (m loginModel) View() string {
 	b.WriteString(centerText(helpStyle.Render("up/down or tab: switch field - ctrl+r: register/login - ctrl+s: servers - enter: submit - ctrl+q: quit"), m.width))
 
 	return b.String()
+}
+
+func (m loginModel) validateSubmit() string {
+	if strings.TrimSpace(m.serverURL()) == "" {
+		return "server url is required"
+	}
+	if m.username() == "" || m.password() == "" {
+		return "username and password are required"
+	}
+	if m.isRegister && m.password() != m.confirmPassword() {
+		return "passwords do not match"
+	}
+	if m.isRegister && strings.TrimSpace(m.inviteToken()) == "" {
+		return "invite token is required"
+	}
+	return ""
 }
 
 func (m *loginModel) moveFocus(dir int) {
