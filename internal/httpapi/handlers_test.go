@@ -785,3 +785,23 @@ func TestHandlers_Presence(t *testing.T) {
 		t.Fatalf("presence status = %d", resp.StatusCode)
 	}
 }
+
+func TestWriteError(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeError(rec, http.StatusBadRequest, errors.New("bad request"))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+
+	var payload map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if payload["error"] != "bad request" {
+		t.Fatalf("error = %q, want %q", payload["error"], "bad request")
+	}
+}

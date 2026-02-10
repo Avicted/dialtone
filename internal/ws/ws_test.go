@@ -4,13 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Avicted/dialtone/internal/auth"
+	"github.com/Avicted/dialtone/internal/channel"
+	"github.com/Avicted/dialtone/internal/device"
+	"github.com/Avicted/dialtone/internal/message"
+	"github.com/Avicted/dialtone/internal/storage"
 	"github.com/Avicted/dialtone/internal/user"
+	"nhooyr.io/websocket"
 )
 
 type fakeValidator struct {
@@ -23,6 +30,157 @@ func (v *fakeValidator) ValidateToken(token string) (auth.Session, error) {
 		return auth.Session{}, auth.ErrUnauthorized
 	}
 	return s, nil
+}
+
+type fakeDeviceRepo struct{}
+
+func (r *fakeDeviceRepo) Create(_ context.Context, _ device.Device) error { return nil }
+
+func (r *fakeDeviceRepo) GetByID(_ context.Context, _ device.ID) (device.Device, error) {
+	return device.Device{}, device.ErrNotFound
+}
+
+func (r *fakeDeviceRepo) GetByUserAndPublicKey(_ context.Context, _ user.ID, _ string) (device.Device, error) {
+	return device.Device{}, device.ErrNotFound
+}
+
+func (r *fakeDeviceRepo) ListByUser(_ context.Context, _ user.ID) ([]device.Device, error) {
+	return nil, nil
+}
+
+func (r *fakeDeviceRepo) ListAll(_ context.Context) ([]device.Device, error) {
+	return nil, nil
+}
+
+func (r *fakeDeviceRepo) UpdateLastSeen(_ context.Context, _ device.ID, _ time.Time) error { return nil }
+
+type fakeBroadcastRepo struct {
+	saved []message.BroadcastMessage
+	err   error
+}
+
+func (r *fakeBroadcastRepo) Save(_ context.Context, msg message.BroadcastMessage) error {
+	r.saved = append(r.saved, msg)
+	return r.err
+}
+
+func (r *fakeBroadcastRepo) ListRecent(_ context.Context, _ int) ([]message.BroadcastMessage, error) {
+	return nil, nil
+}
+
+type fakeChannelRepo struct {
+	ch      channel.Channel
+	getErr  error
+	saveErr error
+	saved   []channel.Message
+}
+
+func (r *fakeChannelRepo) CreateChannel(_ context.Context, _ channel.Channel) error { return nil }
+
+func (r *fakeChannelRepo) GetChannel(_ context.Context, _ channel.ID) (channel.Channel, error) {
+	if r.getErr != nil {
+		return channel.Channel{}, r.getErr
+	}
+	if r.ch.ID == "" {
+		return channel.Channel{}, storage.ErrNotFound
+	}
+	return r.ch, nil
+}
+
+func (r *fakeChannelRepo) ListChannels(_ context.Context) ([]channel.Channel, error) { return nil, nil }
+
+func (r *fakeChannelRepo) UpdateChannelName(_ context.Context, _ channel.ID, _ string) error { return nil }
+
+func (r *fakeChannelRepo) DeleteChannel(_ context.Context, _ channel.ID) error { return nil }
+
+func (r *fakeChannelRepo) SaveMessage(_ context.Context, msg channel.Message) error {
+	if r.saveErr != nil {
+		return r.saveErr
+	}
+	r.saved = append(r.saved, msg)
+	return nil
+}
+
+func (r *fakeChannelRepo) ListRecentMessages(_ context.Context, _ channel.ID, _ int) ([]channel.Message, error) {
+	return nil, nil
+}
+
+func (r *fakeChannelRepo) UpsertKeyEnvelope(_ context.Context, _ channel.KeyEnvelope) error { return nil }
+
+func (r *fakeChannelRepo) GetKeyEnvelope(_ context.Context, _ channel.ID, _ device.ID) (channel.KeyEnvelope, error) {
+	return channel.KeyEnvelope{}, storage.ErrNotFound
+}
+
+type wsPair struct {
+	server *websocket.Conn
+	err    error
+}
+
+func newWebsocketPair(t *testing.T) (*websocket.Conn, *websocket.Conn, func()) {
+	t.Helper()
+
+	connCh := make(chan wsPair, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		connCh <- wsPair{server: conn, err: err}
+	}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	clientConn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	cancel()
+	if err != nil {
+		srv.Close()
+		t.Fatalf("dial websocket: %v", err)
+	}
+
+	var pair wsPair
+	select {
+	case pair = <-connCh:
+	case <-time.After(time.Second):
+		_ = clientConn.Close(websocket.StatusNormalClosure, "timeout")
+		srv.Close()
+		t.Fatal("timeout waiting for server websocket")
+	}
+	if pair.err != nil {
+		_ = clientConn.Close(websocket.StatusNormalClosure, "accept failed")
+		srv.Close()
+		t.Fatalf("accept websocket: %v", pair.err)
+	}
+
+	cleanup := func() {
+		_ = clientConn.Close(websocket.StatusNormalClosure, "bye")
+		_ = pair.server.Close(websocket.StatusNormalClosure, "bye")
+		srv.Close()
+	}
+	return pair.server, clientConn, cleanup
+}
+
+func waitFor(t *testing.T, timeout time.Duration, check func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if check() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timeout waiting for condition")
+}
+
+func readEvent[T any](t *testing.T, ch <-chan []byte) T {
+	t.Helper()
+	select {
+	case data := <-ch:
+		var out T
+		if err := json.Unmarshal(data, &out); err != nil {
+			t.Fatalf("unmarshal event: %v", err)
+		}
+		return out
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for event")
+	}
+	var zero T
+	return zero
 }
 
 func TestDecodeIncoming_BroadcastValid(t *testing.T) {
@@ -339,5 +497,321 @@ func TestHub_HandleIncoming_UnknownType(t *testing.T) {
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("expected error event, got nothing")
+	}
+}
+
+func TestIsExpectedDisconnectError(t *testing.T) {
+	if isExpectedDisconnectError(nil) {
+		t.Fatal("expected nil error to return false")
+	}
+	if !isExpectedDisconnectError(io.EOF) {
+		t.Fatal("expected io.EOF to return true")
+	}
+	if !isExpectedDisconnectError(errors.New("use of closed network connection")) {
+		t.Fatal("expected closed network connection to return true")
+	}
+	if isExpectedDisconnectError(errors.New("other")) {
+		t.Fatal("expected other error to return false")
+	}
+}
+
+func TestHub_Run_RegisterAndShutdown(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go hub.Run(ctx)
+
+	serverConn, clientConn, cleanup := newWebsocketPair(t)
+	defer cleanup()
+
+	client := &Client{
+		conn:     serverConn,
+		hub:      hub,
+		ctx:      context.Background(),
+		cancel:   func() {},
+		send:     make(chan []byte, 1),
+		userID:   "user-1",
+		deviceID: "dev-1",
+	}
+
+	hub.register <- client
+	waitFor(t, time.Second, func() bool { return hub.ClientCount() == 1 })
+	if !hub.IsOnline("user-1") {
+		t.Fatal("expected user to be online")
+	}
+
+	cancel()
+	select {
+	case _, ok := <-client.send:
+		if ok {
+			t.Fatal("expected send channel to be closed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for client close")
+	}
+
+	_ = clientConn.Close(websocket.StatusNormalClosure, "bye")
+}
+
+func TestHub_HandleWS_RegistersClient(t *testing.T) {
+	hub := NewHub(nil, &fakeDeviceRepo{}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go hub.Run(ctx)
+
+	validator := &fakeValidator{sessions: map[string]auth.Session{
+		"tok": {Token: "tok", UserID: "user-1", DeviceID: "dev-1", Username: "alice"},
+	}}
+
+	srv := httptest.NewServer(WithAuthValidator(http.HandlerFunc(hub.HandleWS), validator))
+	defer srv.Close()
+
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer tok")
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), time.Second)
+	conn, _, err := websocket.Dial(dialCtx, "ws"+strings.TrimPrefix(srv.URL, "http"), &websocket.DialOptions{HTTPHeader: headers})
+	dialCancel()
+	if err != nil {
+		t.Fatalf("websocket dial: %v", err)
+	}
+
+	waitFor(t, time.Second, func() bool { return hub.IsOnline("user-1") })
+	_ = conn.Close(websocket.StatusNormalClosure, "bye")
+	waitFor(t, time.Second, func() bool { return hub.ClientCount() == 0 })
+}
+
+func TestClient_ReadLoop_ForwardsIncoming(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	hub.unregister = make(chan *Client, 1)
+	hub.incoming = make(chan incomingMessage, 1)
+
+	serverConn, clientConn, cleanup := newWebsocketPair(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := &Client{
+		conn:   serverConn,
+		hub:    hub,
+		ctx:    ctx,
+		cancel: cancel,
+		send:   make(chan []byte, 1),
+		userID: "user-1",
+	}
+
+	go client.readLoop()
+
+	msg := []byte(`{"type":"channel.message.send","channel_id":"ch-1","body":"hi","sender_name_enc":"enc"}`)
+	writeCtx, writeCancel := context.WithTimeout(context.Background(), time.Second)
+	if err := clientConn.Write(writeCtx, websocket.MessageText, msg); err != nil {
+		writeCancel()
+		t.Fatalf("write message: %v", err)
+	}
+	writeCancel()
+
+	select {
+	case incoming := <-hub.incoming:
+		if incoming.msg.Type != "channel.message.send" {
+			t.Fatalf("Type = %q, want %q", incoming.msg.Type, "channel.message.send")
+		}
+		if incoming.msg.ChannelID != "ch-1" {
+			t.Fatalf("ChannelID = %q, want %q", incoming.msg.ChannelID, "ch-1")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for incoming message")
+	}
+
+	_ = clientConn.Close(websocket.StatusNormalClosure, "bye")
+	select {
+	case <-hub.unregister:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for unregister")
+	}
+}
+
+func TestClient_WriteLoop_SendsMessages(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	hub.unregister = make(chan *Client, 1)
+
+	serverConn, clientConn, cleanup := newWebsocketPair(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &Client{
+		conn:   serverConn,
+		hub:    hub,
+		ctx:    ctx,
+		cancel: cancel,
+		send:   make(chan []byte, 1),
+	}
+	go client.writeLoop()
+
+	payload := []byte(`{"type":"ping"}`)
+	client.send <- payload
+
+	readCtx, readCancel := context.WithTimeout(context.Background(), time.Second)
+	_, data, err := clientConn.Read(readCtx)
+	readCancel()
+	if err != nil {
+		cancel()
+		t.Fatalf("read message: %v", err)
+	}
+	if string(data) != string(payload) {
+		cancel()
+		t.Fatalf("payload = %q, want %q", string(data), string(payload))
+	}
+
+	cancel()
+}
+
+func TestHub_HandleBroadcast_SendsToClientsAndStores(t *testing.T) {
+	repo := &fakeBroadcastRepo{}
+	hub := NewHub(repo, nil, nil)
+
+	c1 := &Client{send: make(chan []byte, 1), userID: "user-1", deviceID: "dev-1"}
+	c2 := &Client{send: make(chan []byte, 1), userID: "user-2", deviceID: "dev-2"}
+	hub.clients[c1] = struct{}{}
+	hub.clients[c2] = struct{}{}
+
+	msg := inboundMessage{
+		Type:          "message.broadcast",
+		Body:          "hello",
+		SenderNameEnc: " enc ",
+		PublicKey:     "pub",
+		Envelopes: map[string]string{
+			"dev-1": "env-1",
+			"dev-2": "env-2",
+		},
+	}
+
+	hub.handleBroadcast(context.Background(), c1, msg)
+
+	if len(repo.saved) != 1 {
+		t.Fatalf("saved = %d, want 1", len(repo.saved))
+	}
+	if repo.saved[0].SenderNameEnc != "enc" {
+		t.Fatalf("SenderNameEnc = %q, want %q", repo.saved[0].SenderNameEnc, "enc")
+	}
+
+	out1 := readEvent[outboundMessage](t, c1.send)
+	if out1.Type != "message.broadcast" {
+		t.Fatalf("Type = %q, want %q", out1.Type, "message.broadcast")
+	}
+	if out1.KeyEnvelope != "env-1" {
+		t.Fatalf("KeyEnvelope = %q, want %q", out1.KeyEnvelope, "env-1")
+	}
+
+	out2 := readEvent[outboundMessage](t, c2.send)
+	if out2.KeyEnvelope != "env-2" {
+		t.Fatalf("KeyEnvelope = %q, want %q", out2.KeyEnvelope, "env-2")
+	}
+}
+
+func TestHub_HandleBroadcast_InvalidMessage(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	sender := &Client{send: make(chan []byte, 1), userID: "user-1", deviceID: "dev-1"}
+
+	msg := inboundMessage{
+		Type:          "message.broadcast",
+		Body:          "hello",
+		SenderNameEnc: "enc",
+		PublicKey:     "",
+		Envelopes:     map[string]string{"dev-1": "env"},
+	}
+
+	hub.handleBroadcast(context.Background(), sender, msg)
+
+	event := readEvent[errorEvent](t, sender.send)
+	if event.Code != "invalid_message" {
+		t.Fatalf("code = %q, want %q", event.Code, "invalid_message")
+	}
+}
+
+func TestHub_HandleChannelMessage_SendsToClients(t *testing.T) {
+	repo := &fakeChannelRepo{ch: channel.Channel{ID: "ch-1"}}
+	hub := NewHub(nil, nil, repo)
+
+	c1 := &Client{send: make(chan []byte, 1), userID: "user-1"}
+	c2 := &Client{send: make(chan []byte, 1), userID: "user-2"}
+	hub.clients[c1] = struct{}{}
+	hub.clients[c2] = struct{}{}
+
+	msg := inboundMessage{
+		Type:          "channel.message.send",
+		ChannelID:     "ch-1",
+		Body:          "hello",
+		SenderNameEnc: " enc ",
+	}
+
+	hub.handleChannelMessage(context.Background(), c1, msg)
+
+	if len(repo.saved) != 1 {
+		t.Fatalf("saved = %d, want 1", len(repo.saved))
+	}
+	if repo.saved[0].SenderNameEnc != "enc" {
+		t.Fatalf("SenderNameEnc = %q, want %q", repo.saved[0].SenderNameEnc, "enc")
+	}
+
+	out1 := readEvent[outboundMessage](t, c1.send)
+	if out1.Type != "channel.message.new" {
+		t.Fatalf("Type = %q, want %q", out1.Type, "channel.message.new")
+	}
+	out2 := readEvent[outboundMessage](t, c2.send)
+	if out2.ChannelID != "ch-1" {
+		t.Fatalf("ChannelID = %q, want %q", out2.ChannelID, "ch-1")
+	}
+}
+
+func TestHub_HandleChannelMessage_ChannelNotFound(t *testing.T) {
+	repo := &fakeChannelRepo{getErr: storage.ErrNotFound}
+	hub := NewHub(nil, nil, repo)
+
+	sender := &Client{send: make(chan []byte, 1), userID: "user-1"}
+
+	msg := inboundMessage{
+		Type:          "channel.message.send",
+		ChannelID:     "missing",
+		Body:          "hello",
+		SenderNameEnc: "enc",
+	}
+
+	hub.handleChannelMessage(context.Background(), sender, msg)
+
+	event := readEvent[errorEvent](t, sender.send)
+	if event.Code != "channel_not_found" {
+		t.Fatalf("code = %q, want %q", event.Code, "channel_not_found")
+	}
+}
+
+func TestHub_NotifyEvents(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+
+	c1 := &Client{send: make(chan []byte, 4), userID: "user-1", deviceID: "dev-1"}
+	c2 := &Client{send: make(chan []byte, 4), userID: "user-2", deviceID: "dev-2"}
+	hub.clients[c1] = struct{}{}
+	hub.clients[c2] = struct{}{}
+
+	hub.NotifyChannelUpdated(channel.Channel{ID: "ch-1", NameEnc: "enc"})
+	hub.NotifyChannelDeleted("ch-2")
+	hub.NotifyUserProfileUpdated("user-9")
+	hub.notifyDeviceJoined("user-8", "dev-8")
+
+	for _, client := range []*Client{c1, c2} {
+		first := readEvent[outboundMessage](t, client.send)
+		if first.Type != "channel.updated" {
+			t.Fatalf("Type = %q, want %q", first.Type, "channel.updated")
+		}
+		second := readEvent[outboundMessage](t, client.send)
+		third := readEvent[outboundMessage](t, client.send)
+		fourth := readEvent[outboundMessage](t, client.send)
+		if second.Type != "channel.deleted" {
+			t.Fatalf("Type = %q, want %q", second.Type, "channel.deleted")
+		}
+		if third.Type != "user.profile.updated" {
+			t.Fatalf("Type = %q, want %q", third.Type, "user.profile.updated")
+		}
+		if fourth.Type != "device.joined" {
+			t.Fatalf("Type = %q, want %q", fourth.Type, "device.joined")
+		}
 	}
 }
