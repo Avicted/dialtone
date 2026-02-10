@@ -30,6 +30,7 @@ type Handler struct {
 	invites    *serverinvite.Service
 	presence   PresenceProvider
 	notifier   ChannelNotifier
+	userNotify UserNotifier
 	adminToken string
 }
 
@@ -42,7 +43,11 @@ type ChannelNotifier interface {
 	NotifyChannelDeleted(id channel.ID)
 }
 
-func NewHandler(users *user.Service, devices *device.Service, channels *channel.Service, auth *auth.Service, invites *serverinvite.Service, presence PresenceProvider, notifier ChannelNotifier, adminToken string) *Handler {
+type UserNotifier interface {
+	NotifyUserProfileUpdated(id user.ID)
+}
+
+func NewHandler(users *user.Service, devices *device.Service, channels *channel.Service, auth *auth.Service, invites *serverinvite.Service, presence PresenceProvider, notifier ChannelNotifier, userNotify UserNotifier, adminToken string) *Handler {
 	return &Handler{
 		users:      users,
 		devices:    devices,
@@ -51,6 +56,7 @@ func NewHandler(users *user.Service, devices *device.Service, channels *channel.
 		invites:    invites,
 		presence:   presence,
 		notifier:   notifier,
+		userNotify: userNotify,
 		adminToken: adminToken,
 	}
 }
@@ -291,6 +297,9 @@ func (h *Handler) handleUserProfiles(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, err)
 			}
 			return
+		}
+		if h.userNotify != nil {
+			h.userNotify.NotifyUserProfileUpdated(session.UserID)
 		}
 		writeJSON(w, http.StatusCreated, map[string]string{"status": "ok"})
 		return

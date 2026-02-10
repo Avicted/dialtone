@@ -67,7 +67,7 @@ func run() error {
 	channelService := channel.NewService(store.Channels(), userService)
 	inviteService := serverinvite.NewService(store.ServerInvites())
 	authService := auth.NewService(userService, deviceService, inviteService)
-	api := httpapi.NewHandler(userService, deviceService, channelService, authService, inviteService, hub, hub, cfg.AdminToken)
+	api := httpapi.NewHandler(userService, deviceService, channelService, authService, inviteService, hub, hub, hub, cfg.AdminToken)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)

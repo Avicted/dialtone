@@ -544,6 +544,25 @@ func (h *Hub) NotifyChannelDeleted(id channel.ID) {
 	}
 }
 
+func (h *Hub) NotifyUserProfileUpdated(id user.ID) {
+	if h == nil || id == "" {
+		return
+	}
+	out := outboundMessage{
+		Type:   "user.profile.updated",
+		Sender: id,
+	}
+	h.mu.RLock()
+	clients := make([]*Client, 0, len(h.clients))
+	for client := range h.clients {
+		clients = append(clients, client)
+	}
+	h.mu.RUnlock()
+	for _, client := range clients {
+		client.sendEvent(out)
+	}
+}
+
 func (h *Hub) notifyDeviceJoined(userID user.ID, deviceID device.ID) {
 	if h == nil || userID == "" || deviceID == "" {
 		return

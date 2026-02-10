@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -106,6 +107,10 @@ type directorySyncMsg struct {
 	err      error
 }
 
+type directoryTick struct{}
+
+var errDirectoryKeyPending = fmt.Errorf("directory key pending")
+
 func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width, height int) chatModel {
 	input := textinput.New()
 	input.Placeholder = "type a message..."
@@ -153,7 +158,7 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width,
 func (m chatModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{textinput.Blink, m.connectWS()}
 	if m.isTrusted() {
-		cmds = append(cmds, m.syncDirectoryCmd())
+		cmds = append(cmds, m.syncDirectoryCmd(), m.scheduleDirectoryTick())
 	}
 	return tea.Batch(cmds...)
 }
@@ -269,6 +274,9 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 			m.refreshViewport()
 			return m, tea.Batch(cmds...)
 		}
+		if serverMsg.Type == "user.profile.updated" && m.isTrusted() {
+			return m, tea.Batch(waitForWSMsg(m.wsCh), m.syncDirectoryCmd())
+		}
 		m.handleServerMessage(serverMsg)
 		m.refreshViewport()
 		return m, waitForWSMsg(m.wsCh)
@@ -280,7 +288,9 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 
 	case directorySyncMsg:
 		if msg.err != nil {
-			m.errMsg = msg.err.Error()
+			if !errors.Is(msg.err, errDirectoryKeyPending) {
+				m.errMsg = msg.err.Error()
+			}
 			return m, nil
 		}
 		for _, profile := range msg.profiles {
@@ -291,6 +301,12 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		}
 		if m.sidebarVisible && m.sidebarMode == sidebarUsers {
 			m.refreshPresence()
+		}
+		return m, nil
+
+	case directoryTick:
+		if m.isTrusted() {
+			return m, tea.Batch(m.syncDirectoryCmd(), m.scheduleDirectoryTick())
 		}
 		return m, nil
 
@@ -730,6 +746,11 @@ func (m *chatModel) ensureDirectoryKey() ([]byte, error) {
 		return nil, err
 	}
 
+	profiles, listErr := m.api.ListUserProfiles(ctx, m.auth.Token)
+	if listErr == nil && len(profiles) > 0 {
+		return nil, errDirectoryKeyPending
+	}
+
 	key, err := generateChannelKey()
 	if err != nil {
 		return nil, err
@@ -755,6 +776,12 @@ func (m *chatModel) setDirectoryKey(key []byte) {
 
 func (m *chatModel) persistDirectoryKey() error {
 	return saveDirectoryKey(m.directoryKey)
+}
+
+func (m *chatModel) scheduleDirectoryTick() tea.Cmd {
+	return tea.Tick(10*time.Second, func(time.Time) tea.Msg {
+		return directoryTick{}
+	})
 }
 
 func (m *chatModel) deleteChannel(nameOrID string) {
@@ -1891,7 +1918,8 @@ func isNotFoundErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	return strings.Contains(err.Error(), "404")
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "404") || strings.Contains(msg, "not found")
 }
 
 func (m *chatModel) decryptChannelName(channelID, encoded string) string {
