@@ -1,16 +1,22 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Avicted/dialtone/internal/crypto"
 )
 
 type storedKey struct {
 	PrivateKey string `json:"private_key"`
+}
+
+type storedChannelKeys struct {
+	Keys map[string]string `json:"keys"`
 }
 
 func loadOrCreateKeyPair() (*crypto.KeyPair, error) {
@@ -74,5 +80,68 @@ func saveKeyPair(path string, kp *crypto.KeyPair) error {
 		return err
 	}
 
+	return os.WriteFile(path, data, 0o600)
+}
+
+func channelKeysPath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "dialtone", "channel_keys.json"), nil
+}
+
+func loadChannelKeys() (map[string][]byte, error) {
+	path, err := channelKeysPath()
+	if err != nil {
+		return map[string][]byte{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string][]byte{}, nil
+		}
+		return map[string][]byte{}, err
+	}
+
+	var stored storedChannelKeys
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return map[string][]byte{}, err
+	}
+
+	keys := make(map[string][]byte)
+	for channelID, encoded := range stored.Keys {
+		if strings.TrimSpace(channelID) == "" || strings.TrimSpace(encoded) == "" {
+			continue
+		}
+		raw, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil || len(raw) != crypto.KeySize {
+			continue
+		}
+		keys[channelID] = raw
+	}
+	return keys, nil
+}
+
+func saveChannelKeys(keys map[string][]byte) error {
+	path, err := channelKeysPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+
+	encoded := make(map[string]string)
+	for channelID, key := range keys {
+		if strings.TrimSpace(channelID) == "" || len(key) != crypto.KeySize {
+			continue
+		}
+		encoded[channelID] = base64.StdEncoding.EncodeToString(key)
+	}
+	data, err := json.Marshal(storedChannelKeys{Keys: encoded})
+	if err != nil {
+		return err
+	}
 	return os.WriteFile(path, data, 0o600)
 }

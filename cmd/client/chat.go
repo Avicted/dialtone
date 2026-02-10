@@ -91,6 +91,8 @@ type wsErrorMsg struct{ err error }
 
 type presenceTick struct{}
 
+type shareKeysMsg struct{ err error }
+
 func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width, height int) chatModel {
 	input := textinput.New()
 	input.Placeholder = "type a message..."
@@ -101,6 +103,8 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width,
 	vpHeight := clampMin(height-7, 1)
 	vpWidth := clampMin(width-4, 10)
 	vp := viewport.New(vpWidth, vpHeight)
+
+	keys, keysErr := loadChannelKeys()
 
 	model := chatModel{
 		api:                  api,
@@ -116,11 +120,14 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width,
 		userNames:            make(map[string]string),
 		userPresence:         make(map[string]bool),
 		userAdmins:           make(map[string]bool),
-		channelKeys:          make(map[string][]byte),
+		channelKeys:          keys,
 		channelUnread:        make(map[string]int),
 		sidebarVisible:       true,
 		sidebarMode:          sidebarChannels,
 		sidebarIndex:         0,
+	}
+	if keysErr != nil {
+		model.errMsg = "failed to load channel keys"
 	}
 	return model
 }
@@ -224,7 +231,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		if m.activeChannel == "" && len(m.messages) == 0 {
 			m.appendSystemMessage("no global chat; select a channel with the sidebar or /channel list")
 		}
-		return m, waitForWSMsg(m.wsCh)
+		return m, tea.Batch(waitForWSMsg(m.wsCh), m.shareKnownChannelKeysCmd())
 
 	case wsMessageMsg:
 		m.handleServerMessage(ServerMessage(msg))
@@ -234,6 +241,12 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 	case wsErrorMsg:
 		m.connected = false
 		m.errMsg = msg.err.Error()
+		return m, nil
+
+	case shareKeysMsg:
+		if msg.err != nil {
+			m.errMsg = fmt.Sprintf("share channel keys: %v", msg.err)
+		}
 		return m, nil
 
 	case presenceTick:
@@ -449,6 +462,9 @@ func (m *chatModel) createChannel(name string) {
 		return
 	}
 	m.setChannelKey(created.ID, key)
+	if err := m.persistChannelKeys(); err != nil {
+		m.errMsg = fmt.Sprintf("save channel key: %v", err)
+	}
 	if err := m.shareChannelKey(created.ID); err != nil {
 		m.errMsg = fmt.Sprintf("share channel key: %v", err)
 	}
@@ -468,10 +484,6 @@ func (m *chatModel) shareChannelKey(channelID string) error {
 	if len(key) != crypto.KeySize {
 		return fmt.Errorf("missing channel key")
 	}
-	if m.kp == nil || m.kp.Private == nil || m.kp.Public == nil {
-		return fmt.Errorf("missing device key")
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	devices, err := m.api.ListAllDeviceKeys(ctx, m.auth.Token)
@@ -481,33 +493,55 @@ func (m *chatModel) shareChannelKey(channelID string) error {
 	if len(devices) == 0 {
 		return fmt.Errorf("no devices available")
 	}
-
-	senderPub := crypto.PublicKeyToBase64(m.kp.Public)
-	envelopes := make([]ChannelKeyEnvelopeRequest, 0, len(devices))
-	for _, d := range devices {
-		if strings.TrimSpace(d.DeviceID) == "" || strings.TrimSpace(d.PublicKey) == "" {
-			continue
-		}
-		pub, err := crypto.PublicKeyFromBase64(d.PublicKey)
-		if err != nil {
-			return fmt.Errorf("invalid device public key: %v", err)
-		}
-		ct, err := crypto.EncryptForPeer(m.kp.Private, pub, key)
-		if err != nil {
-			return fmt.Errorf("encrypt key for device: %v", err)
-		}
-		envelopes = append(envelopes, ChannelKeyEnvelopeRequest{
-			DeviceID:        d.DeviceID,
-			SenderDeviceID:  m.auth.DeviceID,
-			SenderPublicKey: senderPub,
-			Envelope:        ct,
-		})
+	envelopes, err := buildChannelKeyEnvelopes(m.kp, m.auth.DeviceID, key, devices)
+	if err != nil {
+		return err
 	}
 	if len(envelopes) == 0 {
 		return fmt.Errorf("no valid devices for key share")
 	}
 
 	return m.api.PutChannelKeyEnvelopes(ctx, m.auth.Token, channelID, envelopes)
+}
+
+func (m *chatModel) shareKnownChannelKeysCmd() tea.Cmd {
+	if len(m.channelKeys) == 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		return shareKeysMsg{err: m.shareKnownChannelKeys()}
+	}
+}
+
+func (m *chatModel) shareKnownChannelKeys() error {
+	if m.api == nil || m.auth == nil || m.kp == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	devices, err := m.api.ListAllDeviceKeys(ctx, m.auth.Token)
+	if err != nil {
+		return err
+	}
+	if len(devices) == 0 {
+		return nil
+	}
+	for channelID, key := range m.channelKeys {
+		if channelID == "" || len(key) != crypto.KeySize {
+			continue
+		}
+		envelopes, err := buildChannelKeyEnvelopes(m.kp, m.auth.DeviceID, key, devices)
+		if err != nil {
+			return err
+		}
+		if len(envelopes) == 0 {
+			continue
+		}
+		if err := m.api.PutChannelKeyEnvelopes(ctx, m.auth.Token, channelID, envelopes); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *chatModel) deleteChannel(nameOrID string) {
@@ -1371,7 +1405,45 @@ func (m *chatModel) ensureChannelKey(channelID string) ([]byte, error) {
 		return nil, fmt.Errorf("invalid channel key size")
 	}
 	m.setChannelKey(channelID, key)
+	if err := m.persistChannelKeys(); err != nil {
+		return nil, err
+	}
 	return key, nil
+}
+
+func (m *chatModel) persistChannelKeys() error {
+	return saveChannelKeys(m.channelKeys)
+}
+
+func buildChannelKeyEnvelopes(kp *crypto.KeyPair, senderDeviceID string, key []byte, devices []DeviceKey) ([]ChannelKeyEnvelopeRequest, error) {
+	if kp == nil || kp.Private == nil || kp.Public == nil {
+		return nil, fmt.Errorf("missing device key")
+	}
+	if senderDeviceID == "" {
+		return nil, fmt.Errorf("missing sender device id")
+	}
+	senderPub := crypto.PublicKeyToBase64(kp.Public)
+	envelopes := make([]ChannelKeyEnvelopeRequest, 0, len(devices))
+	for _, d := range devices {
+		if strings.TrimSpace(d.DeviceID) == "" || strings.TrimSpace(d.PublicKey) == "" {
+			continue
+		}
+		pub, err := crypto.PublicKeyFromBase64(d.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("invalid device public key: %v", err)
+		}
+		ct, err := crypto.EncryptForPeer(kp.Private, pub, key)
+		if err != nil {
+			return nil, fmt.Errorf("encrypt key for device: %v", err)
+		}
+		envelopes = append(envelopes, ChannelKeyEnvelopeRequest{
+			DeviceID:        d.DeviceID,
+			SenderDeviceID:  senderDeviceID,
+			SenderPublicKey: senderPub,
+			Envelope:        ct,
+		})
+	}
+	return envelopes, nil
 }
 
 func encryptChannelField(key []byte, plaintext string) (string, error) {
