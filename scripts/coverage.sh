@@ -46,7 +46,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-EXCLUDE_REGEX='/cmd/|/internal/api/types|/internal/api/server|internal/domain|internal/slurmclient'
+EXCLUDE_REGEX='cmd/client'
 PKGS=$(go list ./... | grep -vE "$EXCLUDE_REGEX")
 
 # Silence go test output when we only care about zero coverage

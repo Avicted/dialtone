@@ -786,6 +786,203 @@ func TestHandlers_Presence(t *testing.T) {
 	}
 }
 
+func TestHandlers_DeviceKeys_AllAndErrors(t *testing.T) {
+	env := newHTTPTestEnv(t, nil, nil, nil)
+	defer env.close()
+
+	invite1 := createInviteHTTP(t, env.server.URL, env.adminToken)
+	authResp1 := registerHTTP(t, env.server.URL, "alice", invite1)
+
+	invite2 := createInviteHTTP(t, env.server.URL, env.adminToken)
+	authResp2 := registerHTTP(t, env.server.URL, "bob", invite2)
+
+	allReq, _ := http.NewRequest(http.MethodGet, env.server.URL+"/devices/keys?all=1", nil)
+	allReq.Header.Set("Authorization", "Bearer "+authResp1.Token)
+	allResp, err := http.DefaultClient.Do(allReq)
+	if err != nil {
+		t.Fatalf("device keys all: %v", err)
+	}
+	defer allResp.Body.Close()
+	if allResp.StatusCode != http.StatusOK {
+		t.Fatalf("device keys all status = %d", allResp.StatusCode)
+	}
+	var allPayload deviceKeysResponse
+	if err := json.NewDecoder(allResp.Body).Decode(&allPayload); err != nil {
+		t.Fatalf("device keys all decode: %v", err)
+	}
+	if len(allPayload.Keys) < 2 {
+		t.Fatalf("device keys all count = %d", len(allPayload.Keys))
+	}
+	seenUsers := map[user.ID]bool{}
+	for _, key := range allPayload.Keys {
+		seenUsers[key.UserID] = true
+	}
+	if !seenUsers[authResp1.UserID] || !seenUsers[authResp2.UserID] {
+		t.Fatalf("device keys all missing users")
+	}
+
+	missingReq, _ := http.NewRequest(http.MethodGet, env.server.URL+"/devices/keys", nil)
+	missingReq.Header.Set("Authorization", "Bearer "+authResp1.Token)
+	missingResp, err := http.DefaultClient.Do(missingReq)
+	if err != nil {
+		t.Fatalf("device keys missing: %v", err)
+	}
+	defer missingResp.Body.Close()
+	if missingResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("device keys missing status = %d", missingResp.StatusCode)
+	}
+
+	forbiddenReq, _ := http.NewRequest(http.MethodGet, env.server.URL+"/devices/keys?user_id="+string(authResp2.UserID), nil)
+	forbiddenReq.Header.Set("Authorization", "Bearer "+authResp1.Token)
+	forbiddenResp, err := http.DefaultClient.Do(forbiddenReq)
+	if err != nil {
+		t.Fatalf("device keys forbidden: %v", err)
+	}
+	defer forbiddenResp.Body.Close()
+	if forbiddenResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("device keys forbidden status = %d", forbiddenResp.StatusCode)
+	}
+}
+
+func TestHandlers_DirectoryKeys_SenderMismatch(t *testing.T) {
+	env := newHTTPTestEnv(t, nil, nil, nil)
+	defer env.close()
+
+	invite := createInviteHTTP(t, env.server.URL, env.adminToken)
+	authResp := registerHTTP(t, env.server.URL, "alice", invite)
+
+	body := map[string]any{"envelopes": []map[string]string{{
+		"device_id":         string(authResp.DeviceID),
+		"sender_device_id":  "other-device",
+		"sender_public_key": "pubkey-alice",
+		"envelope":          "env",
+	}}}
+	data, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, env.server.URL+"/directory/keys", bytes.NewReader(data))
+	req.Header.Set("Authorization", "Bearer "+authResp.Token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("directory keys sender mismatch: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("directory keys sender mismatch status = %d", resp.StatusCode)
+	}
+}
+
+func TestHandlers_ChannelKeys_Errors(t *testing.T) {
+	env := newHTTPTestEnv(t, nil, nil, nil)
+	defer env.close()
+
+	invite := createInviteHTTP(t, env.server.URL, env.adminToken)
+	authResp := registerHTTP(t, env.server.URL, "admin", invite)
+
+	missingReq, _ := http.NewRequest(http.MethodGet, env.server.URL+"/channels/keys", nil)
+	missingReq.Header.Set("Authorization", "Bearer "+authResp.Token)
+	missingResp, err := http.DefaultClient.Do(missingReq)
+	if err != nil {
+		t.Fatalf("channel keys missing: %v", err)
+	}
+	defer missingResp.Body.Close()
+	if missingResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("channel keys missing status = %d", missingResp.StatusCode)
+	}
+
+	noChannelBody := map[string]any{
+		"channel_id": "missing",
+		"envelopes": []map[string]string{{
+			"device_id":         string(authResp.DeviceID),
+			"sender_device_id":  string(authResp.DeviceID),
+			"sender_public_key": "pubkey-admin",
+			"envelope":          "env",
+		}},
+	}
+	noChannelData, _ := json.Marshal(noChannelBody)
+	noChannelReq, _ := http.NewRequest(http.MethodPost, env.server.URL+"/channels/keys", bytes.NewReader(noChannelData))
+	noChannelReq.Header.Set("Authorization", "Bearer "+authResp.Token)
+	noChannelReq.Header.Set("Content-Type", "application/json")
+	noChannelResp, err := http.DefaultClient.Do(noChannelReq)
+	if err != nil {
+		t.Fatalf("channel keys not found: %v", err)
+	}
+	defer noChannelResp.Body.Close()
+	if noChannelResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("channel keys not found status = %d", noChannelResp.StatusCode)
+	}
+
+	channelID := channel.ID("ch-1")
+	_ = env.channelRepo.CreateChannel(context.Background(), channel.Channel{
+		ID:        channelID,
+		NameEnc:   "enc",
+		CreatedBy: authResp.UserID,
+		CreatedAt: time.Now().UTC(),
+	})
+
+	mismatchBody := map[string]any{
+		"channel_id": channelID,
+		"envelopes": []map[string]string{{
+			"device_id":         string(authResp.DeviceID),
+			"sender_device_id":  "other-device",
+			"sender_public_key": "pubkey-admin",
+			"envelope":          "env",
+		}},
+	}
+	mismatchData, _ := json.Marshal(mismatchBody)
+	mismatchReq, _ := http.NewRequest(http.MethodPost, env.server.URL+"/channels/keys", bytes.NewReader(mismatchData))
+	mismatchReq.Header.Set("Authorization", "Bearer "+authResp.Token)
+	mismatchReq.Header.Set("Content-Type", "application/json")
+	mismatchResp, err := http.DefaultClient.Do(mismatchReq)
+	if err != nil {
+		t.Fatalf("channel keys mismatch: %v", err)
+	}
+	defer mismatchResp.Body.Close()
+	if mismatchResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("channel keys mismatch status = %d", mismatchResp.StatusCode)
+	}
+}
+
+func TestHandlers_ServerInvites_AdminAccessRequired(t *testing.T) {
+	env := newHTTPTestEnv(t, nil, nil, nil)
+	defer env.close()
+
+	req, _ := http.NewRequest(http.MethodPost, env.server.URL+"/server/invites", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("server invite no auth: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("server invite no auth status = %d", resp.StatusCode)
+	}
+
+	adminInvite := createInviteHTTP(t, env.server.URL, env.adminToken)
+	_ = registerHTTP(t, env.server.URL, "admin", adminInvite)
+
+	bobInvite := createInviteHTTP(t, env.server.URL, env.adminToken)
+	bobAuth := registerHTTP(t, env.server.URL, "bob", bobInvite)
+
+	userReq, _ := http.NewRequest(http.MethodPost, env.server.URL+"/server/invites", nil)
+	userReq.Header.Set("Authorization", "Bearer "+bobAuth.Token)
+	userResp, err := http.DefaultClient.Do(userReq)
+	if err != nil {
+		t.Fatalf("server invite user: %v", err)
+	}
+	defer userResp.Body.Close()
+	if userResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("server invite user status = %d", userResp.StatusCode)
+	}
+}
+
+func TestDecodeJSONMultipleObjects(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"a":1}{"b":2}`))
+	var dst map[string]int
+	if err := decodeJSON(rec, req, &dst); err == nil {
+		t.Fatal("expected error for multiple json objects")
+	}
+}
+
 func TestWriteError(t *testing.T) {
 	rec := httptest.NewRecorder()
 	writeError(rec, http.StatusBadRequest, errors.New("bad request"))
