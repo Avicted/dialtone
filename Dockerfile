@@ -2,7 +2,8 @@ FROM golang:1.25.6-alpine3.23 AS builder
 
 WORKDIR /src
 
-RUN apk add --no-cache ca-certificates curl
+RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache curl
 
 COPY go.mod go.sum ./
 RUN go mod download
