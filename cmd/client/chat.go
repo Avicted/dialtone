@@ -19,8 +19,10 @@ import (
 )
 
 const (
-	sidebarWidth      = 26
-	shareKeysInterval = 30 * time.Second
+	sidebarWidth             = 26
+	shareKeysInterval        = 30 * time.Second
+	channelRefreshDelay      = 3 * time.Second
+	channelRefreshMaxRetries = 6
 )
 
 type chatMessage struct {
@@ -55,35 +57,37 @@ const (
 )
 
 type chatModel struct {
-	api                  *APIClient
-	auth                 *AuthResponse
-	kp                   *crypto.KeyPair
-	ws                   *WSClient
-	wsCh                 chan ServerMessage
-	messages             []chatMessage
-	channels             map[string]channelInfo
-	channelMsgs          map[string][]chatMessage
-	channelHistoryLoaded map[string]bool
-	userNames            map[string]string
-	userPresence         map[string]bool
-	userAdmins           map[string]bool
-	channelKeys          map[string][]byte
-	directoryKey         []byte
-	pendingProfilePush   bool
-	activeChannel        string
-	channelUnread        map[string]int
-	sidebarVisible       bool
-	sidebarMode          sidebarMode
-	sidebarIndex         int
-	selectActive         bool
-	selectOptions        []channelInfo
-	selectIndex          int
-	viewport             viewport.Model
-	input                textinput.Model
-	connected            bool
-	errMsg               string
-	width                int
-	height               int
+	api                   *APIClient
+	auth                  *AuthResponse
+	kp                    *crypto.KeyPair
+	ws                    *WSClient
+	wsCh                  chan ServerMessage
+	messages              []chatMessage
+	channels              map[string]channelInfo
+	channelMsgs           map[string][]chatMessage
+	channelHistoryLoaded  map[string]bool
+	userNames             map[string]string
+	userPresence          map[string]bool
+	userAdmins            map[string]bool
+	channelKeys           map[string][]byte
+	directoryKey          []byte
+	pendingProfilePush    bool
+	activeChannel         string
+	channelUnread         map[string]int
+	sidebarVisible        bool
+	sidebarMode           sidebarMode
+	sidebarIndex          int
+	selectActive          bool
+	selectOptions         []channelInfo
+	selectIndex           int
+	viewport              viewport.Model
+	input                 textinput.Model
+	connected             bool
+	errMsg                string
+	width                 int
+	height                int
+	channelRefreshNeeded  bool
+	channelRefreshRetries int
 }
 
 type wsConnectedMsg struct {
@@ -110,6 +114,8 @@ type directorySyncMsg struct {
 }
 
 type directoryTick struct{}
+
+type channelRefreshTick struct{}
 
 var errDirectoryKeyPending = fmt.Errorf("directory key pending")
 
@@ -262,20 +268,29 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		m.connected = true
 		m.errMsg = ""
 		m.refreshChannels(false)
+		m.channelRefreshRetries = 0
 		if m.activeChannel == "" && len(m.messages) == 0 {
 			m.appendSystemMessage("no global chat; select a channel with the sidebar or /channel list")
 		}
-		return m, tea.Batch(waitForWSMsg(m.wsCh), m.shareKnownChannelKeysCmd(), m.scheduleShareTick())
+		cmds := []tea.Cmd{waitForWSMsg(m.wsCh), m.shareKnownChannelKeysCmd(), m.scheduleShareTick()}
+		if m.channelRefreshNeeded {
+			cmds = append(cmds, m.scheduleChannelRefresh())
+		}
+		return m, tea.Batch(cmds...)
 
 	case wsMessageMsg:
 		serverMsg := ServerMessage(msg)
 		if serverMsg.Type == "device.joined" {
 			if serverMsg.DeviceID == m.auth.DeviceID {
 				m.refreshChannels(false)
+				m.channelRefreshRetries = 0
 			}
 			cmds := []tea.Cmd{waitForWSMsg(m.wsCh), m.shareKnownChannelKeysCmd()}
 			if m.isTrusted() {
 				cmds = append(cmds, m.shareDirectoryKeyCmd(), m.syncDirectoryCmd(m.pendingProfilePush))
+			}
+			if m.channelRefreshNeeded {
+				cmds = append(cmds, m.scheduleChannelRefresh())
 			}
 			m.refreshViewport()
 			return m, tea.Batch(cmds...)
@@ -335,6 +350,17 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		if m.connected {
 			m.refreshChannels(false)
 			return m, tea.Batch(m.shareKnownChannelKeysCmd(), m.scheduleShareTick())
+		}
+		return m, nil
+
+	case channelRefreshTick:
+		m.refreshChannels(false)
+		if m.channelRefreshNeeded && m.channelRefreshRetries < channelRefreshMaxRetries {
+			m.channelRefreshRetries++
+			return m, m.scheduleChannelRefresh()
+		}
+		if !m.channelRefreshNeeded {
+			m.channelRefreshRetries = 0
 		}
 		return m, nil
 
@@ -516,17 +542,25 @@ func (m *chatModel) refreshChannels(showMessage bool) {
 	channels, err := m.api.ListChannels(ctx, m.auth.Token)
 	if err != nil {
 		m.errMsg = fmt.Sprintf("list channels: %v", err)
+		m.channelRefreshNeeded = false
 		return
 	}
 	if len(channels) == 0 {
 		if showMessage {
 			m.appendSystemMessage("no channels yet")
 		}
+		m.channelRefreshNeeded = false
 		return
 	}
+	needsRefresh := false
 	for _, ch := range channels {
-		_, _ = m.ensureChannelKey(ch.ID)
+		if _, err := m.ensureChannelKey(ch.ID); err != nil {
+			needsRefresh = true
+		}
 		name := m.decryptChannelName(ch.ID, ch.NameEnc)
+		if name == "<encrypted>" {
+			needsRefresh = true
+		}
 		m.channels[ch.ID] = channelInfo{ID: ch.ID, Name: name}
 	}
 	if showMessage {
@@ -543,6 +577,7 @@ func (m *chatModel) refreshChannels(showMessage bool) {
 		m.appendSystemMessage(b.String())
 	}
 	m.ensureSidebarIndex()
+	m.channelRefreshNeeded = needsRefresh
 }
 
 func (m *chatModel) createChannel(name string) {
@@ -1467,6 +1502,12 @@ func (m *chatModel) schedulePresenceTick() tea.Cmd {
 func (m *chatModel) scheduleShareTick() tea.Cmd {
 	return tea.Tick(shareKeysInterval, func(time.Time) tea.Msg {
 		return shareTick{}
+	})
+}
+
+func (m *chatModel) scheduleChannelRefresh() tea.Cmd {
+	return tea.Tick(channelRefreshDelay, func(time.Time) tea.Msg {
+		return channelRefreshTick{}
 	})
 }
 
