@@ -52,7 +52,9 @@ func (r *fakeDeviceRepo) ListAll(_ context.Context) ([]device.Device, error) {
 	return nil, nil
 }
 
-func (r *fakeDeviceRepo) UpdateLastSeen(_ context.Context, _ device.ID, _ time.Time) error { return nil }
+func (r *fakeDeviceRepo) UpdateLastSeen(_ context.Context, _ device.ID, _ time.Time) error {
+	return nil
+}
 
 type fakeBroadcastRepo struct {
 	saved []message.BroadcastMessage
@@ -89,7 +91,9 @@ func (r *fakeChannelRepo) GetChannel(_ context.Context, _ channel.ID) (channel.C
 
 func (r *fakeChannelRepo) ListChannels(_ context.Context) ([]channel.Channel, error) { return nil, nil }
 
-func (r *fakeChannelRepo) UpdateChannelName(_ context.Context, _ channel.ID, _ string) error { return nil }
+func (r *fakeChannelRepo) UpdateChannelName(_ context.Context, _ channel.ID, _ string) error {
+	return nil
+}
 
 func (r *fakeChannelRepo) DeleteChannel(_ context.Context, _ channel.ID) error { return nil }
 
@@ -105,7 +109,9 @@ func (r *fakeChannelRepo) ListRecentMessages(_ context.Context, _ channel.ID, _ 
 	return nil, nil
 }
 
-func (r *fakeChannelRepo) UpsertKeyEnvelope(_ context.Context, _ channel.KeyEnvelope) error { return nil }
+func (r *fakeChannelRepo) UpsertKeyEnvelope(_ context.Context, _ channel.KeyEnvelope) error {
+	return nil
+}
 
 func (r *fakeChannelRepo) GetKeyEnvelope(_ context.Context, _ channel.ID, _ device.ID) (channel.KeyEnvelope, error) {
 	return channel.KeyEnvelope{}, storage.ErrNotFound
