@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -705,7 +706,12 @@ func (h *Handler) handleServerInvites(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	invite, err := h.invites.Create(r.Context())
+	// Use a detached context so the invite is created even if the client
+	// disconnects before the DB round-trip completes (e.g. when using nc).
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	invite, err := h.invites.Create(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
