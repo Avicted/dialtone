@@ -149,6 +149,7 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.register <- client
+	h.notifyDeviceJoined(client.userID, client.deviceID)
 
 	go client.writeLoop()
 	go client.readLoop()
@@ -286,6 +287,7 @@ type outboundMessage struct {
 	ChannelNameEnc  string     `json:"channel_name_enc,omitempty"`
 	SenderPublicKey string     `json:"sender_public_key,omitempty"`
 	KeyEnvelope     string     `json:"key_envelope,omitempty"`
+	DeviceID        device.ID  `json:"device_id,omitempty"`
 	Body            string     `json:"body"`
 	SentAt          string     `json:"sent_at"`
 }
@@ -530,6 +532,26 @@ func (h *Hub) NotifyChannelDeleted(id channel.ID) {
 	out := outboundMessage{
 		Type:      "channel.deleted",
 		ChannelID: id,
+	}
+	h.mu.RLock()
+	clients := make([]*Client, 0, len(h.clients))
+	for client := range h.clients {
+		clients = append(clients, client)
+	}
+	h.mu.RUnlock()
+	for _, client := range clients {
+		client.sendEvent(out)
+	}
+}
+
+func (h *Hub) notifyDeviceJoined(userID user.ID, deviceID device.ID) {
+	if h == nil || userID == "" || deviceID == "" {
+		return
+	}
+	out := outboundMessage{
+		Type:     "device.joined",
+		Sender:   userID,
+		DeviceID: deviceID,
 	}
 	h.mu.RLock()
 	clients := make([]*Client, 0, len(h.clients))

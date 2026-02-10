@@ -239,7 +239,16 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		return m, tea.Batch(waitForWSMsg(m.wsCh), m.shareKnownChannelKeysCmd(), m.scheduleShareTick())
 
 	case wsMessageMsg:
-		m.handleServerMessage(ServerMessage(msg))
+		serverMsg := ServerMessage(msg)
+		if serverMsg.Type == "device.joined" {
+			if serverMsg.DeviceID == m.auth.DeviceID {
+				m.refreshChannels(false)
+			}
+			cmd := m.shareKnownChannelKeysCmd()
+			m.refreshViewport()
+			return m, tea.Batch(waitForWSMsg(m.wsCh), cmd)
+		}
+		m.handleServerMessage(serverMsg)
 		m.refreshViewport()
 		return m, waitForWSMsg(m.wsCh)
 
@@ -1380,16 +1389,50 @@ func wrapText(text string, width int) []string {
 	}
 	var lines []string
 	current := words[0]
+	if len(current) > width {
+		lines = append(lines, chunkText(current, width)...)
+		current = ""
+	}
 	for _, word := range words[1:] {
+		if current == "" {
+			if len(word) > width {
+				lines = append(lines, chunkText(word, width)...)
+				continue
+			}
+			current = word
+			continue
+		}
 		if len(current)+1+len(word) <= width {
 			current = current + " " + word
 			continue
 		}
 		lines = append(lines, current)
+		if len(word) > width {
+			lines = append(lines, chunkText(word, width)...)
+			current = ""
+			continue
+		}
 		current = word
 	}
-	lines = append(lines, current)
+	if current != "" {
+		lines = append(lines, current)
+	}
 	return lines
+}
+
+func chunkText(text string, width int) []string {
+	if width <= 0 {
+		return []string{text}
+	}
+	chunks := make([]string, 0, (len(text)/width)+1)
+	for len(text) > width {
+		chunks = append(chunks, text[:width])
+		text = text[width:]
+	}
+	if text != "" {
+		chunks = append(chunks, text)
+	}
+	return chunks
 }
 
 func generateChannelKey() ([]byte, error) {
