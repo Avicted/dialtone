@@ -62,6 +62,8 @@ func loadOrCreateKeyPair(passphrase string) (*crypto.KeyPair, error) {
 	if err == nil {
 		if kp, err := loadKeyPair(path, passphrase); err == nil {
 			return kp, nil
+		} else if !os.IsNotExist(err) {
+			return nil, err
 		}
 	}
 
