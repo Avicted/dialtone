@@ -16,7 +16,7 @@ type Config struct {
 
 func LoadFromEnv() (Config, error) {
 	cfg := Config{
-		ListenAddr:     ":8080",
+		ListenAddr:     os.Getenv("DIALTONE_LISTEN_ADDR"),
 		DBURL:          os.Getenv("DIALTONE_DB_URL"),
 		TLSCertPath:    os.Getenv("DIALTONE_TLS_CERT"),
 		TLSKeyPath:     os.Getenv("DIALTONE_TLS_KEY"),

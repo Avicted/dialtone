@@ -1,4 +1,4 @@
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25.6-alpine3.23 AS builder
 
 WORKDIR /src
 
@@ -11,7 +11,7 @@ COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/dialtone-server ./cmd/server
 
-FROM alpine:3.20
+FROM alpine:3.23
 
 RUN apk add --no-cache ca-certificates && \
 	adduser -D -H -u 10001 -s /sbin/nologin dialtone
