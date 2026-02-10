@@ -25,69 +25,45 @@ type AuthResponse struct {
 	ExpiresAt    string `json:"expires_at"`
 	Username     string `json:"username"`
 	DevicePubKey string `json:"device_public_key"`
+	ChannelKey   string `json:"channel_key"`
 }
 
 type apiError struct {
 	Error string `json:"error"`
 }
 
-type RoomResponse struct {
+type ChannelResponse struct {
 	ID        string `json:"id"`
 	NameEnc   string `json:"name_enc"`
 	CreatedBy string `json:"created_by"`
 	CreatedAt string `json:"created_at"`
 }
 
-type CreateRoomResponse struct {
-	Room RoomResponse `json:"room"`
+type CreateChannelResponse struct {
+	Channel ChannelResponse `json:"channel"`
 }
 
-type ListRoomsResponse struct {
-	Rooms []RoomResponse `json:"rooms"`
+type ListChannelsResponse struct {
+	Channels []ChannelResponse `json:"channels"`
 }
 
-type CreateInviteResponse struct {
-	Token     string `json:"token"`
-	RoomID    string `json:"room_id"`
-	ExpiresAt string `json:"expires_at"`
-}
-
-type JoinRoomResponse struct {
-	Room     RoomResponse          `json:"room"`
-	JoinedAt string                `json:"joined_at"`
-	Messages []RoomMessageResponse `json:"messages"`
-}
-
-type RoomMessageResponse struct {
+type ChannelMessageResponse struct {
 	ID            string `json:"id"`
-	RoomID        string `json:"room_id"`
+	ChannelID     string `json:"channel_id"`
 	SenderID      string `json:"sender_id"`
 	SenderNameEnc string `json:"sender_name_enc"`
 	Body          string `json:"body"`
 	SentAt        string `json:"sent_at"`
 }
 
-type RoomMemberResponse struct {
-	UserID         string `json:"user_id"`
-	DisplayNameEnc string `json:"display_name_enc"`
-	Online         bool   `json:"online"`
+type CreateServerInviteResponse struct {
+	Token     string `json:"token"`
+	ExpiresAt string `json:"expires_at"`
 }
 
-type RoomMembersResponse struct {
-	RoomID  string               `json:"room_id"`
-	Members []RoomMemberResponse `json:"members"`
-}
-
-// DeviceKeysResponse is the response from GET /devices/keys.
-type DeviceKeysResponse struct {
-	UserID string          `json:"user_id"`
-	Keys   []DeviceKeyInfo `json:"keys"`
-}
-
-// DeviceKeyInfo is a single device's public key.
-type DeviceKeyInfo struct {
-	DeviceID  string `json:"device_id"`
-	PublicKey string `json:"public_key"`
+type PresenceResponse struct {
+	Statuses map[string]bool `json:"statuses"`
+	Admins   map[string]bool `json:"admins"`
 }
 
 func NewAPIClient(serverURL string) *APIClient {
@@ -99,15 +75,15 @@ func NewAPIClient(serverURL string) *APIClient {
 	}
 }
 
-func (c *APIClient) Register(ctx context.Context, username, password string) (*AuthResponse, *crypto.KeyPair, error) {
-	return c.authRequest(ctx, "/auth/register", username, password)
+func (c *APIClient) Register(ctx context.Context, username, password, inviteToken string) (*AuthResponse, *crypto.KeyPair, error) {
+	return c.authRequest(ctx, "/auth/register", username, password, inviteToken)
 }
 
 func (c *APIClient) Login(ctx context.Context, username, password string) (*AuthResponse, *crypto.KeyPair, error) {
-	return c.authRequest(ctx, "/auth/login", username, password)
+	return c.authRequest(ctx, "/auth/login", username, password, "")
 }
 
-func (c *APIClient) authRequest(ctx context.Context, path, username, password string) (*AuthResponse, *crypto.KeyPair, error) {
+func (c *APIClient) authRequest(ctx context.Context, path, username, password, inviteToken string) (*AuthResponse, *crypto.KeyPair, error) {
 	kp, err := loadOrCreateKeyPair()
 	if err != nil {
 		return nil, nil, fmt.Errorf("load device key: %w", err)
@@ -119,6 +95,9 @@ func (c *APIClient) authRequest(ctx context.Context, path, username, password st
 		"username":   username,
 		"password":   password,
 		"public_key": pubKeyB64,
+	}
+	if inviteToken != "" {
+		body["invite_token"] = inviteToken
 	}
 	data, err := json.Marshal(body)
 	if err != nil {
@@ -153,127 +132,79 @@ func (c *APIClient) authRequest(ctx context.Context, path, username, password st
 	return &authResp, kp, nil
 }
 
-// FetchDeviceKeys retrieves the public keys for all devices of a given user.
-func (c *APIClient) FetchDeviceKeys(ctx context.Context, userID string) (*DeviceKeysResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.serverURL+"/devices/keys?user_id="+userID, nil)
-	if err != nil {
+func (c *APIClient) CreateChannel(ctx context.Context, token, nameEnc string) (*ChannelResponse, error) {
+	payload := map[string]string{"name_enc": nameEnc}
+	var resp CreateChannelResponse
+	if err := c.doJSON(ctx, http.MethodPost, "/channels", token, payload, &resp); err != nil {
 		return nil, err
 	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		var apiErr apiError
-		_ = json.NewDecoder(resp.Body).Decode(&apiErr)
-		if apiErr.Error != "" {
-			return nil, fmt.Errorf("server: %s", apiErr.Error)
-		}
-		return nil, fmt.Errorf("server returned %d", resp.StatusCode)
-	}
-
-	var keysResp DeviceKeysResponse
-	if err := json.NewDecoder(resp.Body).Decode(&keysResp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &keysResp, nil
+	return &resp.Channel, nil
 }
 
-// FetchAllDeviceKeys retrieves public keys for all devices.
-func (c *APIClient) FetchAllDeviceKeys(ctx context.Context) (*DeviceKeysResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.serverURL+"/devices/keys?all=1", nil)
-	if err != nil {
+func (c *APIClient) ListChannels(ctx context.Context, token string) ([]ChannelResponse, error) {
+	var resp ListChannelsResponse
+	if err := c.doJSON(ctx, http.MethodGet, "/channels", token, nil, &resp); err != nil {
 		return nil, err
 	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		var apiErr apiError
-		_ = json.NewDecoder(resp.Body).Decode(&apiErr)
-		if apiErr.Error != "" {
-			return nil, fmt.Errorf("server: %s", apiErr.Error)
-		}
-		return nil, fmt.Errorf("server returned %d", resp.StatusCode)
-	}
-
-	var keysResp DeviceKeysResponse
-	if err := json.NewDecoder(resp.Body).Decode(&keysResp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &keysResp, nil
+	return resp.Channels, nil
 }
 
-func (c *APIClient) CreateRoom(ctx context.Context, token, nameEnc, displayNameEnc string) (*RoomResponse, error) {
-	payload := map[string]string{"name_enc": nameEnc, "display_name_enc": displayNameEnc}
-	var resp CreateRoomResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/rooms", token, payload, &resp); err != nil {
-		return nil, err
-	}
-	return &resp.Room, nil
-}
-
-func (c *APIClient) ListRooms(ctx context.Context, token string) ([]RoomResponse, error) {
-	var resp ListRoomsResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/rooms", token, nil, &resp); err != nil {
-		return nil, err
-	}
-	return resp.Rooms, nil
-}
-
-func (c *APIClient) CreateRoomInvite(ctx context.Context, token, roomID string) (*CreateInviteResponse, error) {
-	payload := map[string]string{"room_id": roomID}
-	var resp CreateInviteResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/rooms/invites", token, payload, &resp); err != nil {
-		return nil, err
-	}
-	return &resp, nil
-}
-
-func (c *APIClient) JoinRoom(ctx context.Context, token, inviteToken, displayNameEnc string) (*JoinRoomResponse, error) {
-	payload := map[string]string{"token": inviteToken, "display_name_enc": displayNameEnc}
-	var resp JoinRoomResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/rooms/join", token, payload, &resp); err != nil {
-		return nil, err
-	}
-	return &resp, nil
-}
-
-func (c *APIClient) ListRoomMessages(ctx context.Context, token, roomID string, limit int) ([]RoomMessageResponse, error) {
+func (c *APIClient) DeleteChannel(ctx context.Context, token, channelID string) error {
 	query := url.Values{}
-	query.Set("room_id", roomID)
+	query.Set("channel_id", channelID)
+	path := "/channels?" + query.Encode()
+	return c.doJSON(ctx, http.MethodDelete, path, token, nil, nil)
+}
+
+func (c *APIClient) UpdateChannelName(ctx context.Context, token, channelID, nameEnc string) (*ChannelResponse, error) {
+	payload := map[string]string{"channel_id": channelID, "name_enc": nameEnc}
+	var resp CreateChannelResponse
+	if err := c.doJSON(ctx, http.MethodPatch, "/channels", token, payload, &resp); err != nil {
+		return nil, err
+	}
+	return &resp.Channel, nil
+}
+
+func (c *APIClient) ListChannelMessages(ctx context.Context, token, channelID string, limit int) ([]ChannelMessageResponse, error) {
+	query := url.Values{}
+	query.Set("channel_id", channelID)
 	if limit > 0 {
 		query.Set("limit", strconv.Itoa(limit))
 	}
-	path := "/rooms/messages?" + query.Encode()
-	var resp RoomMessagesResponse
+	path := "/channels/messages?" + query.Encode()
+	var resp ChannelMessagesResponse
 	if err := c.doJSON(ctx, http.MethodGet, path, token, nil, &resp); err != nil {
 		return nil, err
 	}
 	return resp.Messages, nil
 }
 
-func (c *APIClient) ListRoomMembers(ctx context.Context, token, roomID string) ([]RoomMemberResponse, error) {
-	query := url.Values{}
-	query.Set("room_id", roomID)
-	path := "/rooms/members?" + query.Encode()
-	var resp RoomMembersResponse
-	if err := c.doJSON(ctx, http.MethodGet, path, token, nil, &resp); err != nil {
-		return nil, err
-	}
-	return resp.Members, nil
+type ChannelMessagesResponse struct {
+	ChannelID string                   `json:"channel_id"`
+	Messages  []ChannelMessageResponse `json:"messages"`
 }
 
-type RoomMessagesResponse struct {
-	RoomID   string                `json:"room_id"`
-	Messages []RoomMessageResponse `json:"messages"`
+func (c *APIClient) CreateServerInvite(ctx context.Context, token string) (*CreateServerInviteResponse, error) {
+	var resp CreateServerInviteResponse
+	if err := c.doJSON(ctx, http.MethodPost, "/server/invites", token, nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *APIClient) FetchPresence(ctx context.Context, token string, userIDs []string) (map[string]bool, map[string]bool, error) {
+	payload := map[string][]string{"user_ids": userIDs}
+	var resp PresenceResponse
+	if err := c.doJSON(ctx, http.MethodPost, "/presence", token, payload, &resp); err != nil {
+		return nil, nil, err
+	}
+	if resp.Statuses == nil {
+		resp.Statuses = map[string]bool{}
+	}
+	if resp.Admins == nil {
+		resp.Admins = map[string]bool{}
+	}
+	return resp.Statuses, resp.Admins, nil
 }
 
 func (c *APIClient) doJSON(ctx context.Context, method, path, token string, payload any, out any) error {

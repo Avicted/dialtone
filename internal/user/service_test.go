@@ -40,9 +40,13 @@ func (r *fakeRepo) GetByUsernameHash(_ context.Context, usernameHash string) (Us
 	return u, nil
 }
 
+func (r *fakeRepo) Count(_ context.Context) (int, error) {
+	return len(r.users), nil
+}
+
 func newTestService() (*Service, *fakeRepo) {
 	repo := newFakeRepo()
-	svc := NewService(repo)
+	svc := NewService(repo, "test-pepper")
 	svc.idGen = func() ID { return "test-id-1" }
 	svc.now = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
 	return svc, repo

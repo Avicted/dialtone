@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Avicted/dialtone/internal/device"
+	"github.com/Avicted/dialtone/internal/serverinvite"
 	"github.com/Avicted/dialtone/internal/user"
 )
 
@@ -44,6 +45,10 @@ func (r *fakeUserRepo) GetByUsernameHash(_ context.Context, usernameHash string)
 		return user.User{}, errors.New("not found")
 	}
 	return u, nil
+}
+
+func (r *fakeUserRepo) Count(_ context.Context) (int, error) {
+	return len(r.users), nil
 }
 
 type fakeDeviceRepo struct {
@@ -101,12 +106,37 @@ func (r *fakeDeviceRepo) UpdateLastSeen(_ context.Context, id device.ID, t time.
 	return errors.New("not found")
 }
 
+type fakeInviteRepo struct {
+	consumed map[string]bool
+}
+
+func newFakeInviteRepo() *fakeInviteRepo {
+	return &fakeInviteRepo{consumed: make(map[string]bool)}
+}
+
+func (r *fakeInviteRepo) Create(_ context.Context, _ serverinvite.Invite) error {
+	return nil
+}
+
+func (r *fakeInviteRepo) Consume(_ context.Context, token string, userID user.ID, now time.Time) (serverinvite.Invite, error) {
+	if token == "" || userID == "" || now.IsZero() {
+		return serverinvite.Invite{}, serverinvite.ErrInvalidInput
+	}
+	if r.consumed[token] {
+		return serverinvite.Invite{}, serverinvite.ErrConsumed
+	}
+	r.consumed[token] = true
+	return serverinvite.Invite{Token: token, CreatedAt: now, ExpiresAt: now.Add(24 * time.Hour)}, nil
+}
+
 func newTestService() *Service {
 	userRepo := newFakeUserRepo()
 	deviceRepo := newFakeDeviceRepo()
-	userSvc := user.NewService(userRepo)
+	inviteRepo := newFakeInviteRepo()
+	userSvc := user.NewService(userRepo, "test-pepper")
 	deviceSvc := device.NewService(deviceRepo)
-	svc := NewService(userSvc, deviceSvc)
+	inviteSvc := serverinvite.NewService(inviteRepo)
+	svc := NewService(userSvc, deviceSvc, inviteSvc)
 	svc.now = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
 	return svc
 }
@@ -115,7 +145,7 @@ func TestRegister_Success(t *testing.T) {
 	svc := newTestService()
 	ctx := context.Background()
 
-	u, d, session, err := svc.Register(ctx, "alice", "password123", "dGVzdHB1YmtleQ==")
+	u, d, session, err := svc.Register(ctx, "alice", "password123", "dGVzdHB1YmtleQ==", "invite-1")
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
@@ -143,12 +173,12 @@ func TestRegister_DuplicateUsername(t *testing.T) {
 	svc := newTestService()
 	ctx := context.Background()
 
-	_, _, _, err := svc.Register(ctx, "alice", "password123", "a2V5MQ==")
+	_, _, _, err := svc.Register(ctx, "alice", "password123", "a2V5MQ==", "invite-1")
 	if err != nil {
 		t.Fatalf("first Register() error = %v", err)
 	}
 
-	_, _, _, err = svc.Register(ctx, "alice", "password456", "a2V5Mg==")
+	_, _, _, err = svc.Register(ctx, "alice", "password456", "a2V5Mg==", "invite-2")
 	if err == nil {
 		t.Fatal("expected error for duplicate username")
 	}
@@ -156,7 +186,7 @@ func TestRegister_DuplicateUsername(t *testing.T) {
 
 func TestRegister_ShortPassword(t *testing.T) {
 	svc := newTestService()
-	_, _, _, err := svc.Register(context.Background(), "bob", "short", "a2V5")
+	_, _, _, err := svc.Register(context.Background(), "bob", "short", "a2V5", "invite-1")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput, got %v", err)
 	}
@@ -164,7 +194,7 @@ func TestRegister_ShortPassword(t *testing.T) {
 
 func TestRegister_EmptyPublicKey(t *testing.T) {
 	svc := newTestService()
-	_, _, _, err := svc.Register(context.Background(), "bob", "password123", "")
+	_, _, _, err := svc.Register(context.Background(), "bob", "password123", "", "invite-1")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput, got %v", err)
 	}
@@ -172,7 +202,7 @@ func TestRegister_EmptyPublicKey(t *testing.T) {
 
 func TestRegister_EmptyUsername(t *testing.T) {
 	svc := newTestService()
-	_, _, _, err := svc.Register(context.Background(), "", "password123", "a2V5")
+	_, _, _, err := svc.Register(context.Background(), "", "password123", "a2V5", "invite-1")
 	if err == nil {
 		t.Fatal("expected error for empty username")
 	}
@@ -182,7 +212,7 @@ func TestLogin_Success(t *testing.T) {
 	svc := newTestService()
 	ctx := context.Background()
 
-	_, _, _, err := svc.Register(ctx, "carol", "password123", "a2V5MQ==")
+	_, _, _, err := svc.Register(ctx, "carol", "password123", "a2V5MQ==", "invite-1")
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
@@ -209,7 +239,7 @@ func TestLogin_WrongPassword(t *testing.T) {
 	svc := newTestService()
 	ctx := context.Background()
 
-	_, _, _, _ = svc.Register(ctx, "dave", "password123", "a2V5MQ==")
+	_, _, _, _ = svc.Register(ctx, "dave", "password123", "a2V5MQ==", "invite-1")
 	_, _, _, err := svc.Login(ctx, "dave", "wrongpassword", "a2V5Mg==")
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("expected ErrUnauthorized, got %v", err)
@@ -236,7 +266,7 @@ func TestValidateToken_Valid(t *testing.T) {
 	svc := newTestService()
 	ctx := context.Background()
 
-	_, _, session, _ := svc.Register(ctx, "frank", "password123", "a2V5MQ==")
+	_, _, session, _ := svc.Register(ctx, "frank", "password123", "a2V5MQ==", "invite-1")
 
 	got, err := svc.ValidateToken(session.Token)
 	if err != nil {
@@ -267,7 +297,7 @@ func TestValidateToken_Expired(t *testing.T) {
 	svc := newTestService()
 	ctx := context.Background()
 
-	_, _, session, _ := svc.Register(ctx, "grace", "password123", "a2V5MQ==")
+	_, _, session, _ := svc.Register(ctx, "grace", "password123", "a2V5MQ==", "invite-1")
 
 	svc.now = func() time.Time {
 		return time.Date(2026, 1, 2, 1, 0, 0, 0, time.UTC)

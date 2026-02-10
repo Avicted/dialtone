@@ -11,10 +11,11 @@ import (
 	"time"
 
 	"github.com/Avicted/dialtone/internal/auth"
+	"github.com/Avicted/dialtone/internal/channel"
 	"github.com/Avicted/dialtone/internal/config"
 	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/httpapi"
-	"github.com/Avicted/dialtone/internal/room"
+	"github.com/Avicted/dialtone/internal/serverinvite"
 	"github.com/Avicted/dialtone/internal/storage"
 	"github.com/Avicted/dialtone/internal/user"
 	"github.com/Avicted/dialtone/internal/ws"
@@ -56,14 +57,15 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	hub := ws.NewHub(store.Messages(), store.Broadcasts(), store.Devices(), store.Rooms())
+	hub := ws.NewHub(store.Broadcasts(), store.Devices(), store.Channels())
 	go hub.Run(ctx)
 
-	userService := user.NewService(store.Users())
+	userService := user.NewService(store.Users(), cfg.UsernamePepper)
 	deviceService := device.NewService(store.Devices())
-	roomService := room.NewService(store.Rooms())
-	authService := auth.NewService(userService, deviceService)
-	api := httpapi.NewHandler(userService, deviceService, roomService, authService, hub)
+	channelService := channel.NewService(store.Channels(), userService)
+	inviteService := serverinvite.NewService(store.ServerInvites())
+	authService := auth.NewService(userService, deviceService, inviteService)
+	api := httpapi.NewHandler(userService, deviceService, channelService, authService, inviteService, hub, hub, cfg.ChannelKey, cfg.AdminToken)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)

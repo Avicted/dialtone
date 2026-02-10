@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -23,11 +24,9 @@ type ServerMessage struct {
 	Type          string `json:"type"`
 	MessageID     string `json:"message_id"`
 	Sender        string `json:"sender"`
-	SenderName    string `json:"sender_name"`
 	SenderNameEnc string `json:"sender_name_enc,omitempty"`
-	RoomID        string `json:"room_id,omitempty"`
-	SenderPubKey  string `json:"sender_public_key,omitempty"`
-	KeyEnvelope   string `json:"key_envelope,omitempty"`
+	ChannelID     string `json:"channel_id,omitempty"`
+	ChannelNameEnc string `json:"channel_name_enc,omitempty"`
 	Body          string `json:"body"`
 	SentAt        string `json:"sent_at"`
 	Code          string `json:"code"`
@@ -35,23 +34,24 @@ type ServerMessage struct {
 }
 
 type SendMessage struct {
-	Type          string            `json:"type"`
-	RoomID        string            `json:"room_id,omitempty"`
-	Body          string            `json:"body"`
-	MessageID     string            `json:"message_id,omitempty"`
-	PublicKey     string            `json:"public_key,omitempty"`
-	SenderNameEnc string            `json:"sender_name_enc,omitempty"`
-	KeyEnvelopes  map[string]string `json:"key_envelopes,omitempty"`
+	Type          string `json:"type"`
+	ChannelID     string `json:"channel_id,omitempty"`
+	Body          string `json:"body"`
+	MessageID     string `json:"message_id,omitempty"`
+	SenderNameEnc string `json:"sender_name_enc,omitempty"`
 }
 
 func ConnectWS(serverURL, token string) (*WSClient, error) {
 	wsURL := strings.Replace(serverURL, "https://", "wss://", 1)
 	wsURL = strings.Replace(wsURL, "http://", "ws://", 1)
-	wsURL = wsURL + "/ws?token=" + token
+	wsURL = wsURL + "/ws"
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	options := &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": []string{"Bearer " + token}},
+	}
+	conn, _, err := websocket.Dial(ctx, wsURL, options)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("websocket dial: %w", err)

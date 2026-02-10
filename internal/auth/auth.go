@@ -12,6 +12,7 @@ import (
 	"unicode"
 
 	"github.com/Avicted/dialtone/internal/device"
+	"github.com/Avicted/dialtone/internal/serverinvite"
 	"github.com/Avicted/dialtone/internal/user"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -33,24 +34,29 @@ type Session struct {
 type Service struct {
 	users    *user.Service
 	devices  *device.Service
+	invites  *serverinvite.Service
 	tokens   *tokenStore
 	now      func() time.Time
 	tokenTTL time.Duration
 }
 
-func NewService(users *user.Service, devices *device.Service) *Service {
+func NewService(users *user.Service, devices *device.Service, invites *serverinvite.Service) *Service {
 	return &Service{
 		users:    users,
 		devices:  devices,
+		invites:  invites,
 		tokens:   newTokenStore(),
 		now:      time.Now,
 		tokenTTL: 24 * time.Hour,
 	}
 }
 
-func (s *Service) Register(ctx context.Context, username, password, publicKey string) (user.User, device.Device, Session, error) {
+func (s *Service) Register(ctx context.Context, username, password, publicKey, inviteToken string) (user.User, device.Device, Session, error) {
 	if s.users == nil || s.devices == nil {
 		return user.User{}, device.Device{}, Session{}, errors.New("services are required")
+	}
+	if s.invites == nil {
+		return user.User{}, device.Device{}, Session{}, errors.New("invites service is required")
 	}
 	name := normalizeUsername(username)
 	if name == "" {
@@ -62,13 +68,24 @@ func (s *Service) Register(ctx context.Context, username, password, publicKey st
 	if strings.TrimSpace(publicKey) == "" {
 		return user.User{}, device.Device{}, Session{}, ErrInvalidInput
 	}
+	if strings.TrimSpace(inviteToken) == "" {
+		return user.User{}, device.Device{}, Session{}, ErrInvalidInput
+	}
 
 	hash, err := hashPassword(password)
 	if err != nil {
 		return user.User{}, device.Device{}, Session{}, err
 	}
 
-	createdUser, err := s.users.CreateWithPassword(ctx, name, hash)
+	userID := s.users.NewID()
+	if _, err := s.invites.Consume(ctx, inviteToken, userID); err != nil {
+		return user.User{}, device.Device{}, Session{}, err
+	}
+	count, err := s.users.Count(ctx)
+	if err != nil {
+		return user.User{}, device.Device{}, Session{}, err
+	}
+	createdUser, err := s.users.CreateWithPasswordAndID(ctx, userID, name, hash, count == 0)
 	if err != nil {
 		return user.User{}, device.Device{}, Session{}, err
 	}

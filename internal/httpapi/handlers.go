@@ -9,8 +9,9 @@ import (
 	"time"
 
 	"github.com/Avicted/dialtone/internal/auth"
+	"github.com/Avicted/dialtone/internal/channel"
 	"github.com/Avicted/dialtone/internal/device"
-	"github.com/Avicted/dialtone/internal/room"
+	"github.com/Avicted/dialtone/internal/serverinvite"
 	"github.com/Avicted/dialtone/internal/storage"
 	"github.com/Avicted/dialtone/internal/user"
 )
@@ -21,24 +22,37 @@ const (
 )
 
 type Handler struct {
-	users    *user.Service
-	devices  *device.Service
-	rooms    *room.Service
-	auth     *auth.Service
-	presence PresenceProvider
+	users      *user.Service
+	devices    *device.Service
+	channels   *channel.Service
+	auth       *auth.Service
+	invites    *serverinvite.Service
+	presence   PresenceProvider
+	notifier   ChannelNotifier
+	channelKey string
+	adminToken string
 }
 
 type PresenceProvider interface {
 	IsOnline(userID user.ID) bool
 }
 
-func NewHandler(users *user.Service, devices *device.Service, rooms *room.Service, auth *auth.Service, presence PresenceProvider) *Handler {
+type ChannelNotifier interface {
+	NotifyChannelUpdated(ch channel.Channel)
+	NotifyChannelDeleted(id channel.ID)
+}
+
+func NewHandler(users *user.Service, devices *device.Service, channels *channel.Service, auth *auth.Service, invites *serverinvite.Service, presence PresenceProvider, notifier ChannelNotifier, channelKey, adminToken string) *Handler {
 	return &Handler{
-		users:    users,
-		devices:  devices,
-		rooms:    rooms,
-		auth:     auth,
-		presence: presence,
+		users:      users,
+		devices:    devices,
+		channels:   channels,
+		auth:       auth,
+		invites:    invites,
+		presence:   presence,
+		notifier:   notifier,
+		channelKey: channelKey,
+		adminToken: adminToken,
 	}
 }
 
@@ -48,17 +62,17 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/devices/keys", h.handleDeviceKeys)
 	mux.HandleFunc("/auth/register", h.handleRegister)
 	mux.HandleFunc("/auth/login", h.handleLogin)
-	mux.HandleFunc("/rooms", h.handleRooms)
-	mux.HandleFunc("/rooms/invites", h.handleRoomInvites)
-	mux.HandleFunc("/rooms/join", h.handleRoomJoin)
-	mux.HandleFunc("/rooms/messages", h.handleRoomMessages)
-	mux.HandleFunc("/rooms/members", h.handleRoomMembers)
+	mux.HandleFunc("/channels", h.handleChannels)
+	mux.HandleFunc("/channels/messages", h.handleChannelMessages)
+	mux.HandleFunc("/presence", h.handlePresence)
+	mux.HandleFunc("/server/invites", h.handleServerInvites)
 }
 
 type authRequest struct {
-	Username  string `json:"username"`
-	Password  string `json:"password"`
-	PublicKey string `json:"public_key"`
+	Username    string `json:"username"`
+	Password    string `json:"password"`
+	PublicKey   string `json:"public_key"`
+	InviteToken string `json:"invite_token"`
 }
 
 type authResponse struct {
@@ -68,6 +82,7 @@ type authResponse struct {
 	ExpiresAt    string    `json:"expires_at"`
 	Username     string    `json:"username"`
 	DevicePubKey string    `json:"device_public_key"`
+	ChannelKey   string    `json:"channel_key"`
 }
 
 func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -87,11 +102,15 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	createdUser, createdDevice, session, err := h.auth.Register(r.Context(), req.Username, req.Password, req.PublicKey)
+	createdUser, createdDevice, session, err := h.auth.Register(r.Context(), req.Username, req.Password, req.PublicKey, req.InviteToken)
 	if err != nil {
 		switch {
-		case errors.Is(err, user.ErrInvalidInput), errors.Is(err, device.ErrInvalidInput), errors.Is(err, auth.ErrInvalidInput):
+		case errors.Is(err, user.ErrInvalidInput), errors.Is(err, device.ErrInvalidInput), errors.Is(err, auth.ErrInvalidInput), errors.Is(err, serverinvite.ErrInvalidInput):
 			writeError(w, http.StatusBadRequest, err)
+		case errors.Is(err, serverinvite.ErrExpired), errors.Is(err, serverinvite.ErrConsumed):
+			writeError(w, http.StatusGone, err)
+		case errors.Is(err, serverinvite.ErrNotFound):
+			writeError(w, http.StatusNotFound, err)
 		default:
 			writeError(w, http.StatusInternalServerError, err)
 		}
@@ -105,6 +124,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:    session.ExpiresAt.UTC().Format(timeLayout),
 		Username:     session.Username,
 		DevicePubKey: createdDevice.PublicKey,
+		ChannelKey:   h.channelKey,
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -146,6 +166,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:    session.ExpiresAt.UTC().Format(timeLayout),
 		Username:     session.Username,
 		DevicePubKey: createdDevice.PublicKey,
+		ChannelKey:   h.channelKey,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -153,9 +174,6 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) authenticate(r *http.Request) (auth.Session, error) {
 	if h.auth == nil {
 		return auth.Session{}, auth.ErrUnauthorized
-	}
-	if token := strings.TrimSpace(r.URL.Query().Get("token")); token != "" {
-		return h.auth.ValidateToken(token)
 	}
 	if header := strings.TrimSpace(r.Header.Get("Authorization")); header != "" {
 		parts := strings.Fields(header)
@@ -224,9 +242,20 @@ func (h *Handler) handleDevices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	session, err := h.authenticate(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+
 	var req createDeviceRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	if req.UserID != session.UserID {
+		writeError(w, http.StatusForbidden, errors.New("cannot create device for another user"))
 		return
 	}
 
@@ -280,22 +309,28 @@ func (h *Handler) handleDeviceKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	all := r.URL.Query().Get("all") == "1"
-	userID := user.ID(r.URL.Query().Get("user_id"))
-	if !all && userID == "" {
-		writeError(w, http.StatusBadRequest, errors.New("user_id query parameter is required"))
+	session, err := h.authenticate(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
 		return
 	}
 
-	var (
-		devices []device.Device
-		err     error
-	)
+	all := r.URL.Query().Get("all") == "1"
+	userID := user.ID(r.URL.Query().Get("user_id"))
 	if all {
-		devices, err = h.devices.ListAll(r.Context())
-	} else {
-		devices, err = h.devices.ListByUser(r.Context(), userID)
+		writeError(w, http.StatusForbidden, errors.New("listing all device keys is not allowed"))
+		return
 	}
+	if userID == "" {
+		writeError(w, http.StatusBadRequest, errors.New("user_id query parameter is required"))
+		return
+	}
+	if userID != session.UserID {
+		writeError(w, http.StatusForbidden, errors.New("cannot list devices for another user"))
+		return
+	}
+
+	devices, err := h.devices.ListByUser(r.Context(), userID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -316,42 +351,97 @@ func (h *Handler) handleDeviceKeys(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-type roomResponse struct {
-	ID        room.ID `json:"id"`
-	NameEnc   string  `json:"name_enc"`
-	CreatedBy user.ID `json:"created_by"`
-	CreatedAt string  `json:"created_at"`
+type createServerInviteResponse struct {
+	Token     string `json:"token"`
+	ExpiresAt string `json:"expires_at"`
 }
 
-type roomMessageResponse struct {
-	ID            string  `json:"id"`
-	RoomID        room.ID `json:"room_id"`
-	SenderID      user.ID `json:"sender_id"`
-	SenderNameEnc string  `json:"sender_name_enc"`
-	Body          string  `json:"body"`
-	SentAt        string  `json:"sent_at"`
-}
-
-type createRoomRequest struct {
-	NameEnc        string `json:"name_enc"`
-	DisplayNameEnc string `json:"display_name_enc"`
-}
-
-type createRoomResponse struct {
-	Room roomResponse `json:"room"`
-}
-
-type listRoomsResponse struct {
-	Rooms []roomResponse `json:"rooms"`
-}
-
-func (h *Handler) handleRooms(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+func (h *Handler) handleServerInvites(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if h.rooms == nil {
-		writeError(w, http.StatusInternalServerError, errors.New("room service not configured"))
+	if h.invites == nil {
+		writeError(w, http.StatusInternalServerError, errors.New("invite service not configured"))
+		return
+	}
+	if !h.authenticateAdmin(r) {
+		session, err := h.authenticate(r)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, errors.New("admin token required"))
+			return
+		}
+		adminUser, err := h.users.GetByID(r.Context(), session.UserID)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, errors.New("admin token required"))
+			return
+		}
+		if !adminUser.IsAdmin {
+			writeError(w, http.StatusForbidden, errors.New("admin access required"))
+			return
+		}
+	}
+
+	invite, err := h.invites.Create(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	resp := createServerInviteResponse{
+		Token:     invite.Token,
+		ExpiresAt: invite.ExpiresAt.UTC().Format(timeLayout),
+	}
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (h *Handler) authenticateAdmin(r *http.Request) bool {
+	if strings.TrimSpace(h.adminToken) == "" {
+		return false
+	}
+	return strings.TrimSpace(r.Header.Get("X-Admin-Token")) == h.adminToken
+}
+
+type channelResponse struct {
+	ID        channel.ID `json:"id"`
+	NameEnc   string     `json:"name_enc"`
+	CreatedBy user.ID    `json:"created_by"`
+	CreatedAt string     `json:"created_at"`
+}
+
+type channelMessageResponse struct {
+	ID            string     `json:"id"`
+	ChannelID     channel.ID `json:"channel_id"`
+	SenderID      user.ID    `json:"sender_id"`
+	SenderNameEnc string     `json:"sender_name_enc"`
+	Body          string     `json:"body"`
+	SentAt        string     `json:"sent_at"`
+}
+
+type createChannelRequest struct {
+	NameEnc string `json:"name_enc"`
+}
+
+type updateChannelRequest struct {
+	ChannelID channel.ID `json:"channel_id"`
+	NameEnc   string     `json:"name_enc"`
+}
+
+type createChannelResponse struct {
+	Channel channelResponse `json:"channel"`
+}
+
+type listChannelsResponse struct {
+	Channels []channelResponse `json:"channels"`
+}
+
+func (h *Handler) handleChannels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet && r.Method != http.MethodDelete && r.Method != http.MethodPatch {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if h.channels == nil {
+		writeError(w, http.StatusInternalServerError, errors.New("channel service not configured"))
 		return
 	}
 
@@ -360,44 +450,116 @@ func (h *Handler) handleRooms(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, err)
 		return
 	}
+	if r.Method != http.MethodGet {
+		adminUser, err := h.users.GetByID(r.Context(), session.UserID)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, errors.New("admin access required"))
+			return
+		}
+		if !adminUser.IsAdmin {
+			writeError(w, http.StatusForbidden, errors.New("admin access required"))
+			return
+		}
+	}
 
 	if r.Method == http.MethodGet {
-		rooms, err := h.rooms.ListRooms(r.Context(), session.UserID)
+		channels, err := h.channels.ListChannels(r.Context(), session.UserID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		resp := listRoomsResponse{Rooms: make([]roomResponse, 0, len(rooms))}
-		for _, rm := range rooms {
-			resp.Rooms = append(resp.Rooms, roomResponse{
-				ID:        rm.ID,
-				NameEnc:   rm.NameEnc,
-				CreatedBy: rm.CreatedBy,
-				CreatedAt: rm.CreatedAt.UTC().Format(timeLayout),
+		resp := listChannelsResponse{Channels: make([]channelResponse, 0, len(channels))}
+		for _, ch := range channels {
+			resp.Channels = append(resp.Channels, channelResponse{
+				ID:        ch.ID,
+				NameEnc:   ch.NameEnc,
+				CreatedBy: ch.CreatedBy,
+				CreatedAt: ch.CreatedAt.UTC().Format(timeLayout),
 			})
 		}
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
-	var req createRoomRequest
+	if r.Method == http.MethodDelete {
+		channelID := channel.ID(strings.TrimSpace(r.URL.Query().Get("channel_id")))
+		if channelID == "" {
+			writeError(w, http.StatusBadRequest, errors.New("channel_id query parameter is required"))
+			return
+		}
+		if err := h.channels.DeleteChannel(r.Context(), session.UserID, channelID); err != nil {
+			switch {
+			case errors.Is(err, channel.ErrInvalidInput):
+				writeError(w, http.StatusBadRequest, err)
+			case errors.Is(err, channel.ErrForbidden):
+				writeError(w, http.StatusForbidden, err)
+			case errors.Is(err, storage.ErrNotFound):
+				writeError(w, http.StatusNotFound, err)
+			default:
+				writeError(w, http.StatusInternalServerError, err)
+			}
+			return
+		}
+		if h.notifier != nil {
+			h.notifier.NotifyChannelDeleted(channelID)
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	if r.Method == http.MethodPatch {
+		var req updateChannelRequest
+		if err := decodeJSON(w, r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		updated, err := h.channels.UpdateChannelName(r.Context(), session.UserID, req.ChannelID, req.NameEnc)
+		if err != nil {
+			switch {
+			case errors.Is(err, channel.ErrInvalidInput):
+				writeError(w, http.StatusBadRequest, err)
+			case errors.Is(err, channel.ErrForbidden):
+				writeError(w, http.StatusForbidden, err)
+			case errors.Is(err, storage.ErrNotFound):
+				writeError(w, http.StatusNotFound, err)
+			default:
+				writeError(w, http.StatusInternalServerError, err)
+			}
+			return
+		}
+		if h.notifier != nil {
+			h.notifier.NotifyChannelUpdated(updated)
+		}
+		resp := createChannelResponse{Channel: channelResponse{
+			ID:        updated.ID,
+			NameEnc:   updated.NameEnc,
+			CreatedBy: updated.CreatedBy,
+			CreatedAt: updated.CreatedAt.UTC().Format(timeLayout),
+		}}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	var req createChannelRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 
-	created, err := h.rooms.CreateRoom(r.Context(), session.UserID, req.NameEnc, req.DisplayNameEnc)
+	created, err := h.channels.CreateChannel(r.Context(), session.UserID, req.NameEnc)
 	if err != nil {
 		switch {
-		case errors.Is(err, room.ErrInvalidInput):
+		case errors.Is(err, channel.ErrInvalidInput):
 			writeError(w, http.StatusBadRequest, err)
+		case errors.Is(err, channel.ErrForbidden):
+			writeError(w, http.StatusForbidden, err)
 		default:
 			writeError(w, http.StatusInternalServerError, err)
 		}
 		return
 	}
 
-	resp := createRoomResponse{Room: roomResponse{
+	resp := createChannelResponse{Channel: channelResponse{
 		ID:        created.ID,
 		NameEnc:   created.NameEnc,
 		CreatedBy: created.CreatedBy,
@@ -406,142 +568,18 @@ func (h *Handler) handleRooms(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, resp)
 }
 
-type createInviteRequest struct {
-	RoomID room.ID `json:"room_id"`
+type channelMessagesResponse struct {
+	ChannelID channel.ID               `json:"channel_id"`
+	Messages  []channelMessageResponse `json:"messages"`
 }
 
-type createInviteResponse struct {
-	Token     string  `json:"token"`
-	RoomID    room.ID `json:"room_id"`
-	ExpiresAt string  `json:"expires_at"`
-}
-
-func (h *Handler) handleRoomInvites(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	if h.rooms == nil {
-		writeError(w, http.StatusInternalServerError, errors.New("room service not configured"))
-		return
-	}
-
-	session, err := h.authenticate(r)
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, err)
-		return
-	}
-
-	var req createInviteRequest
-	if err := decodeJSON(w, r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-
-	invite, err := h.rooms.CreateInvite(r.Context(), session.UserID, req.RoomID)
-	if err != nil {
-		switch {
-		case errors.Is(err, room.ErrInvalidInput):
-			writeError(w, http.StatusBadRequest, err)
-		case errors.Is(err, room.ErrNotFound), errors.Is(err, storage.ErrNotFound):
-			writeError(w, http.StatusNotFound, err)
-		default:
-			writeError(w, http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	resp := createInviteResponse{
-		Token:     invite.Token,
-		RoomID:    invite.RoomID,
-		ExpiresAt: invite.ExpiresAt.UTC().Format(timeLayout),
-	}
-	writeJSON(w, http.StatusCreated, resp)
-}
-
-type joinRoomRequest struct {
-	Token          string `json:"token"`
-	DisplayNameEnc string `json:"display_name_enc"`
-}
-
-type joinRoomResponse struct {
-	Room     roomResponse          `json:"room"`
-	JoinedAt string                `json:"joined_at"`
-	Messages []roomMessageResponse `json:"messages"`
-}
-
-func (h *Handler) handleRoomJoin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	if h.rooms == nil {
-		writeError(w, http.StatusInternalServerError, errors.New("room service not configured"))
-		return
-	}
-
-	session, err := h.authenticate(r)
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, err)
-		return
-	}
-
-	var req joinRoomRequest
-	if err := decodeJSON(w, r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-
-	joinedRoom, joinedAt, messages, err := h.rooms.JoinWithInvite(r.Context(), session.UserID, req.Token, req.DisplayNameEnc)
-	if err != nil {
-		switch {
-		case errors.Is(err, room.ErrInvalidInput):
-			writeError(w, http.StatusBadRequest, err)
-		case errors.Is(err, room.ErrInviteExpired), errors.Is(err, room.ErrInviteConsumed):
-			writeError(w, http.StatusGone, err)
-		case errors.Is(err, room.ErrNotFound), errors.Is(err, storage.ErrNotFound):
-			writeError(w, http.StatusNotFound, err)
-		default:
-			writeError(w, http.StatusInternalServerError, err)
-		}
-		return
-	}
-
-	resp := joinRoomResponse{
-		Room: roomResponse{
-			ID:        joinedRoom.ID,
-			NameEnc:   joinedRoom.NameEnc,
-			CreatedBy: joinedRoom.CreatedBy,
-			CreatedAt: joinedRoom.CreatedAt.UTC().Format(timeLayout),
-		},
-		JoinedAt: joinedAt.UTC().Format(timeLayout),
-		Messages: make([]roomMessageResponse, 0, len(messages)),
-	}
-	for _, msg := range messages {
-		resp.Messages = append(resp.Messages, roomMessageResponse{
-			ID:            msg.ID,
-			RoomID:        msg.RoomID,
-			SenderID:      msg.SenderID,
-			SenderNameEnc: msg.SenderNameEnc,
-			Body:          msg.Body,
-			SentAt:        msg.SentAt.UTC().Format(timeLayout),
-		})
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-type roomMessagesResponse struct {
-	RoomID   room.ID               `json:"room_id"`
-	Messages []roomMessageResponse `json:"messages"`
-}
-
-func (h *Handler) handleRoomMessages(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleChannelMessages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if h.rooms == nil {
-		writeError(w, http.StatusInternalServerError, errors.New("room service not configured"))
+	if h.channels == nil {
+		writeError(w, http.StatusInternalServerError, errors.New("channel service not configured"))
 		return
 	}
 
@@ -551,9 +589,9 @@ func (h *Handler) handleRoomMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	roomID := room.ID(strings.TrimSpace(r.URL.Query().Get("room_id")))
-	if roomID == "" {
-		writeError(w, http.StatusBadRequest, errors.New("room_id query parameter is required"))
+	channelID := channel.ID(strings.TrimSpace(r.URL.Query().Get("channel_id")))
+	if channelID == "" {
+		writeError(w, http.StatusBadRequest, errors.New("channel_id query parameter is required"))
 		return
 	}
 
@@ -564,12 +602,12 @@ func (h *Handler) handleRoomMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	msgs, err := h.rooms.ListMessages(r.Context(), session.UserID, roomID, limit)
+	msgs, err := h.channels.ListMessages(r.Context(), session.UserID, channelID, limit)
 	if err != nil {
 		switch {
-		case errors.Is(err, room.ErrInvalidInput):
+		case errors.Is(err, channel.ErrInvalidInput):
 			writeError(w, http.StatusBadRequest, err)
-		case errors.Is(err, room.ErrNotFound), errors.Is(err, storage.ErrNotFound):
+		case errors.Is(err, channel.ErrNotFound), errors.Is(err, storage.ErrNotFound):
 			writeError(w, http.StatusNotFound, err)
 		default:
 			writeError(w, http.StatusInternalServerError, err)
@@ -577,14 +615,14 @@ func (h *Handler) handleRoomMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := roomMessagesResponse{
-		RoomID:   roomID,
-		Messages: make([]roomMessageResponse, 0, len(msgs)),
+	resp := channelMessagesResponse{
+		ChannelID: channelID,
+		Messages:  make([]channelMessageResponse, 0, len(msgs)),
 	}
 	for _, msg := range msgs {
-		resp.Messages = append(resp.Messages, roomMessageResponse{
+		resp.Messages = append(resp.Messages, channelMessageResponse{
 			ID:            msg.ID,
-			RoomID:        msg.RoomID,
+			ChannelID:     msg.ChannelID,
 			SenderID:      msg.SenderID,
 			SenderNameEnc: msg.SenderNameEnc,
 			Body:          msg.Body,
@@ -594,61 +632,49 @@ func (h *Handler) handleRoomMessages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-type roomMemberResponse struct {
-	UserID         user.ID `json:"user_id"`
-	DisplayNameEnc string  `json:"display_name_enc"`
-	Online         bool    `json:"online"`
+type presenceRequest struct {
+	UserIDs []user.ID `json:"user_ids"`
 }
 
-type roomMembersResponse struct {
-	RoomID  room.ID              `json:"room_id"`
-	Members []roomMemberResponse `json:"members"`
+type presenceResponse struct {
+	Statuses map[user.ID]bool `json:"statuses"`
+	Admins   map[user.ID]bool `json:"admins"`
 }
 
-func (h *Handler) handleRoomMembers(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+func (h *Handler) handlePresence(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if h.rooms == nil {
-		writeError(w, http.StatusInternalServerError, errors.New("room service not configured"))
-		return
-	}
 
-	session, err := h.authenticate(r)
-	if err != nil {
+	if _, err := h.authenticate(r); err != nil {
 		writeError(w, http.StatusUnauthorized, err)
 		return
 	}
 
-	roomID := room.ID(strings.TrimSpace(r.URL.Query().Get("room_id")))
-	if roomID == "" {
-		writeError(w, http.StatusBadRequest, errors.New("room_id query parameter is required"))
+	var req presenceRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 
-	members, err := h.rooms.ListMembers(r.Context(), session.UserID, roomID)
-	if err != nil {
-		switch {
-		case errors.Is(err, room.ErrInvalidInput):
-			writeError(w, http.StatusBadRequest, err)
-		case errors.Is(err, room.ErrNotFound), errors.Is(err, storage.ErrNotFound):
-			writeError(w, http.StatusNotFound, err)
-		default:
-			writeError(w, http.StatusInternalServerError, err)
+	statuses := make(map[user.ID]bool, len(req.UserIDs))
+	admins := make(map[user.ID]bool, len(req.UserIDs))
+	if h.presence != nil {
+		for _, id := range req.UserIDs {
+			if id == "" {
+				continue
+			}
+			statuses[id] = h.presence.IsOnline(id)
+			if h.users != nil {
+				if u, err := h.users.GetByID(r.Context(), id); err == nil {
+					admins[id] = u.IsAdmin
+				}
+			}
 		}
-		return
 	}
 
-	resp := roomMembersResponse{RoomID: roomID, Members: make([]roomMemberResponse, 0, len(members))}
-	for _, member := range members {
-		online := false
-		if h.presence != nil {
-			online = h.presence.IsOnline(member.UserID)
-		}
-		resp.Members = append(resp.Members, roomMemberResponse{UserID: member.UserID, DisplayNameEnc: member.DisplayNameEnc, Online: online})
-	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, presenceResponse{Statuses: statuses, Admins: admins})
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {

@@ -2,12 +2,10 @@ package main
 
 import (
 	"context"
-	"crypto/ecdh"
-	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -20,30 +18,6 @@ import (
 
 const sidebarWidth = 26
 
-// peerKeyCache is a thread-safe cache of peer public keys, stored behind a
-// pointer so chatModel can be copied by Bubble Tea without tripping vet.
-type peerKeyCache struct {
-	mu   sync.RWMutex
-	keys map[string]*ecdh.PublicKey
-}
-
-func newPeerKeyCache() *peerKeyCache {
-	return &peerKeyCache{keys: make(map[string]*ecdh.PublicKey)}
-}
-
-func (c *peerKeyCache) get(id string) (*ecdh.PublicKey, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	pub, ok := c.keys[id]
-	return pub, ok
-}
-
-func (c *peerKeyCache) set(id string, pub *ecdh.PublicKey) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.keys[id] = pub
-}
-
 type chatMessage struct {
 	sender     string
 	senderName string
@@ -51,49 +25,58 @@ type chatMessage struct {
 	sentAt     string
 	isHistory  bool
 	isMine     bool
-	encrypted  bool // true if body arrived as ciphertext
 	isSystem   bool
 	highlight  bool
 }
 
-type roomInfo struct {
+type channelInfo struct {
 	ID   string
 	Name string
 }
 
-type roomMember struct {
-	UserID   string
-	Username string
-	Online   bool
+type userEntry struct {
+	ID     string
+	Name   string
+	Online bool
+	Known  bool
+	Admin  bool
 }
 
-type chatModel struct {
-	api               *APIClient
-	auth              *AuthResponse
-	kp                *crypto.KeyPair
-	ws                *WSClient
-	wsCh              chan ServerMessage
-	messages          []chatMessage
-	rooms             map[string]roomInfo
-	roomMsgs          map[string][]chatMessage
-	roomHistoryLoaded map[string]bool
-	roomMembers       map[string][]roomMember
-	userNames         map[string]string
-	roomKeys          map[string][]byte
-	activeRoom        string
-	sidebarVisible    bool
-	selectActive      bool
-	selectOptions     []roomInfo
-	selectIndex       int
-	viewport          viewport.Model
-	input             textinput.Model
-	connected         bool
-	errMsg            string
-	width             int
-	height            int
+type sidebarMode int
 
-	// peers caches sender_id -> public key for decryption.
-	peers *peerKeyCache
+const (
+	sidebarChannels sidebarMode = iota
+	sidebarUsers
+)
+
+type chatModel struct {
+	api                  *APIClient
+	auth                 *AuthResponse
+	kp                   *crypto.KeyPair
+	ws                   *WSClient
+	wsCh                 chan ServerMessage
+	messages             []chatMessage
+	channels             map[string]channelInfo
+	channelMsgs          map[string][]chatMessage
+	channelHistoryLoaded map[string]bool
+	userNames            map[string]string
+	userPresence         map[string]bool
+	userAdmins           map[string]bool
+	channelKey           []byte
+	activeChannel        string
+	channelUnread        map[string]int
+	sidebarVisible       bool
+	sidebarMode          sidebarMode
+	sidebarIndex         int
+	selectActive         bool
+	selectOptions        []channelInfo
+	selectIndex          int
+	viewport             viewport.Model
+	input                textinput.Model
+	connected            bool
+	errMsg               string
+	width                int
+	height               int
 }
 
 type wsConnectedMsg struct {
@@ -105,14 +88,12 @@ type wsMessageMsg ServerMessage
 
 type wsErrorMsg struct{ err error }
 
-type roomMembersTick struct {
-	roomID string
-}
+type presenceTick struct{}
 
 func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width, height int) chatModel {
 	input := textinput.New()
 	input.Placeholder = "type a message..."
-	input.CharLimit = 4096
+	input.CharLimit = 16384
 	input.Width = clampMin(width-8, 20)
 	input.Focus()
 
@@ -120,22 +101,36 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width,
 	vpWidth := clampMin(width-4, 10)
 	vp := viewport.New(vpWidth, vpHeight)
 
-	return chatModel{
-		api:               api,
-		auth:              auth,
-		kp:                kp,
-		viewport:          vp,
-		input:             input,
-		width:             width,
-		height:            height,
-		peers:             newPeerKeyCache(),
-		rooms:             make(map[string]roomInfo),
-		roomMsgs:          make(map[string][]chatMessage),
-		roomHistoryLoaded: make(map[string]bool),
-		roomMembers:       make(map[string][]roomMember),
-		userNames:         make(map[string]string),
-		roomKeys:          loadRoomKeys(),
+	var channelKey []byte
+	var keyErr error
+	if auth != nil {
+		channelKey, keyErr = decodeChannelKey(auth.ChannelKey)
 	}
+
+	model := chatModel{
+		api:                  api,
+		auth:                 auth,
+		kp:                   kp,
+		viewport:             vp,
+		input:                input,
+		width:                width,
+		height:               height,
+		channels:             make(map[string]channelInfo),
+		channelMsgs:          make(map[string][]chatMessage),
+		channelHistoryLoaded: make(map[string]bool),
+		userNames:            make(map[string]string),
+		userPresence:         make(map[string]bool),
+		userAdmins:           make(map[string]bool),
+		channelKey:           channelKey,
+		channelUnread:        make(map[string]int),
+		sidebarVisible:       true,
+		sidebarMode:          sidebarChannels,
+		sidebarIndex:         0,
+	}
+	if keyErr != nil {
+		model.errMsg = "invalid channel key"
+	}
+	return model
 }
 
 func (m chatModel) Init() tea.Cmd {
@@ -180,8 +175,22 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 
 	case tea.KeyMsg:
 		if m.selectActive {
-			m.handleRoomSelectKey(msg)
+			m.handleChannelSelectKey(msg)
 			return m, nil
+		}
+		if m.sidebarVisible && m.sidebarMode == sidebarChannels && m.input.Value() == "" {
+			switch msg.String() {
+			case "up", "k":
+				m.moveSidebarSelection(-1)
+				return m, nil
+			case "down", "j":
+				m.moveSidebarSelection(1)
+				return m, nil
+			case "enter":
+				if m.selectSidebarChannel() {
+					return m, nil
+				}
+			}
 		}
 		switch msg.String() {
 		case "enter":
@@ -189,19 +198,23 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 				m.sendCurrentMessage()
 			}
 			return m, nil
-
-		case "ctrl+u":
-			if m.activeRoom == "" {
-				m.appendSystemMessage("sidebar is only available inside a room")
-				return m, nil
-			}
+		case "ctrl+h":
 			m.sidebarVisible = !m.sidebarVisible
 			m.updateLayout()
-			if m.sidebarVisible {
-				m.fetchRoomMembers(m.activeRoom)
-				return m, m.scheduleRoomMembersTick(m.activeRoom)
-			}
 			m.refreshViewport()
+			return m, nil
+		case "ctrl+u":
+			if m.sidebarMode == sidebarUsers {
+				m.sidebarMode = sidebarChannels
+			} else {
+				m.sidebarMode = sidebarUsers
+			}
+			m.sidebarVisible = true
+			m.updateLayout()
+			if m.sidebarMode == sidebarUsers {
+				m.refreshPresence()
+				return m, m.schedulePresenceTick()
+			}
 			return m, nil
 
 		case "pgup", "pgdown":
@@ -215,11 +228,9 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		m.wsCh = msg.ch
 		m.connected = true
 		m.errMsg = ""
-		if m.activeRoom == "" && len(m.messages) == 0 {
-			m.appendSystemMessage("no global chat; create or join a room with /room")
-		}
-		if m.sidebarVisible && m.activeRoom != "" {
-			return m, tea.Batch(waitForWSMsg(m.wsCh), m.scheduleRoomMembersTick(m.activeRoom))
+		m.refreshChannels(false)
+		if m.activeChannel == "" && len(m.messages) == 0 {
+			m.appendSystemMessage("no global chat; select a channel with the sidebar or /channel list")
 		}
 		return m, waitForWSMsg(m.wsCh)
 
@@ -233,12 +244,13 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		m.errMsg = msg.err.Error()
 		return m, nil
 
-	case roomMembersTick:
-		if !m.sidebarVisible || m.activeRoom == "" || msg.roomID != m.activeRoom {
-			return m, nil
+	case presenceTick:
+		if m.sidebarVisible && m.sidebarMode == sidebarUsers {
+			m.refreshPresence()
+			return m, m.schedulePresenceTick()
 		}
-		m.fetchRoomMembers(m.activeRoom)
-		return m, m.scheduleRoomMembersTick(m.activeRoom)
+		return m, nil
+
 	}
 
 	var cmd tea.Cmd
@@ -257,26 +269,31 @@ func (m *chatModel) sendCurrentMessage() {
 		return
 	}
 
-	if m.activeRoom != "" {
-		key, ok := m.roomKeys[m.activeRoom]
-		if !ok || len(key) == 0 {
-			m.errMsg = "missing room key"
+	if m.activeChannel != "" {
+		if len(m.channelKey) == 0 {
+			m.errMsg = "missing channel key"
 			return
 		}
-		encryptedBody, err := encryptRoomField(key, body)
+		encryptedBody, err := encryptChannelField(m.channelKey, body)
 		if err != nil {
-			m.errMsg = fmt.Sprintf("encrypt room message: %v", err)
+			m.errMsg = fmt.Sprintf("encrypt channel message: %v", err)
+			return
+		}
+		senderNameEnc, err := encryptChannelField(m.channelKey, m.auth.Username)
+		if err != nil {
+			m.errMsg = fmt.Sprintf("encrypt sender name: %v", err)
 			return
 		}
 		_ = m.ws.Send(SendMessage{
-			Type:   "room.message.send",
-			RoomID: m.activeRoom,
-			Body:   encryptedBody,
+			Type:          "channel.message.send",
+			ChannelID:     m.activeChannel,
+			Body:          encryptedBody,
+			SenderNameEnc: senderNameEnc,
 		})
 		m.input.Reset()
 		return
 	}
-	m.appendSystemMessage("no global chat; create or join a room with /room")
+	m.appendSystemMessage("no global chat; select a channel with the sidebar or /channel list")
 }
 
 func (m *chatModel) handleCommand(raw string) {
@@ -285,221 +302,242 @@ func (m *chatModel) handleCommand(raw string) {
 		return
 	}
 	cmd := strings.ToLower(parts[0])
-	if cmd != "/room" {
+	if cmd == "/help" {
+		m.appendSystemMessage("commands: /help | /channel list | /channel create <name> | /channel rename <channel_id|name> <new name> | /channel delete <channel_id|name> | /channel leave | /server invite")
+		return
+	}
+	if cmd == "/server" {
+		if len(parts) < 2 {
+			m.appendSystemMessage("server commands: /server invite")
+			return
+		}
+		action := strings.ToLower(parts[1])
+		switch action {
+		case "invite":
+			m.createServerInvite()
+		default:
+			m.appendSystemMessage("unknown server command")
+		}
+		return
+	}
+	if cmd != "/channel" {
 		m.appendSystemMessage("unknown command")
 		return
 	}
 	if len(parts) < 2 {
-		m.appendSystemMessage("room commands: /room list | create <name> | invite <room_id|name> | join <token> | use <room_id|name> | leave")
+		m.appendSystemMessage("channel commands: /channel list | create <name> | rename <channel_id|name> <new name> | delete <channel_id|name> | leave")
 		return
 	}
 	action := strings.ToLower(parts[1])
 
 	switch action {
 	case "help":
-		m.appendSystemMessage("/room list | /room create <name> | /room invite <room_id|name> | /room join <token> | /room use <room_id|name> | /room leave")
+		m.appendSystemMessage("/channel list | /channel create <name> | /channel rename <channel_id|name> <new name> | /channel delete <channel_id|name> | /channel leave")
 	case "list":
-		m.fetchRooms()
+		m.refreshChannels(true)
 	case "create":
 		if len(parts) < 3 {
-			m.appendSystemMessage("usage: /room create <name>")
+			m.appendSystemMessage("usage: /channel create <name>")
 			return
 		}
 		name := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
-		m.createRoom(name)
-	case "invite":
+		m.createChannel(name)
+	case "delete":
 		if len(parts) < 3 {
-			m.appendSystemMessage("usage: /room invite <room_id|name>")
+			m.appendSystemMessage("usage: /channel delete <channel_id|name>")
 			return
 		}
 		nameOrID := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
-		m.createInvite(nameOrID)
-	case "join":
-		if len(parts) < 3 {
-			m.appendSystemMessage("usage: /room join <token>")
+		m.deleteChannel(nameOrID)
+	case "rename":
+		remaining := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
+		if remaining == "" {
+			m.appendSystemMessage("usage: /channel rename <channel_id|name> <new name>")
 			return
 		}
-		m.joinRoom(parts[2])
-	case "use":
-		if len(parts) < 3 {
-			m.appendSystemMessage("usage: /room use <room_id|name>")
+		bits := strings.SplitN(remaining, " ", 2)
+		if len(bits) < 2 || strings.TrimSpace(bits[1]) == "" {
+			m.appendSystemMessage("usage: /channel rename <channel_id|name> <new name>")
 			return
 		}
-		nameOrID := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
-		m.useRoom(nameOrID)
-	case "leave", "global":
-		m.leaveRoom()
+		m.renameChannel(strings.TrimSpace(bits[0]), strings.TrimSpace(bits[1]))
+	case "leave", "clear":
+		m.leaveChannel()
 	default:
-		m.appendSystemMessage("unknown room command")
+		m.appendSystemMessage("unknown channel command")
 	}
 }
 
-func (m *chatModel) fetchRooms() {
+func (m *chatModel) createServerInvite() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	rooms, err := m.api.ListRooms(ctx, m.auth.Token)
+	invite, err := m.api.CreateServerInvite(ctx, m.auth.Token)
 	if err != nil {
-		m.errMsg = fmt.Sprintf("list rooms: %v", err)
+		m.errMsg = fmt.Sprintf("server invite: %v", err)
 		return
 	}
-	if len(rooms) == 0 {
-		m.appendSystemMessage("no rooms yet")
-		return
-	}
-	for _, rm := range rooms {
-		name := m.decryptRoomName(rm.ID, rm.NameEnc)
-		m.rooms[rm.ID] = roomInfo{ID: rm.ID, Name: name}
-	}
-	var b strings.Builder
-	b.WriteString("rooms:")
-	for _, rm := range rooms {
-		name := m.decryptRoomName(rm.ID, rm.NameEnc)
-		b.WriteString("\n  ")
-		b.WriteString(name)
-		b.WriteString(" (")
-		b.WriteString(shortID(rm.ID))
-		b.WriteString(")")
-	}
-	m.appendSystemMessage(b.String())
+	m.appendSystemMessage(fmt.Sprintf("server invite (expires %s):", formatTime(invite.ExpiresAt)))
+	m.appendHighlightedMessage(invite.Token)
 }
 
-func (m *chatModel) createRoom(name string) {
+func (m *chatModel) refreshChannels(showMessage bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	key := make([]byte, crypto.KeySize)
-	if _, err := rand.Read(key); err != nil {
-		m.errMsg = fmt.Sprintf("room key: %v", err)
-		return
-	}
-	nameEnc, err := encryptRoomField(key, name)
+	channels, err := m.api.ListChannels(ctx, m.auth.Token)
 	if err != nil {
-		m.errMsg = fmt.Sprintf("encrypt room name: %v", err)
+		m.errMsg = fmt.Sprintf("list channels: %v", err)
 		return
 	}
-	displayNameEnc, err := encryptRoomField(key, m.auth.Username)
-	if err != nil {
-		m.errMsg = fmt.Sprintf("encrypt display name: %v", err)
-		return
-	}
-	created, err := m.api.CreateRoom(ctx, m.auth.Token, nameEnc, displayNameEnc)
-	if err != nil {
-		m.errMsg = fmt.Sprintf("create room: %v", err)
-		return
-	}
-	m.setRoomKey(created.ID, key)
-	info := roomInfo{ID: created.ID, Name: name}
-	m.rooms[created.ID] = info
-	m.activeRoom = created.ID
-	m.appendSystemMessage(fmt.Sprintf("created room '%s' (%s)", name, shortID(created.ID)))
-	m.refreshViewport()
-}
-
-func (m *chatModel) createInvite(nameOrID string) {
-	resolvedID, info, ok := m.resolveRoom(nameOrID, false)
-	if !ok {
-		return
-	}
-	key, ok := m.roomKeys[resolvedID]
-	if !ok || len(key) == 0 {
-		m.errMsg = "missing room key"
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	invite, err := m.api.CreateRoomInvite(ctx, m.auth.Token, resolvedID)
-	if err != nil {
-		m.errMsg = fmt.Sprintf("create invite: %v", err)
-		return
-	}
-	fullToken := formatInviteToken(invite.Token, key)
-	m.appendSystemMessage(fmt.Sprintf("invite token (room '%s', expires %s):", info.Name, formatTime(invite.ExpiresAt)))
-	m.appendHighlightedMessage(fullToken)
-}
-
-func (m *chatModel) joinRoom(token string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	inviteToken, key, err := parseInviteToken(token)
-	if err != nil {
-		m.errMsg = fmt.Sprintf("invite token: %v", err)
-		return
-	}
-	displayNameEnc, err := encryptRoomField(key, m.auth.Username)
-	if err != nil {
-		m.errMsg = fmt.Sprintf("encrypt display name: %v", err)
-		return
-	}
-	joined, err := m.api.JoinRoom(ctx, m.auth.Token, inviteToken, displayNameEnc)
-	if err != nil {
-		m.errMsg = fmt.Sprintf("join room: %v", err)
-		return
-	}
-	m.setRoomKey(joined.Room.ID, key)
-	name := m.decryptRoomName(joined.Room.ID, joined.Room.NameEnc)
-	info := roomInfo{ID: joined.Room.ID, Name: name}
-	m.rooms[joined.Room.ID] = info
-	m.activeRoom = joined.Room.ID
-	m.appendSystemMessage(fmt.Sprintf("joined room '%s'", name))
-
-	for _, msg := range joined.Messages {
-		senderName := m.decryptRoomField(joined.Room.ID, msg.SenderNameEnc)
-		body := m.decryptRoomField(joined.Room.ID, msg.Body)
-		cm := chatMessage{
-			sender:     msg.SenderID,
-			senderName: senderName,
-			body:       body,
-			sentAt:     msg.SentAt,
-			isHistory:  true,
-			isMine:     msg.SenderID == m.auth.UserID,
+	if len(channels) == 0 {
+		if showMessage {
+			m.appendSystemMessage("no channels yet")
 		}
-		m.roomMsgs[msg.RoomID] = append(m.roomMsgs[msg.RoomID], cm)
+		return
 	}
-	m.roomHistoryLoaded[joined.Room.ID] = true
-	if m.sidebarVisible {
-		m.fetchRoomMembers(joined.Room.ID)
-		m.scheduleRoomMembersTick(joined.Room.ID)
+	for _, ch := range channels {
+		name := m.decryptChannelName(ch.NameEnc)
+		m.channels[ch.ID] = channelInfo{ID: ch.ID, Name: name}
 	}
-	m.updateLayout()
+	if showMessage {
+		var b strings.Builder
+		b.WriteString("channels:")
+		for _, ch := range channels {
+			name := m.decryptChannelName(ch.NameEnc)
+			b.WriteString("\n  ")
+			b.WriteString(name)
+			b.WriteString(" (")
+			b.WriteString(shortID(ch.ID))
+			b.WriteString(")")
+		}
+		m.appendSystemMessage(b.String())
+	}
+	m.ensureSidebarIndex()
+}
+
+func (m *chatModel) createChannel(name string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if len(m.channelKey) == 0 {
+		m.errMsg = "missing channel key"
+		return
+	}
+	nameEnc, err := encryptChannelField(m.channelKey, name)
+	if err != nil {
+		m.errMsg = fmt.Sprintf("encrypt channel name: %v", err)
+		return
+	}
+	created, err := m.api.CreateChannel(ctx, m.auth.Token, nameEnc)
+	if err != nil {
+		m.errMsg = fmt.Sprintf("create channel: %v", err)
+		return
+	}
+	info := channelInfo{ID: created.ID, Name: name}
+	m.channels[created.ID] = info
+	m.activeChannel = created.ID
+	m.ensureSidebarIndex()
+	m.appendSystemMessage(fmt.Sprintf("created channel '%s' (%s)", name, shortID(created.ID)))
 	m.refreshViewport()
 }
 
-func (m *chatModel) useRoom(roomID string) {
-	if strings.EqualFold(roomID, "global") {
-		m.leaveRoom()
-		return
-	}
-	resolvedID, info, ok := m.resolveRoom(roomID, true)
+func (m *chatModel) deleteChannel(nameOrID string) {
+	resolvedID, info, ok := m.resolveChannel(nameOrID, false)
 	if !ok {
 		return
 	}
-	m.applyRoomSelection(resolvedID, info)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := m.api.DeleteChannel(ctx, m.auth.Token, resolvedID); err != nil {
+		m.errMsg = fmt.Sprintf("delete channel: %v", err)
+		return
+	}
+	delete(m.channels, resolvedID)
+	delete(m.channelMsgs, resolvedID)
+	delete(m.channelHistoryLoaded, resolvedID)
+	delete(m.channelUnread, resolvedID)
+	if m.activeChannel == resolvedID {
+		m.activeChannel = ""
+	}
+	m.ensureSidebarIndex()
+	if info.Name != "" {
+		m.appendSystemMessage(fmt.Sprintf("deleted channel '%s'", info.Name))
+		return
+	}
+	m.appendSystemMessage(fmt.Sprintf("deleted channel '%s'", shortID(resolvedID)))
 }
 
-func (m *chatModel) leaveRoom() {
-	m.activeRoom = ""
-	m.sidebarVisible = false
+func (m *chatModel) renameChannel(nameOrID, newName string) {
+	resolvedID, info, ok := m.resolveChannel(nameOrID, false)
+	if !ok {
+		return
+	}
+	if len(m.channelKey) == 0 {
+		m.errMsg = "missing channel key"
+		return
+	}
+	nameEnc, err := encryptChannelField(m.channelKey, newName)
+	if err != nil {
+		m.errMsg = fmt.Sprintf("encrypt channel name: %v", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	updated, err := m.api.UpdateChannelName(ctx, m.auth.Token, resolvedID, nameEnc)
+	if err != nil {
+		m.errMsg = fmt.Sprintf("rename channel: %v", err)
+		return
+	}
+	name := m.decryptChannelName(updated.NameEnc)
+	m.channels[resolvedID] = channelInfo{ID: resolvedID, Name: name}
+	m.ensureSidebarIndex()
+	if info.Name != "" {
+		m.appendSystemMessage(fmt.Sprintf("renamed channel '%s' to '%s'", info.Name, name))
+		return
+	}
+	m.appendSystemMessage(fmt.Sprintf("renamed channel '%s'", shortID(resolvedID)))
+}
+func (m *chatModel) useChannel(channelID string) {
+	if strings.EqualFold(channelID, "global") {
+		m.leaveChannel()
+		return
+	}
+	resolvedID, info, ok := m.resolveChannel(channelID, true)
+	if !ok {
+		return
+	}
+	if resolvedID == m.activeChannel {
+		m.appendSystemMessage("already viewing that channel")
+		return
+	}
+	m.applyChannelSelection(resolvedID, info)
+}
+
+func (m *chatModel) leaveChannel() {
+	m.activeChannel = ""
 	m.updateLayout()
-	m.appendSystemMessage("left room; use /room create, /room join, or /room use")
+	m.appendSystemMessage("left channel; use the sidebar or /channel list")
 	m.refreshViewport()
 }
 
-func (m *chatModel) loadRoomHistory(roomID string) {
+func (m *chatModel) loadChannelHistory(channelID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	msgs, err := m.api.ListRoomMessages(ctx, m.auth.Token, roomID, 100)
+	msgs, err := m.api.ListChannelMessages(ctx, m.auth.Token, channelID, 100)
 	if err != nil {
-		m.errMsg = fmt.Sprintf("room history: %v", err)
+		m.errMsg = fmt.Sprintf("channel history: %v", err)
 		return
 	}
 	if len(msgs) == 0 {
-		m.roomHistoryLoaded[roomID] = true
+		m.channelHistoryLoaded[channelID] = true
 		return
 	}
 
 	loaded := make([]chatMessage, 0, len(msgs))
 	for _, msg := range msgs {
-		senderName := m.decryptRoomField(roomID, msg.SenderNameEnc)
-		body := m.decryptRoomField(roomID, msg.Body)
+		senderName := m.decryptChannelField(msg.SenderNameEnc)
+		body := m.decryptChannelField(msg.Body)
+		if senderName != "" {
+			m.userNames[msg.SenderID] = senderName
+		}
 		loaded = append(loaded, chatMessage{
 			sender:     msg.SenderID,
 			senderName: senderName,
@@ -510,65 +548,66 @@ func (m *chatModel) loadRoomHistory(roomID string) {
 		})
 	}
 
-	if existing := m.roomMsgs[roomID]; len(existing) > 0 {
+	if existing := m.channelMsgs[channelID]; len(existing) > 0 {
 		loaded = append(loaded, existing...)
 	}
-	m.roomMsgs[roomID] = loaded
-	m.roomHistoryLoaded[roomID] = true
+	m.channelMsgs[channelID] = loaded
+	m.channelHistoryLoaded[channelID] = true
+	m.channelUnread[channelID] = 0
 }
 
-func (m *chatModel) resolveRoom(nameOrID string, allowSelect bool) (string, roomInfo, bool) {
+func (m *chatModel) resolveChannel(nameOrID string, allowSelect bool) (string, channelInfo, bool) {
 	if nameOrID == "" {
-		m.appendSystemMessage("room id or name is required")
-		return "", roomInfo{}, false
+		m.appendSystemMessage("channel id or name is required")
+		return "", channelInfo{}, false
 	}
-	if info, ok := m.rooms[nameOrID]; ok {
+	if info, ok := m.channels[nameOrID]; ok {
 		return nameOrID, info, true
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	rooms, err := m.api.ListRooms(ctx, m.auth.Token)
+	channels, err := m.api.ListChannels(ctx, m.auth.Token)
 	if err != nil {
-		m.errMsg = fmt.Sprintf("list rooms: %v", err)
-		return "", roomInfo{}, false
+		m.errMsg = fmt.Sprintf("list channels: %v", err)
+		return "", channelInfo{}, false
 	}
-	if len(rooms) == 0 {
-		m.appendSystemMessage("no rooms available")
-		return "", roomInfo{}, false
+	if len(channels) == 0 {
+		m.appendSystemMessage("no channels available")
+		return "", channelInfo{}, false
 	}
-	for _, rm := range rooms {
-		name := m.decryptRoomName(rm.ID, rm.NameEnc)
-		m.rooms[rm.ID] = roomInfo{ID: rm.ID, Name: name}
+	for _, ch := range channels {
+		name := m.decryptChannelName(ch.NameEnc)
+		m.channels[ch.ID] = channelInfo{ID: ch.ID, Name: name}
 	}
 
 	needle := strings.ToLower(strings.TrimSpace(nameOrID))
-	var matches []roomInfo
-	for _, rm := range rooms {
-		name := m.decryptRoomName(rm.ID, rm.NameEnc)
+	var matches []channelInfo
+	for _, ch := range channels {
+		name := m.decryptChannelName(ch.NameEnc)
 		if strings.ToLower(name) == needle {
-			matches = append(matches, roomInfo{ID: rm.ID, Name: name})
+			matches = append(matches, channelInfo{ID: ch.ID, Name: name})
 		}
 	}
 	if len(matches) == 0 {
-		for _, rm := range rooms {
-			if strings.HasPrefix(strings.ToLower(rm.ID), needle) {
-				name := m.decryptRoomName(rm.ID, rm.NameEnc)
-				matches = append(matches, roomInfo{ID: rm.ID, Name: name})
+		for _, ch := range channels {
+			if strings.HasPrefix(strings.ToLower(ch.ID), needle) {
+				name := m.decryptChannelName(ch.NameEnc)
+				matches = append(matches, channelInfo{ID: ch.ID, Name: name})
 			}
 		}
 	}
 	if len(matches) == 0 {
-		m.appendSystemMessage("unknown room name")
-		return "", roomInfo{}, false
+		m.appendSystemMessage("unknown channel name")
+		return "", channelInfo{}, false
 	}
 	if len(matches) > 1 {
 		if allowSelect {
-			m.startRoomSelection(matches)
-			return "", roomInfo{}, false
+			m.startChannelSelection(matches)
+			return "", channelInfo{}, false
 		}
 		var b strings.Builder
-		b.WriteString("multiple rooms match; use an id:\n")
+		b.WriteString("multiple channels match; use an id:\n")
 		for _, match := range matches {
 			b.WriteString("  ")
 			b.WriteString(match.Name)
@@ -577,12 +616,12 @@ func (m *chatModel) resolveRoom(nameOrID string, allowSelect bool) (string, room
 			b.WriteString(")\n")
 		}
 		m.appendSystemMessage(b.String())
-		return "", roomInfo{}, false
+		return "", channelInfo{}, false
 	}
 	return matches[0].ID, matches[0], true
 }
 
-func (m *chatModel) startRoomSelection(options []roomInfo) {
+func (m *chatModel) startChannelSelection(options []channelInfo) {
 	if len(options) == 0 {
 		return
 	}
@@ -592,7 +631,7 @@ func (m *chatModel) startRoomSelection(options []roomInfo) {
 	m.updateLayout()
 }
 
-func (m *chatModel) handleRoomSelectKey(msg tea.KeyMsg) {
+func (m *chatModel) handleChannelSelectKey(msg tea.KeyMsg) {
 	switch msg.String() {
 	case "up", "k":
 		if m.selectIndex > 0 {
@@ -611,55 +650,34 @@ func (m *chatModel) handleRoomSelectKey(msg tea.KeyMsg) {
 		selected := m.selectOptions[m.selectIndex]
 		m.selectActive = false
 		m.updateLayout()
-		m.applyRoomSelection(selected.ID, selected)
+		m.applyChannelSelection(selected.ID, selected)
 	case "esc":
 		m.selectActive = false
 		m.updateLayout()
-		m.appendSystemMessage("room selection canceled")
+		m.appendSystemMessage("channel selection canceled")
 	}
 }
 
-func (m *chatModel) applyRoomSelection(roomID string, info roomInfo) {
-	m.activeRoom = roomID
-	if !m.roomHistoryLoaded[roomID] {
-		m.loadRoomHistory(roomID)
+func (m *chatModel) applyChannelSelection(channelID string, info channelInfo) {
+	if channelID == m.activeChannel {
+		m.appendSystemMessage("already viewing that channel")
+		return
 	}
-	if m.sidebarVisible {
-		m.fetchRoomMembers(roomID)
-		m.scheduleRoomMembersTick(roomID)
+	m.activeChannel = channelID
+	if !m.channelHistoryLoaded[channelID] {
+		m.loadChannelHistory(channelID)
 	}
+	m.channelUnread[channelID] = 0
+	m.ensureSidebarIndex()
 	m.updateLayout()
 	m.appendSystemMessage(fmt.Sprintf("now chatting in '%s'", info.Name))
 	m.refreshViewport()
 }
 
-func (m *chatModel) fetchRoomMembers(roomID string) {
-	if roomID == "" {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	members, err := m.api.ListRoomMembers(ctx, m.auth.Token, roomID)
-	if err != nil {
-		m.errMsg = fmt.Sprintf("room members: %v", err)
-		return
-	}
-	roomMembers := make([]roomMember, 0, len(members))
-	for _, member := range members {
-		displayName := m.decryptRoomField(roomID, member.DisplayNameEnc)
-		roomMembers = append(roomMembers, roomMember{
-			UserID:   member.UserID,
-			Username: displayName,
-			Online:   member.Online,
-		})
-	}
-	m.roomMembers[roomID] = roomMembers
-}
-
 func (m *chatModel) appendSystemMessage(text string) {
 	msg := chatMessage{senderName: "system", body: text, sentAt: time.Now().UTC().Format(time.RFC3339Nano), isSystem: true}
-	if m.activeRoom != "" {
-		m.roomMsgs[m.activeRoom] = append(m.roomMsgs[m.activeRoom], msg)
+	if m.activeChannel != "" {
+		m.channelMsgs[m.activeChannel] = append(m.channelMsgs[m.activeChannel], msg)
 		m.refreshViewport()
 		return
 	}
@@ -669,8 +687,8 @@ func (m *chatModel) appendSystemMessage(text string) {
 
 func (m *chatModel) appendHighlightedMessage(text string) {
 	msg := chatMessage{senderName: "system", body: text, sentAt: time.Now().UTC().Format(time.RFC3339Nano), isSystem: true, highlight: true}
-	if m.activeRoom != "" {
-		m.roomMsgs[m.activeRoom] = append(m.roomMsgs[m.activeRoom], msg)
+	if m.activeChannel != "" {
+		m.channelMsgs[m.activeChannel] = append(m.channelMsgs[m.activeChannel], msg)
 		m.refreshViewport()
 		return
 	}
@@ -678,115 +696,14 @@ func (m *chatModel) appendHighlightedMessage(text string) {
 	m.refreshViewport()
 }
 
-func (m *chatModel) scheduleRoomMembersTick(roomID string) tea.Cmd {
-	if roomID == "" {
-		return nil
-	}
-	return tea.Tick(4*time.Second, func(time.Time) tea.Msg {
-		return roomMembersTick{roomID: roomID}
-	})
-}
-
-// tryDecrypt attempts to decrypt a message body from a sender.
-// For broadcast messages the sender encrypts with their own key pair, so the
-// recipient needs the sender's public key to derive the shared secret.
-func (m *chatModel) tryDecrypt(senderID, body, senderPubKey, keyEnvelope string) (string, bool, []byte) {
-	if m.kp == nil || m.kp.Private == nil {
-		return body, false, nil
-	}
-
-	if senderPubKey != "" && keyEnvelope != "" {
-		pub, err := crypto.PublicKeyFromBase64(senderPubKey)
-		if err == nil {
-			contentKey, err := crypto.DecryptFromPeer(m.kp.Private, pub, keyEnvelope)
-			if err == nil {
-				ct, err := base64.StdEncoding.DecodeString(body)
-				if err == nil {
-					pt, err := crypto.Decrypt(contentKey, ct)
-					if err == nil {
-						m.peers.set(senderID, pub)
-						return string(pt), true, contentKey
-					}
-				}
-			}
-		}
-	}
-
-	// First try using the embedded sender public key.
-	if senderPubKey != "" {
-		pub, err := crypto.PublicKeyFromBase64(senderPubKey)
-		if err == nil {
-			pt, err := crypto.DecryptFromPeer(m.kp.Private, pub, body)
-			if err == nil {
-				// Cache the public key for future messages.
-				m.peers.set(senderID, pub)
-				return string(pt), true, nil
-			}
-		}
-	}
-
-	// Try cached peer key.
-	pub, ok := m.peers.get(senderID)
-	if ok {
-		pt, err := crypto.DecryptFromPeer(m.kp.Private, pub, body)
-		if err == nil {
-			return string(pt), true, nil
-		}
-	}
-
-	// If the sender is ourselves, try our own key pair.
-	if senderID == m.auth.UserID {
-		pt, err := crypto.DecryptFromPeer(m.kp.Private, m.kp.Public, body)
-		if err == nil {
-			return string(pt), true, nil
-		}
-	}
-
-	// Try fetching the sender's public key from the server.
-	keysResp, err := m.api.FetchDeviceKeys(context.Background(), senderID)
-	if err == nil && len(keysResp.Keys) > 0 {
-		for _, k := range keysResp.Keys {
-			pub, err := crypto.PublicKeyFromBase64(k.PublicKey)
-			if err != nil {
-				continue
-			}
-			pt, err := crypto.DecryptFromPeer(m.kp.Private, pub, body)
-			if err == nil {
-				m.peers.set(senderID, pub)
-				return string(pt), true, nil
-			}
-		}
-	}
-
-	// Not encrypted or unable to decrypt – treat as plaintext.
-	return body, false, nil
-}
-
 func (m *chatModel) handleServerMessage(msg ServerMessage) {
 	switch msg.Type {
-	case "message.new", "message.history", "message.broadcast":
-		body, encrypted, contentKey := m.tryDecrypt(msg.Sender, msg.Body, msg.SenderPubKey, msg.KeyEnvelope)
-		senderName := msg.SenderName
-		if msg.SenderNameEnc != "" && len(contentKey) > 0 {
-			if name, err := decryptRoomFieldWithKey(contentKey, msg.SenderNameEnc); err == nil {
-				senderName = name
-			}
+	case "channel.message.new":
+		senderName := m.decryptChannelField(msg.SenderNameEnc)
+		body := m.decryptChannelField(msg.Body)
+		if senderName != "" {
+			m.userNames[msg.Sender] = senderName
 		}
-
-		cm := chatMessage{
-			sender:     msg.Sender,
-			senderName: senderName,
-			body:       body,
-			sentAt:     msg.SentAt,
-			isHistory:  msg.Type == "message.history",
-			isMine:     msg.Sender == m.auth.UserID,
-			encrypted:  encrypted,
-		}
-		m.messages = append(m.messages, cm)
-
-	case "room.message.new":
-		senderName := m.decryptRoomField(msg.RoomID, msg.SenderNameEnc)
-		body := m.decryptRoomField(msg.RoomID, msg.Body)
 		cm := chatMessage{
 			sender:     msg.Sender,
 			senderName: senderName,
@@ -795,8 +712,49 @@ func (m *chatModel) handleServerMessage(msg ServerMessage) {
 			isHistory:  false,
 			isMine:     msg.Sender == m.auth.UserID,
 		}
-		roomID := msg.RoomID
-		m.roomMsgs[roomID] = append(m.roomMsgs[roomID], cm)
+		channelID := msg.ChannelID
+		m.channelMsgs[channelID] = append(m.channelMsgs[channelID], cm)
+		if channelID != m.activeChannel {
+			m.channelUnread[channelID] = m.channelUnread[channelID] + 1
+		} else {
+			m.channelUnread[channelID] = 0
+		}
+		if m.sidebarVisible && m.sidebarMode == sidebarUsers && channelID == m.activeChannel {
+			m.refreshPresence()
+		}
+
+	case "channel.updated":
+		if msg.ChannelID == "" {
+			return
+		}
+		prev := m.channels[msg.ChannelID]
+		name := m.decryptChannelName(msg.ChannelNameEnc)
+		m.channels[msg.ChannelID] = channelInfo{ID: msg.ChannelID, Name: name}
+		if m.activeChannel == msg.ChannelID && name != "" && prev.Name != "" && prev.Name != name {
+			m.appendSystemMessage(fmt.Sprintf("channel renamed to '%s'", name))
+		}
+		m.ensureSidebarIndex()
+		m.refreshViewport()
+
+	case "channel.deleted":
+		if msg.ChannelID == "" {
+			return
+		}
+		info := m.channels[msg.ChannelID]
+		delete(m.channels, msg.ChannelID)
+		delete(m.channelMsgs, msg.ChannelID)
+		delete(m.channelHistoryLoaded, msg.ChannelID)
+		delete(m.channelUnread, msg.ChannelID)
+		if m.activeChannel == msg.ChannelID {
+			m.activeChannel = ""
+			if info.Name != "" {
+				m.appendSystemMessage(fmt.Sprintf("channel '%s' was deleted", info.Name))
+			} else {
+				m.appendSystemMessage("channel was deleted")
+			}
+		}
+		m.ensureSidebarIndex()
+		m.refreshViewport()
 
 	case "error":
 		m.errMsg = fmt.Sprintf("[%s] %s", msg.Code, msg.Message)
@@ -810,7 +768,7 @@ func (m *chatModel) refreshViewport() {
 
 func (m *chatModel) updateLayout() {
 	width := m.width - 4
-	if !m.selectActive && m.sidebarVisible && m.activeRoom != "" {
+	if !m.selectActive && m.sidebarVisible {
 		width -= sidebarWidth
 	}
 	m.viewport.Width = clampMin(width, 10)
@@ -820,12 +778,12 @@ func (m *chatModel) updateLayout() {
 
 func (m *chatModel) renderMessages() string {
 	msgs := m.messages
-	if m.activeRoom != "" {
-		msgs = m.roomMsgs[m.activeRoom]
+	if m.activeChannel != "" {
+		msgs = m.channelMsgs[m.activeChannel]
 	}
 	if len(msgs) == 0 {
-		if m.activeRoom == "" {
-			return labelStyle.Render("  No room selected. Use /room create, /room join, or /room use.")
+		if m.activeChannel == "" {
+			return labelStyle.Render("  No channel selected. Use the sidebar or /channel list.")
 		}
 		return labelStyle.Render("  No messages yet. Send one to start chatting!")
 	}
@@ -873,57 +831,222 @@ func (m *chatModel) renderMessages() string {
 }
 
 func (m *chatModel) renderSidebar() string {
-	members := m.roomMembers[m.activeRoom]
-	lines := make([]string, 0, len(members)+6)
-	lines = append(lines, sidebarTitleStyle.Render("Members"), "")
-	if len(members) == 0 {
-		lines = append(lines, labelStyle.Render("(none)"))
-	} else {
-		var online []roomMember
-		var offline []roomMember
-		for _, member := range members {
-			if member.Online {
-				online = append(online, member)
+	lines := make([]string, 0, 12)
+	if m.sidebarMode == sidebarUsers {
+		lines = append(lines, sidebarTitleStyle.Render("Users"), "")
+		if m.activeChannel == "" {
+			lines = append(lines, labelStyle.Render("(no channel)"))
+		} else {
+			users := m.channelUserEntries(m.activeChannel)
+			if len(users) == 0 {
+				lines = append(lines, labelStyle.Render("(none)"))
 			} else {
-				offline = append(offline, member)
+				for _, entry := range users {
+					prefix := "?"
+					style := labelStyle
+					if entry.Known {
+						if entry.Online {
+							prefix = "+"
+							style = sidebarOnlineStyle
+						} else {
+							prefix = "-"
+							style = sidebarOfflineStyle
+						}
+					}
+					name := entry.Name
+					if entry.Admin {
+						name = fmt.Sprintf("%s (admin)", name)
+					}
+					lines = append(lines, style.Render(fmt.Sprintf("%s %s", prefix, name)))
+				}
 			}
 		}
-		lines = append(lines, sidebarSectionStyle.Render("Online"))
-		if len(online) == 0 {
+	} else {
+		lines = append(lines, sidebarTitleStyle.Render("Channels"), "")
+		channels := m.channelList()
+		if len(channels) == 0 {
 			lines = append(lines, labelStyle.Render("(none)"))
 		} else {
-			for _, member := range online {
-				display := member.Username
-				if display == "" {
-					display = shortID(member.UserID)
+			for i, ch := range channels {
+				prefix := "  "
+				if i == m.sidebarIndex {
+					prefix = "> "
 				}
-				lines = append(lines, fmt.Sprintf("%s %s", sidebarOnlineStyle.Render("*"), display))
-			}
-		}
-		lines = append(lines, "", sidebarSectionStyle.Render("Offline"))
-		if len(offline) == 0 {
-			lines = append(lines, labelStyle.Render("(none)"))
-		} else {
-			for _, member := range offline {
-				display := member.Username
-				if display == "" {
-					display = shortID(member.UserID)
+				name := ch.Name
+				if name == "" {
+					name = shortID(ch.ID)
 				}
-				lines = append(lines, fmt.Sprintf("%s %s", sidebarOfflineStyle.Render("o"), display))
+				if ch.ID == m.activeChannel {
+					name = "* " + name
+				}
+				unread := m.channelUnread[ch.ID]
+				if unread > 0 && ch.ID != m.activeChannel {
+					name = fmt.Sprintf("%s (%d)", name, unread)
+				}
+				lines = append(lines, fmt.Sprintf("%s%s", prefix, name))
 			}
 		}
 	}
+
 	content := strings.Join(lines, "\n")
 	return sidebarBoxStyle.Width(sidebarWidth).Render(content)
 }
 
-func (m *chatModel) renderRoomSelectionModal() string {
+func (m *chatModel) channelList() []channelInfo {
+	list := make([]channelInfo, 0, len(m.channels))
+	for _, ch := range m.channels {
+		list = append(list, ch)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].Name == list[j].Name {
+			return list[i].ID < list[j].ID
+		}
+		return list[i].Name < list[j].Name
+	})
+	return list
+}
+
+func (m *chatModel) channelUserEntries(channelID string) []userEntry {
+	if channelID == "" {
+		return nil
+	}
+	seen := make(map[string]string)
+	for _, msg := range m.channelMsgs[channelID] {
+		if msg.isSystem || msg.sender == "" {
+			continue
+		}
+		name := msg.senderName
+		if name == "" {
+			if cached := m.userNames[msg.sender]; cached != "" {
+				name = cached
+			} else {
+				name = shortID(msg.sender)
+			}
+		}
+		seen[msg.sender] = name
+	}
+	entries := make([]userEntry, 0, len(seen))
+	for id, name := range seen {
+		status, ok := m.userPresence[id]
+		admin := m.userAdmins[id]
+		entries = append(entries, userEntry{ID: id, Name: name, Online: status, Known: ok, Admin: admin})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Name == entries[j].Name {
+			return entries[i].ID < entries[j].ID
+		}
+		return entries[i].Name < entries[j].Name
+	})
+	return entries
+}
+
+func (m *chatModel) channelUserIDs(channelID string) []string {
+	if channelID == "" {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	for _, msg := range m.channelMsgs[channelID] {
+		if msg.isSystem || msg.sender == "" {
+			continue
+		}
+		seen[msg.sender] = struct{}{}
+	}
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func (m *chatModel) refreshPresence() {
+	if m.activeChannel == "" {
+		return
+	}
+	ids := m.channelUserIDs(m.activeChannel)
+	if len(ids) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	statuses, admins, err := m.api.FetchPresence(ctx, m.auth.Token, ids)
+	if err != nil {
+		m.errMsg = fmt.Sprintf("presence: %v", err)
+		return
+	}
+	for id, status := range statuses {
+		m.userPresence[id] = status
+	}
+	for id, admin := range admins {
+		m.userAdmins[id] = admin
+	}
+}
+
+func (m *chatModel) schedulePresenceTick() tea.Cmd {
+	return tea.Tick(5*time.Second, func(time.Time) tea.Msg {
+		return presenceTick{}
+	})
+}
+
+func (m *chatModel) moveSidebarSelection(delta int) {
+	channels := m.channelList()
+	if len(channels) == 0 {
+		m.sidebarIndex = 0
+		return
+	}
+	idx := m.sidebarIndex + delta
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(channels) {
+		idx = len(channels) - 1
+	}
+	m.sidebarIndex = idx
+}
+
+func (m *chatModel) selectSidebarChannel() bool {
+	channels := m.channelList()
+	if len(channels) == 0 {
+		return false
+	}
+	if m.sidebarIndex < 0 || m.sidebarIndex >= len(channels) {
+		return false
+	}
+	selected := channels[m.sidebarIndex]
+	if selected.ID == m.activeChannel {
+		m.appendSystemMessage("already viewing that channel")
+		return true
+	}
+	m.applyChannelSelection(selected.ID, selected)
+	return true
+}
+
+func (m *chatModel) ensureSidebarIndex() {
+	channels := m.channelList()
+	if len(channels) == 0 {
+		m.sidebarIndex = 0
+		return
+	}
+	if m.activeChannel == "" {
+		if m.sidebarIndex >= len(channels) {
+			m.sidebarIndex = 0
+		}
+		return
+	}
+	for i, ch := range channels {
+		if ch.ID == m.activeChannel {
+			m.sidebarIndex = i
+			return
+		}
+	}
+}
+func (m *chatModel) renderChannelSelectionModal() string {
 	if len(m.selectOptions) == 0 {
 		return ""
 	}
 
 	lines := make([]string, 0, len(m.selectOptions)+3)
-	lines = append(lines, "Select a room", "")
+	lines = append(lines, "Select a channel", "")
 	for i, option := range m.selectOptions {
 		prefix := "  "
 		if i == m.selectIndex {
@@ -985,7 +1108,7 @@ func (m chatModel) View() string {
 		appNameStyle.Render("* dialtone"),
 		headerStyle.Render(m.auth.Username),
 		labelStyle.Render(shortID(m.auth.UserID)),
-		labelStyle.Render(m.activeRoomLabel()),
+		labelStyle.Render(m.activeChannelLabel()),
 	)
 	connStatus := connectedStyle.Render("online")
 	if !m.connected {
@@ -1000,8 +1123,8 @@ func (m chatModel) View() string {
 
 	chatContent := m.viewport.View()
 	if m.selectActive {
-		chatContent = m.renderRoomSelectionModal()
-	} else if m.sidebarVisible && m.activeRoom != "" {
+		chatContent = m.renderChannelSelectionModal()
+	} else if m.sidebarVisible {
 		chatContent = lipgloss.JoinHorizontal(lipgloss.Top, m.viewport.View(), m.renderSidebar())
 	}
 	b.WriteString(chatContent)
@@ -1017,20 +1140,20 @@ func (m chatModel) View() string {
 	if m.errMsg != "" {
 		b.WriteString(errorStyle.Render("  x " + m.errMsg))
 	} else {
-		b.WriteString(helpStyle.Render("  enter: send - /room help in chat - ctrl+u: members - pgup/pgdn: scroll - ctrl+q: quit"))
+		b.WriteString(helpStyle.Render("  enter: send - /help for commands - up/down+enter (empty): switch channel - ctrl+u: users list - pgup/pgdn: scroll - ctrl+q: quit"))
 	}
 
 	return b.String()
 }
 
-func (m *chatModel) activeRoomLabel() string {
-	if m.activeRoom == "" {
-		return "no room"
+func (m *chatModel) activeChannelLabel() string {
+	if m.activeChannel == "" {
+		return "no channel"
 	}
-	if info, ok := m.rooms[m.activeRoom]; ok && info.Name != "" {
-		return "room: " + info.Name
+	if info, ok := m.channels[m.activeChannel]; ok && info.Name != "" {
+		return "channel: " + info.Name
 	}
-	return "room: " + shortID(m.activeRoom)
+	return "channel: " + shortID(m.activeChannel)
 }
 
 func formatTime(ts string) string {
@@ -1123,7 +1246,21 @@ func wrapText(text string, width int) []string {
 	return lines
 }
 
-func encryptRoomField(key []byte, plaintext string) (string, error) {
+func decodeChannelKey(encoded string) ([]byte, error) {
+	if strings.TrimSpace(encoded) == "" {
+		return nil, fmt.Errorf("missing channel key")
+	}
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) != crypto.KeySize {
+		return nil, fmt.Errorf("invalid channel key size")
+	}
+	return raw, nil
+}
+
+func encryptChannelField(key []byte, plaintext string) (string, error) {
 	ct, err := crypto.Encrypt(key, []byte(plaintext))
 	if err != nil {
 		return "", err
@@ -1131,7 +1268,7 @@ func encryptRoomField(key []byte, plaintext string) (string, error) {
 	return base64.StdEncoding.EncodeToString(ct), nil
 }
 
-func decryptRoomFieldWithKey(key []byte, encoded string) (string, error) {
+func decryptFieldWithKey(key []byte, encoded string) (string, error) {
 	raw, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		return "", err
@@ -1143,51 +1280,23 @@ func decryptRoomFieldWithKey(key []byte, encoded string) (string, error) {
 	return string(pt), nil
 }
 
-func formatInviteToken(token string, key []byte) string {
-	if token == "" || len(key) == 0 {
-		return token
-	}
-	return token + "." + base64.StdEncoding.EncodeToString(key)
-}
-
-func parseInviteToken(value string) (string, []byte, error) {
-	parts := strings.SplitN(strings.TrimSpace(value), ".", 2)
-	if len(parts) != 2 {
-		return "", nil, fmt.Errorf("token must include room key")
-	}
-	key, err := base64.StdEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", nil, fmt.Errorf("invalid room key")
-	}
-	return parts[0], key, nil
-}
-
-func (m *chatModel) setRoomKey(roomID string, key []byte) {
-	if roomID == "" || len(key) == 0 {
-		return
-	}
-	m.roomKeys[roomID] = key
-	_ = saveRoomKeys(m.roomKeys)
-}
-
-func (m *chatModel) decryptRoomField(roomID, encoded string) string {
+func (m *chatModel) decryptChannelField(encoded string) string {
 	if encoded == "" {
 		return ""
 	}
-	key, ok := m.roomKeys[roomID]
-	if !ok || len(key) == 0 {
+	if len(m.channelKey) == 0 {
 		return "<encrypted>"
 	}
-	value, err := decryptRoomFieldWithKey(key, encoded)
+	value, err := decryptFieldWithKey(m.channelKey, encoded)
 	if err != nil {
 		return "<encrypted>"
 	}
 	return value
 }
 
-func (m *chatModel) decryptRoomName(roomID, encoded string) string {
+func (m *chatModel) decryptChannelName(encoded string) string {
 	if encoded == "" {
 		return "<encrypted>"
 	}
-	return m.decryptRoomField(roomID, encoded)
+	return m.decryptChannelField(encoded)
 }

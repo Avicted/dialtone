@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 
+	"github.com/Avicted/dialtone/internal/channel"
 	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/message"
-	"github.com/Avicted/dialtone/internal/room"
+	"github.com/Avicted/dialtone/internal/serverinvite"
 	"github.com/Avicted/dialtone/internal/user"
 )
 
@@ -17,9 +18,9 @@ type Store interface {
 	Migrate(ctx context.Context) error
 	Users() user.Repository
 	Devices() device.Repository
-	Messages() message.Repository
 	Broadcasts() message.BroadcastRepository
-	Rooms() room.Repository
+	Channels() channel.Repository
+	ServerInvites() serverinvite.Repository
 }
 
 type NopStore struct{}
@@ -46,14 +47,14 @@ func (s *NopStore) Devices() device.Repository {
 	return nil
 }
 
-func (s *NopStore) Messages() message.Repository {
-	return nil
-}
-
 func (s *NopStore) Broadcasts() message.BroadcastRepository {
 	return nil
 }
 
-func (s *NopStore) Rooms() room.Repository {
+func (s *NopStore) Channels() channel.Repository {
+	return nil
+}
+
+func (s *NopStore) ServerInvites() serverinvite.Repository {
 	return nil
 }

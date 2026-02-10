@@ -230,20 +230,6 @@ func TestParseAuthHeader_TooManyParts(t *testing.T) {
 	}
 }
 
-func TestAuthenticateRequest_QueryParam(t *testing.T) {
-	validator := &fakeValidator{sessions: map[string]auth.Session{
-		"tok-1": {Token: "tok-1", UserID: "user-1", Username: "alice"},
-	}}
-	req := httptest.NewRequest(http.MethodGet, "/ws?token=tok-1", nil)
-	session, err := authenticateRequest(req, validator)
-	if err != nil {
-		t.Fatalf("authenticateRequest() error = %v", err)
-	}
-	if session.UserID != "user-1" {
-		t.Errorf("UserID = %q, want %q", session.UserID, "user-1")
-	}
-}
-
 func TestAuthenticateRequest_BearerHeader(t *testing.T) {
 	validator := &fakeValidator{sessions: map[string]auth.Session{
 		"tok-2": {Token: "tok-2", UserID: "user-2"},
@@ -282,7 +268,8 @@ func TestAuthenticateRequest_InvalidBearerFormat(t *testing.T) {
 }
 
 func TestAuthenticateRequest_NilValidator(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/ws?token=tok-1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Authorization", "Bearer tok-1")
 	_, err := authenticateRequest(req, nil)
 	if err == nil {
 		t.Fatal("expected error for nil validator")

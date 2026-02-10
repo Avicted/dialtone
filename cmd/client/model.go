@@ -77,7 +77,7 @@ func (m rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.login.submitting {
 			m.login.submitting = false
 			m.api.serverURL = strings.TrimSpace(m.login.serverURL())
-			return m, tea.Batch(cmd, m.doAuth(m.login.isRegister, m.login.username(), m.login.password()))
+			return m, tea.Batch(cmd, m.doAuth(m.login.isRegister, m.login.username(), m.login.password(), m.login.inviteToken()))
 		}
 		return m, cmd
 
@@ -100,7 +100,7 @@ func (m rootModel) View() string {
 	return ""
 }
 
-func (m rootModel) doAuth(register bool, username, password string) tea.Cmd {
+func (m rootModel) doAuth(register bool, username, password, inviteToken string) tea.Cmd {
 	api := m.api
 	return func() tea.Msg {
 		ctx := context.Background()
@@ -108,7 +108,7 @@ func (m rootModel) doAuth(register bool, username, password string) tea.Cmd {
 		var kp *crypto.KeyPair
 		var err error
 		if register {
-			resp, kp, err = api.Register(ctx, username, password)
+			resp, kp, err = api.Register(ctx, username, password, inviteToken)
 		} else {
 			resp, kp, err = api.Login(ctx, username, password)
 		}

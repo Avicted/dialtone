@@ -6,19 +6,27 @@ Real-time chat backend in Go with end-to-end encryption. The server never sees p
 - Go 1.22+
 
 ## Run (development)
-Set env vars:
+Create an env file:
 
 ```
-export DIALTONE_DB_URL=postgres://user:pass@localhost:5432/dialtone?sslmode=disable
-export DIALTONE_LISTEN_ADDR=:8080
-export DIALTONE_MASTER_KEY=<base64-encoded-32-byte-key>
+cp .env.example .env
 ```
 
-Generate a master key:
+Update the values inside `.env`, then load env vars:
+
+```
+set -a
+. ./.env
+set +a
+```
+
+Generate a channel key:
 
 ```
 openssl rand -base64 32
 ```
+
+Set `DIALTONE_USERNAME_PEPPER` and `DIALTONE_ADMIN_TOKEN` in `.env`. The pepper is a server secret used for username hashing, and the admin token is required to mint server invites.
 
 Then start the server:
 
@@ -27,7 +35,7 @@ go run ./cmd/server
 ```
 
 ## Encryption at rest
-The server encrypts sensitive fields before storing them in Postgres. A master key is required and must be provided via `DIALTONE_MASTER_KEY` as a base64-encoded 32-byte value.
+The server encrypts sensitive fields before storing them in Postgres. A channel key is required and must be provided via `DIALTONE_CHANNEL_KEY` as a base64-encoded 32-byte value.
 
 Encrypted fields:
 - users.username
@@ -56,6 +64,15 @@ Migrations:
 - TLS for all transport
 - Message content must be encrypted before reaching the server
 - Use only Go standard library crypto packages
+
+## Docker Compose
+Start Postgres using the env file:
+
+```
+docker compose up -d
+```
+
+The compose file reads `.env` and uses `POSTGRES_*` values to configure the database. For local development outside of compose, update `DIALTONE_DB_URL` to point at `localhost` instead of `postgres`.
 
 
 ## Database diagram

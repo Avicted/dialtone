@@ -5,20 +5,21 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/Avicted/dialtone/internal/channel"
 	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/message"
-	"github.com/Avicted/dialtone/internal/room"
+	"github.com/Avicted/dialtone/internal/serverinvite"
 	"github.com/Avicted/dialtone/internal/user"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 type PostgresStore struct {
-	db         *sql.DB
-	users      *userRepo
-	devices    *deviceRepo
-	messages   *messageRepo
-	broadcasts *broadcastRepo
-	rooms      *roomRepo
+	db            *sql.DB
+	users         *userRepo
+	devices       *deviceRepo
+	broadcasts    *broadcastRepo
+	channels      *channelRepo
+	serverInvites *serverInviteRepo
 }
 
 func NewPostgresStore(ctx context.Context, dbURL string) (*PostgresStore, error) {
@@ -39,9 +40,9 @@ func NewPostgresStore(ctx context.Context, dbURL string) (*PostgresStore, error)
 	store := &PostgresStore{db: db}
 	store.users = &userRepo{db: db}
 	store.devices = &deviceRepo{db: db}
-	store.messages = &messageRepo{db: db}
 	store.broadcasts = &broadcastRepo{db: db}
-	store.rooms = &roomRepo{db: db}
+	store.channels = &channelRepo{db: db}
+	store.serverInvites = &serverInviteRepo{db: db}
 	return store, nil
 }
 
@@ -63,14 +64,14 @@ func (s *PostgresStore) Devices() device.Repository {
 	return s.devices
 }
 
-func (s *PostgresStore) Messages() message.Repository {
-	return s.messages
-}
-
 func (s *PostgresStore) Broadcasts() message.BroadcastRepository {
 	return s.broadcasts
 }
 
-func (s *PostgresStore) Rooms() room.Repository {
-	return s.rooms
+func (s *PostgresStore) Channels() channel.Repository {
+	return s.channels
+}
+
+func (s *PostgresStore) ServerInvites() serverinvite.Repository {
+	return s.serverInvites
 }

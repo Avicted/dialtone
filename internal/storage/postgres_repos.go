@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/Avicted/dialtone/internal/channel"
 	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/message"
-	"github.com/Avicted/dialtone/internal/room"
+	"github.com/Avicted/dialtone/internal/serverinvite"
 	"github.com/Avicted/dialtone/internal/user"
 )
 
@@ -28,8 +30,8 @@ func (r *userRepo) Create(ctx context.Context, u user.User) error {
 		passwordHash = u.PasswordHash
 	}
 
-	_, err := r.db.ExecContext(ctx, `INSERT INTO users (id, username_hash, password_hash, created_at)
-		VALUES ($1, $2, $3, $4)`, u.ID, u.UsernameHash, passwordHash, u.CreatedAt)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO users (id, username_hash, password_hash, is_admin, created_at)
+		VALUES ($1, $2, $3, $4, $5)`, u.ID, u.UsernameHash, passwordHash, u.IsAdmin, u.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert user: %w", err)
 	}
@@ -37,12 +39,12 @@ func (r *userRepo) Create(ctx context.Context, u user.User) error {
 }
 
 func (r *userRepo) GetByID(ctx context.Context, id user.ID) (user.User, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT id, username_hash, password_hash, created_at
+	row := r.db.QueryRowContext(ctx, `SELECT id, username_hash, password_hash, is_admin, created_at
 		FROM users WHERE id = $1`, id)
 	var u user.User
 	var usernameHash sql.NullString
 	var passwordHash sql.NullString
-	if err := row.Scan(&u.ID, &usernameHash, &passwordHash, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &usernameHash, &passwordHash, &u.IsAdmin, &u.CreatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return user.User{}, ErrNotFound
 		}
@@ -61,12 +63,12 @@ func (r *userRepo) GetByID(ctx context.Context, id user.ID) (user.User, error) {
 }
 
 func (r *userRepo) GetByUsernameHash(ctx context.Context, usernameHash string) (user.User, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT id, username_hash, password_hash, created_at
+	row := r.db.QueryRowContext(ctx, `SELECT id, username_hash, password_hash, is_admin, created_at
 		FROM users WHERE username_hash = $1`, usernameHash)
 	var u user.User
 	var storedHash sql.NullString
 	var passwordHash sql.NullString
-	if err := row.Scan(&u.ID, &storedHash, &passwordHash, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &storedHash, &passwordHash, &u.IsAdmin, &u.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return user.User{}, ErrNotFound
 		}
@@ -82,6 +84,15 @@ func (r *userRepo) GetByUsernameHash(ctx context.Context, usernameHash string) (
 		return user.User{}, ErrNotFound
 	}
 	return u, nil
+}
+
+func (r *userRepo) Count(ctx context.Context) (int, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`)
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, fmt.Errorf("count users: %w", err)
+	}
+	return count, nil
 }
 
 type deviceRepo struct {
@@ -242,57 +253,6 @@ func (r *deviceRepo) UpdateLastSeen(ctx context.Context, id device.ID, lastSeenA
 	return nil
 }
 
-type messageRepo struct {
-	db *sql.DB
-}
-
-func (r *messageRepo) Save(ctx context.Context, msg message.Message) error {
-	if msg.ID == "" || msg.SenderID == "" || msg.RecipientID == "" || msg.RecipientDeviceID == "" {
-		return fmt.Errorf("message ids are required")
-	}
-	if len(msg.Ciphertext) == 0 || msg.SentAt.IsZero() {
-		return fmt.Errorf("ciphertext and sent_at are required")
-	}
-
-	_, err := r.db.ExecContext(ctx, `INSERT INTO message_envelopes
-		(id, sender_id, recipient_id, recipient_device_id, ciphertext, sent_at)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		msg.ID, msg.SenderID, msg.RecipientID, msg.RecipientDeviceID, msg.Ciphertext, msg.SentAt)
-	if err != nil {
-		return fmt.Errorf("insert message envelope: %w", err)
-	}
-	return nil
-}
-
-func (r *messageRepo) ListForRecipientDevice(ctx context.Context, deviceID device.ID, limit int) ([]message.Message, error) {
-	if deviceID == "" {
-		return nil, fmt.Errorf("device id is required")
-	}
-	if limit <= 0 {
-		return nil, fmt.Errorf("limit must be positive")
-	}
-
-	rows, err := r.db.QueryContext(ctx, `SELECT id, sender_id, recipient_id, recipient_device_id, ciphertext, sent_at
-		FROM message_envelopes WHERE recipient_device_id = $1 ORDER BY sent_at ASC LIMIT $2`, deviceID, limit)
-	if err != nil {
-		return nil, fmt.Errorf("list envelopes: %w", err)
-	}
-	defer rows.Close()
-
-	var msgs []message.Message
-	for rows.Next() {
-		var msg message.Message
-		if err := rows.Scan(&msg.ID, &msg.SenderID, &msg.RecipientID, &msg.RecipientDeviceID, &msg.Ciphertext, &msg.SentAt); err != nil {
-			return nil, fmt.Errorf("scan envelope: %w", err)
-		}
-		msgs = append(msgs, msg)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate envelopes: %w", err)
-	}
-	return msgs, nil
-}
-
 type broadcastRepo struct {
 	db *sql.DB
 }
@@ -367,222 +327,186 @@ func (r *broadcastRepo) ListRecent(ctx context.Context, limit int) ([]message.Br
 	return msgs, nil
 }
 
-type roomRepo struct {
+type channelRepo struct {
 	db *sql.DB
 }
 
-func (r *roomRepo) CreateRoom(ctx context.Context, rm room.Room) error {
-	if rm.ID == "" || rm.NameEnc == "" || rm.CreatedBy == "" || rm.CreatedAt.IsZero() {
-		return fmt.Errorf("room fields are required")
+func (r *channelRepo) CreateChannel(ctx context.Context, ch channel.Channel) error {
+	if ch.ID == "" || ch.NameEnc == "" || ch.CreatedBy == "" || ch.CreatedAt.IsZero() {
+		return fmt.Errorf("channel fields are required")
 	}
-	_, err := r.db.ExecContext(ctx, `INSERT INTO rooms (id, name_enc, created_by, created_at)
-		VALUES ($1, $2, $3, $4)`, rm.ID, rm.NameEnc, rm.CreatedBy, rm.CreatedAt)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO channels (id, name_enc, created_by, created_at)
+		VALUES ($1, $2, $3, $4)`, ch.ID, ch.NameEnc, ch.CreatedBy, ch.CreatedAt)
 	if err != nil {
-		return fmt.Errorf("insert room: %w", err)
+		return fmt.Errorf("insert channel: %w", err)
 	}
 	return nil
 }
 
-func (r *roomRepo) GetRoom(ctx context.Context, id room.ID) (room.Room, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT id, name_enc, created_by, created_at FROM rooms WHERE id = $1`, id)
-	var rm room.Room
-	if err := row.Scan(&rm.ID, &rm.NameEnc, &rm.CreatedBy, &rm.CreatedAt); err != nil {
+func (r *channelRepo) GetChannel(ctx context.Context, id channel.ID) (channel.Channel, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT id, name_enc, created_by, created_at FROM channels WHERE id = $1`, id)
+	var ch channel.Channel
+	if err := row.Scan(&ch.ID, &ch.NameEnc, &ch.CreatedBy, &ch.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return room.Room{}, ErrNotFound
+			return channel.Channel{}, ErrNotFound
 		}
-		return room.Room{}, fmt.Errorf("select room: %w", err)
+		return channel.Channel{}, fmt.Errorf("select channel: %w", err)
 	}
-	return rm, nil
+	return ch, nil
 }
 
-func (r *roomRepo) ListRoomsForUser(ctx context.Context, userID user.ID) ([]room.Room, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT r.id, r.name_enc, r.created_by, r.created_at
-		FROM rooms r
-		JOIN room_members m ON m.room_id = r.id
-		WHERE m.user_id = $1
-		ORDER BY r.created_at DESC`, userID)
+func (r *channelRepo) ListChannels(ctx context.Context) ([]channel.Channel, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id, name_enc, created_by, created_at
+		FROM channels ORDER BY created_at DESC`)
 	if err != nil {
-		return nil, fmt.Errorf("list rooms: %w", err)
+		return nil, fmt.Errorf("list channels: %w", err)
 	}
 	defer rows.Close()
 
-	var rooms []room.Room
+	var channels []channel.Channel
 	for rows.Next() {
-		var rm room.Room
-		if err := rows.Scan(&rm.ID, &rm.NameEnc, &rm.CreatedBy, &rm.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan room: %w", err)
+		var ch channel.Channel
+		if err := rows.Scan(&ch.ID, &ch.NameEnc, &ch.CreatedBy, &ch.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan channel: %w", err)
 		}
-		rooms = append(rooms, rm)
+		channels = append(channels, ch)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate rooms: %w", err)
+		return nil, fmt.Errorf("iterate channels: %w", err)
 	}
-	return rooms, nil
+	return channels, nil
 }
 
-func (r *roomRepo) AddMember(ctx context.Context, roomID room.ID, userID user.ID, displayNameEnc string, joinedAt time.Time) error {
-	if roomID == "" || userID == "" || displayNameEnc == "" || joinedAt.IsZero() {
-		return fmt.Errorf("member fields are required")
+func (r *channelRepo) DeleteChannel(ctx context.Context, id channel.ID) error {
+	if id == "" {
+		return fmt.Errorf("channel id is required")
 	}
-	_, err := r.db.ExecContext(ctx, `INSERT INTO room_members (room_id, user_id, display_name_enc, joined_at)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (room_id, user_id) DO NOTHING`, roomID, userID, displayNameEnc, joinedAt)
+	res, err := r.db.ExecContext(ctx, `DELETE FROM channels WHERE id = $1`, id)
 	if err != nil {
-		return fmt.Errorf("insert member: %w", err)
+		return fmt.Errorf("delete channel: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrNotFound
 	}
 	return nil
 }
 
-func (r *roomRepo) IsMember(ctx context.Context, roomID room.ID, userID user.ID) (bool, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT 1 FROM room_members WHERE room_id = $1 AND user_id = $2`, roomID, userID)
-	var exists int
-	if err := row.Scan(&exists); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
-		}
-		return false, fmt.Errorf("check membership: %w", err)
+func (r *channelRepo) UpdateChannelName(ctx context.Context, id channel.ID, nameEnc string) error {
+	if id == "" || strings.TrimSpace(nameEnc) == "" {
+		return fmt.Errorf("channel id and name_enc are required")
 	}
-	return true, nil
+	res, err := r.db.ExecContext(ctx, `UPDATE channels SET name_enc = $2 WHERE id = $1`, id, strings.TrimSpace(nameEnc))
+	if err != nil {
+		return fmt.Errorf("update channel: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
-func (r *roomRepo) ListMembers(ctx context.Context, roomID room.ID) ([]room.Member, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT user_id, display_name_enc FROM room_members WHERE room_id = $1`, roomID)
+func (r *channelRepo) SaveMessage(ctx context.Context, msg channel.Message) error {
+	if msg.ID == "" || msg.ChannelID == "" || msg.SenderID == "" || msg.SenderNameEnc == "" || msg.Body == "" || msg.SentAt.IsZero() {
+		return fmt.Errorf("channel message fields are required")
+	}
+	_, err := r.db.ExecContext(ctx, `INSERT INTO channel_messages (id, channel_id, sender_id, sender_name_enc, body, sent_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`, msg.ID, msg.ChannelID, msg.SenderID, msg.SenderNameEnc, msg.Body, msg.SentAt)
 	if err != nil {
-		return nil, fmt.Errorf("list members: %w", err)
+		return fmt.Errorf("insert channel message: %w", err)
+	}
+	return nil
+}
+
+func (r *channelRepo) ListRecentMessages(ctx context.Context, channelID channel.ID, limit int) ([]channel.Message, error) {
+	if channelID == "" || limit <= 0 {
+		return nil, fmt.Errorf("channel id and positive limit are required")
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT id, channel_id, sender_id, sender_name_enc, body, sent_at
+		FROM channel_messages WHERE channel_id = $1 ORDER BY sent_at DESC LIMIT $2`, channelID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list channel messages: %w", err)
 	}
 	defer rows.Close()
 
-	var members []room.Member
+	var msgs []channel.Message
 	for rows.Next() {
-		var member room.Member
-		if err := rows.Scan(&member.UserID, &member.DisplayNameEnc); err != nil {
-			return nil, fmt.Errorf("scan member: %w", err)
-		}
-		members = append(members, member)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate members: %w", err)
-	}
-	return members, nil
-}
-
-func (r *roomRepo) GetMemberDisplayNameEnc(ctx context.Context, roomID room.ID, userID user.ID) (string, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT display_name_enc FROM room_members WHERE room_id = $1 AND user_id = $2`, roomID, userID)
-	var displayName string
-	if err := row.Scan(&displayName); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", ErrNotFound
-		}
-		return "", fmt.Errorf("select display name: %w", err)
-	}
-	if displayName == "" {
-		return "", ErrNotFound
-	}
-	return displayName, nil
-}
-
-func (r *roomRepo) CreateInvite(ctx context.Context, invite room.Invite) error {
-	if invite.Token == "" || invite.RoomID == "" || invite.CreatedBy == "" || invite.CreatedAt.IsZero() || invite.ExpiresAt.IsZero() {
-		return fmt.Errorf("invite fields are required")
-	}
-	_, err := r.db.ExecContext(ctx, `INSERT INTO room_invites (id, room_id, created_by, created_at, expires_at)
-		VALUES ($1, $2, $3, $4, $5)`, invite.Token, invite.RoomID, invite.CreatedBy, invite.CreatedAt, invite.ExpiresAt)
-	if err != nil {
-		return fmt.Errorf("insert invite: %w", err)
-	}
-	return nil
-}
-
-func (r *roomRepo) ConsumeInvite(ctx context.Context, token string, userID user.ID, displayNameEnc string, now time.Time) (room.Invite, error) {
-	if token == "" || userID == "" || displayNameEnc == "" || now.IsZero() {
-		return room.Invite{}, fmt.Errorf("consume fields are required")
-	}
-
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return room.Invite{}, fmt.Errorf("begin consume: %w", err)
-	}
-
-	var invite room.Invite
-	row := tx.QueryRowContext(ctx, `UPDATE room_invites
-		SET consumed_at = $2, consumed_by = $3
-		WHERE id = $1 AND consumed_at IS NULL AND expires_at > $2
-		RETURNING id, room_id, created_by, created_at, expires_at, consumed_at, consumed_by`, token, now, userID)
-	if err := row.Scan(&invite.Token, &invite.RoomID, &invite.CreatedBy, &invite.CreatedAt, &invite.ExpiresAt, &invite.ConsumedAt, &invite.ConsumedBy); err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			_ = tx.Rollback()
-			return room.Invite{}, fmt.Errorf("consume invite: %w", err)
-		}
-
-		check := tx.QueryRowContext(ctx, `SELECT id, room_id, created_by, created_at, expires_at, consumed_at, consumed_by
-			FROM room_invites WHERE id = $1`, token)
-		var existing room.Invite
-		if err := check.Scan(&existing.Token, &existing.RoomID, &existing.CreatedBy, &existing.CreatedAt, &existing.ExpiresAt, &existing.ConsumedAt, &existing.ConsumedBy); err != nil {
-			_ = tx.Rollback()
-			if errors.Is(err, sql.ErrNoRows) {
-				return room.Invite{}, ErrNotFound
-			}
-			return room.Invite{}, fmt.Errorf("lookup invite: %w", err)
-		}
-		_ = tx.Rollback()
-		if existing.ConsumedAt != nil {
-			return room.Invite{}, room.ErrInviteConsumed
-		}
-		if !existing.ExpiresAt.IsZero() && !existing.ExpiresAt.After(now) {
-			return room.Invite{}, room.ErrInviteExpired
-		}
-		return room.Invite{}, ErrNotFound
-	}
-
-	if _, err := tx.ExecContext(ctx, `INSERT INTO room_members (room_id, user_id, display_name_enc, joined_at)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (room_id, user_id) DO NOTHING`, invite.RoomID, userID, displayNameEnc, now); err != nil {
-		_ = tx.Rollback()
-		return room.Invite{}, fmt.Errorf("insert member: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return room.Invite{}, fmt.Errorf("commit consume: %w", err)
-	}
-	return invite, nil
-}
-
-func (r *roomRepo) SaveMessage(ctx context.Context, msg room.Message) error {
-	if msg.ID == "" || msg.RoomID == "" || msg.SenderID == "" || msg.SenderNameEnc == "" || msg.Body == "" || msg.SentAt.IsZero() {
-		return fmt.Errorf("room message fields are required")
-	}
-	_, err := r.db.ExecContext(ctx, `INSERT INTO room_messages (id, room_id, sender_id, sender_name_enc, body, sent_at)
-		VALUES ($1, $2, $3, $4, $5, $6)`, msg.ID, msg.RoomID, msg.SenderID, msg.SenderNameEnc, msg.Body, msg.SentAt)
-	if err != nil {
-		return fmt.Errorf("insert room message: %w", err)
-	}
-	return nil
-}
-
-func (r *roomRepo) ListRecentMessages(ctx context.Context, roomID room.ID, limit int) ([]room.Message, error) {
-	if roomID == "" || limit <= 0 {
-		return nil, fmt.Errorf("room id and positive limit are required")
-	}
-	rows, err := r.db.QueryContext(ctx, `SELECT id, room_id, sender_id, sender_name_enc, body, sent_at
-		FROM room_messages WHERE room_id = $1 ORDER BY sent_at DESC LIMIT $2`, roomID, limit)
-	if err != nil {
-		return nil, fmt.Errorf("list room messages: %w", err)
-	}
-	defer rows.Close()
-
-	var msgs []room.Message
-	for rows.Next() {
-		var msg room.Message
-		if err := rows.Scan(&msg.ID, &msg.RoomID, &msg.SenderID, &msg.SenderNameEnc, &msg.Body, &msg.SentAt); err != nil {
-			return nil, fmt.Errorf("scan room message: %w", err)
+		var msg channel.Message
+		if err := rows.Scan(&msg.ID, &msg.ChannelID, &msg.SenderID, &msg.SenderNameEnc, &msg.Body, &msg.SentAt); err != nil {
+			return nil, fmt.Errorf("scan channel message: %w", err)
 		}
 		msgs = append(msgs, msg)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate room messages: %w", err)
+		return nil, fmt.Errorf("iterate channel messages: %w", err)
 	}
 	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
 		msgs[i], msgs[j] = msgs[j], msgs[i]
 	}
 	return msgs, nil
+}
+
+type serverInviteRepo struct {
+	db *sql.DB
+}
+
+func (r *serverInviteRepo) Create(ctx context.Context, invite serverinvite.Invite) error {
+	if invite.Token == "" || invite.CreatedAt.IsZero() || invite.ExpiresAt.IsZero() {
+		return fmt.Errorf("invite token, created_at, and expires_at are required")
+	}
+	_, err := r.db.ExecContext(ctx, `INSERT INTO server_invites (id, created_at, expires_at)
+		VALUES ($1, $2, $3)`, invite.Token, invite.CreatedAt, invite.ExpiresAt)
+	if err != nil {
+		return fmt.Errorf("insert server invite: %w", err)
+	}
+	return nil
+}
+
+func (r *serverInviteRepo) Consume(ctx context.Context, token string, userID user.ID, now time.Time) (serverinvite.Invite, error) {
+	if token == "" || userID == "" || now.IsZero() {
+		return serverinvite.Invite{}, serverinvite.ErrInvalidInput
+	}
+
+	row := r.db.QueryRowContext(ctx, `UPDATE server_invites
+		SET consumed_at = $2
+		WHERE id = $1 AND consumed_at IS NULL AND expires_at > $2
+		RETURNING id, created_at, expires_at, consumed_at, consumed_by`, token, now)
+
+	var invite serverinvite.Invite
+	var consumedAt sql.NullTime
+	var consumedBy sql.NullString
+	if err := row.Scan(&invite.Token, &invite.CreatedAt, &invite.ExpiresAt, &consumedAt, &consumedBy); err == nil {
+		if consumedAt.Valid {
+			t := consumedAt.Time
+			invite.ConsumedAt = &t
+		}
+		if consumedBy.Valid {
+			id := user.ID(consumedBy.String)
+			invite.ConsumedBy = &id
+		}
+		return invite, nil
+	}
+
+	row = r.db.QueryRowContext(ctx, `SELECT id, created_at, expires_at, consumed_at, consumed_by
+		FROM server_invites WHERE id = $1`, token)
+	if err := row.Scan(&invite.Token, &invite.CreatedAt, &invite.ExpiresAt, &consumedAt, &consumedBy); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return serverinvite.Invite{}, serverinvite.ErrNotFound
+		}
+		return serverinvite.Invite{}, fmt.Errorf("select server invite: %w", err)
+	}
+	if consumedAt.Valid {
+		return serverinvite.Invite{}, serverinvite.ErrConsumed
+	}
+	if !invite.ExpiresAt.IsZero() && !invite.ExpiresAt.After(now) {
+		return serverinvite.Invite{}, serverinvite.ErrExpired
+	}
+	return serverinvite.Invite{}, serverinvite.ErrNotFound
 }

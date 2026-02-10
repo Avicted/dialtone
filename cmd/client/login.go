@@ -13,6 +13,7 @@ type loginModel struct {
 	usernameInput textinput.Model
 	passwordInput textinput.Model
 	confirmInput  textinput.Model
+	inviteInput   textinput.Model
 	focusIdx      int
 	isRegister    bool
 	submitting    bool
@@ -54,11 +55,17 @@ func newLoginModel(defaultServer string) loginModel {
 	confirm.CharLimit = 128
 	confirm.Width = 30
 
+	invite := textinput.New()
+	invite.Placeholder = "invite token"
+	invite.CharLimit = 256
+	invite.Width = 40
+
 	return loginModel{
 		serverInput:   server,
 		usernameInput: username,
 		passwordInput: password,
 		confirmInput:  confirm,
+		inviteInput:   invite,
 		focusIdx:      0,
 		serverHistory: loadServerHistory(),
 	}
@@ -75,10 +82,14 @@ func (m loginModel) confirmPassword() string {
 	return m.confirmInput.Value()
 }
 
+func (m loginModel) inviteToken() string {
+	return m.inviteInput.Value()
+}
+
 func (m loginModel) inputCount() int {
 	count := 3
 	if m.isRegister {
-		count = 4
+		count = 5
 	}
 	return count
 }
@@ -151,6 +162,10 @@ func (m loginModel) Update(msg tea.Msg) (loginModel, tea.Cmd) {
 				m.errMsg = "passwords do not match"
 				return m, nil
 			}
+			if m.isRegister && strings.TrimSpace(m.inviteToken()) == "" {
+				m.errMsg = "invite token is required"
+				return m, nil
+			}
 			m.loading = true
 			m.submitting = true
 			return m, nil
@@ -167,6 +182,8 @@ func (m loginModel) Update(msg tea.Msg) (loginModel, tea.Cmd) {
 		m.passwordInput, cmd = m.passwordInput.Update(msg)
 	case 3:
 		m.confirmInput, cmd = m.confirmInput.Update(msg)
+	case 4:
+		m.inviteInput, cmd = m.inviteInput.Update(msg)
 	default:
 		m.serverInput, cmd = m.serverInput.Update(msg)
 	}
@@ -200,6 +217,7 @@ func (m *loginModel) applyFocus() {
 	m.usernameInput.Blur()
 	m.passwordInput.Blur()
 	m.confirmInput.Blur()
+	m.inviteInput.Blur()
 
 	switch m.focusIdx {
 	case 0:
@@ -211,6 +229,12 @@ func (m *loginModel) applyFocus() {
 	case 3:
 		if m.isRegister {
 			m.confirmInput.Focus()
+		} else {
+			m.serverInput.Focus()
+		}
+	case 4:
+		if m.isRegister {
+			m.inviteInput.Focus()
 		} else {
 			m.serverInput.Focus()
 		}
@@ -243,8 +267,8 @@ func (m loginModel) View() string {
 	labels := []string{"Server", "Username", "Password"}
 	inputs := []textinput.Model{m.serverInput, m.usernameInput, m.passwordInput}
 	if m.isRegister {
-		labels = append(labels, "Confirm Password")
-		inputs = append(inputs, m.confirmInput)
+		labels = append(labels, "Confirm Password", "Invite Token")
+		inputs = append(inputs, m.confirmInput, m.inviteInput)
 	}
 	for i, input := range inputs {
 		line := labelStyle.Render(fmt.Sprintf("  %s: ", labels[i])) + input.View()

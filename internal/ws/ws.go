@@ -11,17 +11,19 @@ import (
 	"time"
 
 	"github.com/Avicted/dialtone/internal/auth"
+	"github.com/Avicted/dialtone/internal/channel"
 	"github.com/Avicted/dialtone/internal/device"
 	"github.com/Avicted/dialtone/internal/message"
-	"github.com/Avicted/dialtone/internal/room"
+	"github.com/Avicted/dialtone/internal/storage"
 	"github.com/Avicted/dialtone/internal/user"
 	"github.com/google/uuid"
 	"nhooyr.io/websocket"
 )
 
 const (
-	sendBuffer   = 64
-	writeTimeout = 5 * time.Second
+	sendBuffer    = 64
+	writeTimeout  = 5 * time.Second
+	maxMessageLen = 16384
 )
 
 type Hub struct {
@@ -31,15 +33,14 @@ type Hub struct {
 	clients    map[*Client]struct{}
 	byDevice   map[deviceKey]*Client
 	byUser     map[user.ID]map[*Client]struct{}
-	messages   message.Repository
 	broadcasts message.BroadcastRepository
 	devices    device.Repository
-	rooms      room.Repository
+	channels   channel.Repository
 	mu         sync.RWMutex
 	count      atomic.Int64
 }
 
-func NewHub(messages message.Repository, broadcasts message.BroadcastRepository, devices device.Repository, rooms room.Repository) *Hub {
+func NewHub(broadcasts message.BroadcastRepository, devices device.Repository, channels channel.Repository) *Hub {
 	return &Hub{
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
@@ -47,10 +48,9 @@ func NewHub(messages message.Repository, broadcasts message.BroadcastRepository,
 		clients:    make(map[*Client]struct{}),
 		byDevice:   make(map[deviceKey]*Client),
 		byUser:     make(map[user.ID]map[*Client]struct{}),
-		messages:   messages,
 		broadcasts: broadcasts,
 		devices:    devices,
-		rooms:      rooms,
+		channels:   channels,
 	}
 }
 
@@ -111,7 +111,7 @@ func (h *Hub) IsOnline(userID user.ID) bool {
 }
 
 func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
-	if h.messages == nil || h.devices == nil {
+	if h.devices == nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -250,7 +250,7 @@ type incomingMessage struct {
 type inboundMessage struct {
 	Type          string            `json:"type"`
 	Recipient     user.ID           `json:"recipient"`
-	RoomID        room.ID           `json:"room_id"`
+	ChannelID     channel.ID        `json:"channel_id"`
 	Body          string            `json:"body"`
 	MessageID     string            `json:"message_id"`
 	ClientTime    string            `json:"client_time"`
@@ -260,16 +260,17 @@ type inboundMessage struct {
 }
 
 type outboundMessage struct {
-	Type            string  `json:"type"`
-	MessageID       string  `json:"message_id"`
-	Sender          user.ID `json:"sender"`
-	SenderName      string  `json:"sender_name"`
-	SenderNameEnc   string  `json:"sender_name_enc,omitempty"`
-	RoomID          room.ID `json:"room_id,omitempty"`
-	SenderPublicKey string  `json:"sender_public_key,omitempty"`
-	KeyEnvelope     string  `json:"key_envelope,omitempty"`
-	Body            string  `json:"body"`
-	SentAt          string  `json:"sent_at"`
+	Type            string     `json:"type"`
+	MessageID       string     `json:"message_id"`
+	Sender          user.ID    `json:"sender"`
+	SenderName      string     `json:"sender_name"`
+	SenderNameEnc   string     `json:"sender_name_enc,omitempty"`
+	ChannelID       channel.ID `json:"channel_id,omitempty"`
+	ChannelNameEnc  string     `json:"channel_name_enc,omitempty"`
+	SenderPublicKey string     `json:"sender_public_key,omitempty"`
+	KeyEnvelope     string     `json:"key_envelope,omitempty"`
+	Body            string     `json:"body"`
+	SentAt          string     `json:"sent_at"`
 }
 
 type errorEvent struct {
@@ -294,9 +295,6 @@ func WithAuthValidator(next http.Handler, validator tokenValidator) http.Handler
 func authenticateRequest(r *http.Request, validator tokenValidator) (auth.Session, error) {
 	if validator == nil {
 		return auth.Session{}, auth.ErrUnauthorized
-	}
-	if token := strings.TrimSpace(r.URL.Query().Get("token")); token != "" {
-		return validator.ValidateToken(token)
 	}
 	if header := strings.TrimSpace(r.Header.Get("Authorization")); header != "" {
 		return parseAuthHeader(header, validator)
@@ -328,9 +326,15 @@ func decodeIncoming(data []byte) (inboundMessage, error) {
 		if msg.Body == "" || strings.TrimSpace(msg.SenderNameEnc) == "" {
 			return inboundMessage{}, errors.New("body and sender_name_enc are required")
 		}
-	case "room.message.send":
-		if msg.RoomID == "" || msg.Body == "" {
-			return inboundMessage{}, errors.New("room_id and body are required")
+	case "channel.message.send":
+		if msg.ChannelID == "" || msg.Body == "" {
+			return inboundMessage{}, errors.New("channel_id and body are required")
+		}
+		if len(msg.Body) > maxMessageLen {
+			return inboundMessage{}, errors.New("message exceeds maximum length")
+		}
+		if strings.TrimSpace(msg.SenderNameEnc) == "" {
+			return inboundMessage{}, errors.New("sender_name_enc is required")
 		}
 	}
 	return msg, nil
@@ -339,104 +343,18 @@ func decodeIncoming(data []byte) (inboundMessage, error) {
 func (h *Hub) handleIncoming(ctx context.Context, incoming incomingMessage) {
 	switch incoming.msg.Type {
 	case "message.send":
-		h.handleSend(ctx, incoming.client, incoming.msg)
+		if incoming.client != nil {
+			incoming.client.sendError("channels_only", "direct messages are disabled; select a channel")
+		}
 	case "message.broadcast":
 		if incoming.client != nil {
-			incoming.client.sendError("rooms_only", "global chat is disabled; join a room")
+			incoming.client.sendError("channels_only", "global chat is disabled; select a channel")
 		}
-	case "room.message.send":
-		h.handleRoomMessage(ctx, incoming.client, incoming.msg)
+	case "channel.message.send":
+		h.handleChannelMessage(ctx, incoming.client, incoming.msg)
 	default:
 		incoming.client.sendError("unsupported_type", "unsupported message type")
 	}
-}
-
-func (h *Hub) handleSend(ctx context.Context, sender *Client, msg inboundMessage) {
-	if sender == nil || sender.userID == "" {
-		return
-	}
-	if msg.Recipient == "" || msg.Body == "" {
-		sender.sendError("invalid_message", "recipient and body are required")
-		return
-	}
-
-	if h.messages == nil {
-		sender.sendError("server_error", "message storage unavailable")
-		return
-	}
-
-	recipientDevices, err := h.devices.ListByUser(ctx, msg.Recipient)
-	if err != nil {
-		sender.sendError("server_error", "failed to resolve recipient devices")
-		return
-	}
-	if len(recipientDevices) == 0 {
-		sender.sendError("recipient_unavailable", "recipient has no devices")
-		return
-	}
-
-	sentAt := time.Now().UTC()
-	clientMessageID := strings.TrimSpace(msg.MessageID)
-	envelopeIDs := make(map[device.ID]string, len(recipientDevices))
-
-	for _, dev := range recipientDevices {
-		envelopeID := uuid.NewString()
-		envelopeIDs[dev.ID] = envelopeID
-		msgRecord := message.Message{
-			ID:                message.ID(envelopeID),
-			SenderID:          sender.userID,
-			RecipientID:       msg.Recipient,
-			RecipientDeviceID: dev.ID,
-			Ciphertext:        []byte(msg.Body),
-			SentAt:            sentAt,
-		}
-		if err := h.messages.Save(ctx, msgRecord); err != nil {
-			sender.sendError("server_error", "failed to store message")
-			return
-		}
-	}
-
-	h.mu.RLock()
-	recipients := h.byUser[msg.Recipient]
-	clients := make([]*Client, 0, len(recipients))
-	for client := range recipients {
-		clients = append(clients, client)
-	}
-	h.mu.RUnlock()
-	for _, client := range clients {
-		envelopeID := envelopeIDs[client.deviceID]
-		if envelopeID == "" {
-			envelopeID = uuid.NewString()
-		}
-		client.sendEvent(outboundMessage{
-			Type:       "message.new",
-			MessageID:  envelopeID,
-			Sender:     sender.userID,
-			SenderName: sender.username,
-			Body:       msg.Body,
-			SentAt:     sentAt.Format(time.RFC3339Nano),
-		})
-	}
-
-	ackID := ""
-	for _, id := range envelopeIDs {
-		ackID = id
-		break
-	}
-	if ackID == "" {
-		ackID = clientMessageID
-		if ackID == "" {
-			ackID = uuid.NewString()
-		}
-	}
-	sender.sendEvent(outboundMessage{
-		Type:       "message.new",
-		MessageID:  ackID,
-		Sender:     sender.userID,
-		SenderName: sender.username,
-		Body:       msg.Body,
-		SentAt:     sentAt.Format(time.RFC3339Nano),
-	})
 }
 
 func (h *Hub) handleBroadcast(ctx context.Context, sender *Client, msg inboundMessage) {
@@ -500,82 +418,107 @@ func (h *Hub) handleBroadcast(ctx context.Context, sender *Client, msg inboundMe
 	}
 }
 
-func (h *Hub) handleRoomMessage(ctx context.Context, sender *Client, msg inboundMessage) {
+func (h *Hub) handleChannelMessage(ctx context.Context, sender *Client, msg inboundMessage) {
 	if sender == nil || sender.userID == "" {
 		return
 	}
-	if msg.RoomID == "" || msg.Body == "" {
-		sender.sendError("invalid_message", "room_id and body are required")
+	if msg.ChannelID == "" || msg.Body == "" {
+		sender.sendError("invalid_message", "channel_id and body are required")
 		return
 	}
-	if h.rooms == nil {
-		sender.sendError("server_error", "room storage unavailable")
-		return
-	}
-
-	isMember, err := h.rooms.IsMember(ctx, msg.RoomID, sender.userID)
-	if err != nil {
-		sender.sendError("server_error", "failed to check membership")
-		return
-	}
-	if !isMember {
-		sender.sendError("room_forbidden", "not a room member")
+	if h.channels == nil {
+		sender.sendError("server_error", "channel storage unavailable")
 		return
 	}
 
-	senderNameEnc, err := h.rooms.GetMemberDisplayNameEnc(ctx, msg.RoomID, sender.userID)
-	if err != nil {
-		sender.sendError("server_error", "failed to resolve display name")
+	if _, err := h.channels.GetChannel(ctx, msg.ChannelID); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			sender.sendError("channel_not_found", "channel does not exist")
+			return
+		}
+		sender.sendError("server_error", "failed to resolve channel")
 		return
 	}
+
+	senderNameEnc := strings.TrimSpace(msg.SenderNameEnc)
 
 	sentAt := time.Now().UTC()
 	msgID := uuid.NewString()
-	record := room.Message{
+	record := channel.Message{
 		ID:            msgID,
-		RoomID:        msg.RoomID,
+		ChannelID:     msg.ChannelID,
 		SenderID:      sender.userID,
 		SenderNameEnc: senderNameEnc,
 		Body:          msg.Body,
 		SentAt:        sentAt,
 	}
-	if err := h.rooms.SaveMessage(ctx, record); err != nil {
-		sender.sendError("server_error", "failed to store room message")
-		return
-	}
-
-	members, err := h.rooms.ListMembers(ctx, msg.RoomID)
-	if err != nil {
-		sender.sendError("server_error", "failed to list room members")
+	if err := h.channels.SaveMessage(ctx, record); err != nil {
+		sender.sendError("server_error", "failed to store channel message")
 		return
 	}
 
 	out := outboundMessage{
-		Type:          "room.message.new",
+		Type:          "channel.message.new",
 		MessageID:     msgID,
-		RoomID:        msg.RoomID,
+		ChannelID:     msg.ChannelID,
 		Sender:        sender.userID,
 		SenderNameEnc: senderNameEnc,
 		Body:          msg.Body,
 		SentAt:        sentAt.Format(time.RFC3339Nano),
 	}
 
-	for _, member := range members {
-		h.mu.RLock()
-		recipients := h.byUser[member.UserID]
-		clients := make([]*Client, 0, len(recipients))
-		for client := range recipients {
-			clients = append(clients, client)
-		}
-		h.mu.RUnlock()
-		for _, client := range clients {
-			client.sendEvent(out)
-		}
+	h.mu.RLock()
+	clients := make([]*Client, 0, len(h.clients))
+	for client := range h.clients {
+		clients = append(clients, client)
+	}
+	h.mu.RUnlock()
+	for _, client := range clients {
+		client.sendEvent(out)
 	}
 }
 
 func (h *Hub) sendHistory(ctx context.Context, client *Client) {
 	if client == nil {
 		return
+	}
+}
+
+func (h *Hub) NotifyChannelUpdated(ch channel.Channel) {
+	if h == nil || ch.ID == "" {
+		return
+	}
+	out := outboundMessage{
+		Type:           "channel.updated",
+		ChannelID:      ch.ID,
+		ChannelNameEnc: ch.NameEnc,
+	}
+	h.mu.RLock()
+	clients := make([]*Client, 0, len(h.clients))
+	for client := range h.clients {
+		clients = append(clients, client)
+	}
+	h.mu.RUnlock()
+	for _, client := range clients {
+		client.sendEvent(out)
+	}
+}
+
+func (h *Hub) NotifyChannelDeleted(id channel.ID) {
+	if h == nil || id == "" {
+		return
+	}
+	out := outboundMessage{
+		Type:      "channel.deleted",
+		ChannelID: id,
+	}
+	h.mu.RLock()
+	clients := make([]*Client, 0, len(h.clients))
+	for client := range h.clients {
+		clients = append(clients, client)
+	}
+	h.mu.RUnlock()
+	for _, client := range clients {
+		client.sendEvent(out)
 	}
 }
