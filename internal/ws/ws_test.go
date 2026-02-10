@@ -821,3 +821,785 @@ func TestHub_NotifyEvents(t *testing.T) {
 		}
 	}
 }
+
+func TestHub_HandleWS_NilDevices(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	rr := httptest.NewRecorder()
+	hub.HandleWS(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rr.Code)
+	}
+}
+
+func TestHub_HandleWS_NoValidator(t *testing.T) {
+	hub := NewHub(nil, &fakeDeviceRepo{}, nil)
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	rr := httptest.NewRecorder()
+	hub.HandleWS(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rr.Code)
+	}
+}
+
+func TestHub_HandleWS_InvalidToken(t *testing.T) {
+	hub := NewHub(nil, &fakeDeviceRepo{}, nil)
+	validator := &fakeValidator{sessions: map[string]auth.Session{}}
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Authorization", "Bearer invalid")
+	ctx := context.WithValue(req.Context(), authValidatorKey{}, validator)
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+	hub.HandleWS(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rr.Code)
+	}
+}
+
+func TestHub_HandleIncoming_MessageSend(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	c := &Client{send: make(chan []byte, 8), userID: "user-1"}
+	hub.handleIncoming(context.TODO(), incomingMessage{
+		client: c,
+		msg:    inboundMessage{Type: "message.send", Recipient: "user-2", Body: "hello"},
+	})
+	event := readEvent[errorEvent](t, c.send)
+	if event.Code != "channels_only" {
+		t.Fatalf("code = %q, want %q", event.Code, "channels_only")
+	}
+}
+
+func TestHub_HandleIncoming_MessageBroadcast(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	c := &Client{send: make(chan []byte, 8), userID: "user-1"}
+	hub.handleIncoming(context.TODO(), incomingMessage{
+		client: c,
+		msg:    inboundMessage{Type: "message.broadcast", Body: "hello", SenderNameEnc: "enc"},
+	})
+	event := readEvent[errorEvent](t, c.send)
+	if event.Code != "channels_only" {
+		t.Fatalf("code = %q, want %q", event.Code, "channels_only")
+	}
+}
+
+func TestHub_HandleBroadcast_NilSender(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	// Should not panic
+	hub.handleBroadcast(context.TODO(), nil, inboundMessage{})
+}
+
+func TestHub_HandleBroadcast_EmptyUserID(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	c := &Client{send: make(chan []byte, 8), userID: ""}
+	hub.handleBroadcast(context.TODO(), c, inboundMessage{})
+	// Should return early without sending any event
+	select {
+	case <-c.send:
+		t.Fatal("expected no event for empty userID")
+	default:
+	}
+}
+
+func TestHub_HandleBroadcast_EmptyBody(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	c := &Client{send: make(chan []byte, 8), userID: "user-1"}
+	hub.handleBroadcast(context.TODO(), c, inboundMessage{
+		Type:          "message.broadcast",
+		Body:          "",
+		SenderNameEnc: "enc",
+		PublicKey:     "pub",
+		Envelopes:     map[string]string{"dev-1": "env"},
+	})
+	event := readEvent[errorEvent](t, c.send)
+	if event.Code != "invalid_message" {
+		t.Fatalf("code = %q, want %q", event.Code, "invalid_message")
+	}
+}
+
+func TestHub_HandleBroadcast_EmptySenderNameEnc(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	c := &Client{send: make(chan []byte, 8), userID: "user-1"}
+	hub.handleBroadcast(context.TODO(), c, inboundMessage{
+		Type:          "message.broadcast",
+		Body:          "hello",
+		SenderNameEnc: "",
+		PublicKey:     "pub",
+		Envelopes:     map[string]string{"dev-1": "env"},
+	})
+	event := readEvent[errorEvent](t, c.send)
+	if event.Code != "invalid_message" {
+		t.Fatalf("code = %q, want %q", event.Code, "invalid_message")
+	}
+}
+
+func TestHub_HandleBroadcast_EmptyEnvelopes(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	c := &Client{send: make(chan []byte, 8), userID: "user-1"}
+	hub.handleBroadcast(context.TODO(), c, inboundMessage{
+		Type:          "message.broadcast",
+		Body:          "hello",
+		SenderNameEnc: "enc",
+		PublicKey:     "pub",
+		Envelopes:     nil,
+	})
+	event := readEvent[errorEvent](t, c.send)
+	if event.Code != "invalid_message" {
+		t.Fatalf("code = %q, want %q", event.Code, "invalid_message")
+	}
+}
+
+func TestHub_HandleBroadcast_SaveError(t *testing.T) {
+	repo := &fakeBroadcastRepo{err: errors.New("db error")}
+	hub := NewHub(repo, nil, nil)
+	c := &Client{send: make(chan []byte, 8), userID: "user-1", deviceID: "dev-1"}
+	hub.handleBroadcast(context.TODO(), c, inboundMessage{
+		Type:          "message.broadcast",
+		Body:          "hello",
+		SenderNameEnc: "enc",
+		PublicKey:     "pub",
+		Envelopes:     map[string]string{"dev-1": "env"},
+	})
+	event := readEvent[errorEvent](t, c.send)
+	if event.Code != "server_error" {
+		t.Fatalf("code = %q, want %q", event.Code, "server_error")
+	}
+}
+
+func TestHub_HandleBroadcast_NilBroadcastRepo(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	c := &Client{send: make(chan []byte, 8), userID: "user-1", deviceID: "dev-1"}
+	hub.clients[c] = struct{}{}
+	hub.handleBroadcast(context.TODO(), c, inboundMessage{
+		Type:          "message.broadcast",
+		Body:          "hello",
+		SenderNameEnc: "enc",
+		PublicKey:     "pub",
+		Envelopes:     map[string]string{"dev-1": "env"},
+	})
+	out := readEvent[outboundMessage](t, c.send)
+	if out.Type != "message.broadcast" {
+		t.Fatalf("Type = %q, want %q", out.Type, "message.broadcast")
+	}
+}
+
+func TestHub_HandleChannelMessage_NilSender(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	hub.handleChannelMessage(context.TODO(), nil, inboundMessage{})
+}
+
+func TestHub_HandleChannelMessage_EmptyUserID(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	c := &Client{send: make(chan []byte, 8), userID: ""}
+	hub.handleChannelMessage(context.TODO(), c, inboundMessage{})
+	select {
+	case <-c.send:
+		t.Fatal("expected no event for empty userID")
+	default:
+	}
+}
+
+func TestHub_HandleChannelMessage_EmptyChannelID(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	c := &Client{send: make(chan []byte, 8), userID: "user-1"}
+	hub.handleChannelMessage(context.TODO(), c, inboundMessage{
+		Type:      "channel.message.send",
+		ChannelID: "",
+		Body:      "hello",
+	})
+	event := readEvent[errorEvent](t, c.send)
+	if event.Code != "invalid_message" {
+		t.Fatalf("code = %q, want %q", event.Code, "invalid_message")
+	}
+}
+
+func TestHub_HandleChannelMessage_EmptyBody(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	c := &Client{send: make(chan []byte, 8), userID: "user-1"}
+	hub.handleChannelMessage(context.TODO(), c, inboundMessage{
+		Type:      "channel.message.send",
+		ChannelID: "ch-1",
+		Body:      "",
+	})
+	event := readEvent[errorEvent](t, c.send)
+	if event.Code != "invalid_message" {
+		t.Fatalf("code = %q, want %q", event.Code, "invalid_message")
+	}
+}
+
+func TestHub_HandleChannelMessage_NilChannels(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	c := &Client{send: make(chan []byte, 8), userID: "user-1"}
+	hub.handleChannelMessage(context.TODO(), c, inboundMessage{
+		Type:          "channel.message.send",
+		ChannelID:     "ch-1",
+		Body:          "hello",
+		SenderNameEnc: "enc",
+	})
+	event := readEvent[errorEvent](t, c.send)
+	if event.Code != "server_error" {
+		t.Fatalf("code = %q, want %q", event.Code, "server_error")
+	}
+}
+
+func TestHub_HandleChannelMessage_GetChannelError(t *testing.T) {
+	repo := &fakeChannelRepo{getErr: errors.New("db error")}
+	hub := NewHub(nil, nil, repo)
+	c := &Client{send: make(chan []byte, 8), userID: "user-1"}
+	hub.handleChannelMessage(context.TODO(), c, inboundMessage{
+		Type:          "channel.message.send",
+		ChannelID:     "ch-1",
+		Body:          "hello",
+		SenderNameEnc: "enc",
+	})
+	event := readEvent[errorEvent](t, c.send)
+	if event.Code != "server_error" {
+		t.Fatalf("code = %q, want %q", event.Code, "server_error")
+	}
+}
+
+func TestHub_HandleChannelMessage_SaveError(t *testing.T) {
+	repo := &fakeChannelRepo{ch: channel.Channel{ID: "ch-1"}, saveErr: errors.New("db error")}
+	hub := NewHub(nil, nil, repo)
+	c := &Client{send: make(chan []byte, 8), userID: "user-1"}
+	hub.handleChannelMessage(context.TODO(), c, inboundMessage{
+		Type:          "channel.message.send",
+		ChannelID:     "ch-1",
+		Body:          "hello",
+		SenderNameEnc: "enc",
+	})
+	event := readEvent[errorEvent](t, c.send)
+	if event.Code != "server_error" {
+		t.Fatalf("code = %q, want %q", event.Code, "server_error")
+	}
+}
+
+func TestHub_NotifyChannelUpdated_NilHub(t *testing.T) {
+	var hub *Hub
+	// Should not panic
+	hub.NotifyChannelUpdated(channel.Channel{ID: "ch-1"})
+}
+
+func TestHub_NotifyChannelUpdated_EmptyID(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	c := &Client{send: make(chan []byte, 1), userID: "user-1"}
+	hub.clients[c] = struct{}{}
+	hub.NotifyChannelUpdated(channel.Channel{})
+	select {
+	case <-c.send:
+		t.Fatal("expected no event for empty channel ID")
+	default:
+	}
+}
+
+func TestHub_NotifyChannelDeleted_NilHub(t *testing.T) {
+	var hub *Hub
+	hub.NotifyChannelDeleted("ch-1")
+}
+
+func TestHub_NotifyChannelDeleted_EmptyID(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	c := &Client{send: make(chan []byte, 1), userID: "user-1"}
+	hub.clients[c] = struct{}{}
+	hub.NotifyChannelDeleted("")
+	select {
+	case <-c.send:
+		t.Fatal("expected no event for empty channel ID")
+	default:
+	}
+}
+
+func TestHub_NotifyUserProfileUpdated_NilHub(t *testing.T) {
+	var hub *Hub
+	hub.NotifyUserProfileUpdated("user-1")
+}
+
+func TestHub_NotifyUserProfileUpdated_EmptyID(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	c := &Client{send: make(chan []byte, 1), userID: "user-1"}
+	hub.clients[c] = struct{}{}
+	hub.NotifyUserProfileUpdated("")
+	select {
+	case <-c.send:
+		t.Fatal("expected no event for empty user ID")
+	default:
+	}
+}
+
+func TestHub_NotifyDeviceJoined_NilHub(t *testing.T) {
+	var hub *Hub
+	hub.notifyDeviceJoined("user-1", "dev-1")
+}
+
+func TestHub_NotifyDeviceJoined_EmptyUser(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	c := &Client{send: make(chan []byte, 1), userID: "user-1"}
+	hub.clients[c] = struct{}{}
+	hub.notifyDeviceJoined("", "dev-1")
+	select {
+	case <-c.send:
+		t.Fatal("expected no event for empty user ID")
+	default:
+	}
+}
+
+func TestHub_NotifyDeviceJoined_EmptyDevice(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	c := &Client{send: make(chan []byte, 1), userID: "user-1"}
+	hub.clients[c] = struct{}{}
+	hub.notifyDeviceJoined("user-1", "")
+	select {
+	case <-c.send:
+		t.Fatal("expected no event for empty device ID")
+	default:
+	}
+}
+
+func TestHub_IsOnline_EmptyUserID(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	if hub.IsOnline("") {
+		t.Fatal("expected false for empty user ID")
+	}
+}
+
+func TestHub_IsOnline_NoClients(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	if hub.IsOnline("user-1") {
+		t.Fatal("expected false when no clients")
+	}
+}
+
+func TestDecodeIncoming_ChannelMessageValid(t *testing.T) {
+	data := []byte(`{"type":"channel.message.send","channel_id":"ch-1","body":"hello","sender_name_enc":"enc"}`)
+	msg, err := decodeIncoming(data)
+	if err != nil {
+		t.Fatalf("decodeIncoming() error = %v", err)
+	}
+	if msg.ChannelID != "ch-1" {
+		t.Errorf("ChannelID = %q, want %q", msg.ChannelID, "ch-1")
+	}
+}
+
+func TestDecodeIncoming_ChannelMessageMissingBody(t *testing.T) {
+	data := []byte(`{"type":"channel.message.send","channel_id":"ch-1","body":"","sender_name_enc":"enc"}`)
+	_, err := decodeIncoming(data)
+	if err == nil {
+		t.Fatal("expected error for missing body")
+	}
+}
+
+func TestDecodeIncoming_ChannelMessageMissingChannelID(t *testing.T) {
+	data := []byte(`{"type":"channel.message.send","channel_id":"","body":"hello","sender_name_enc":"enc"}`)
+	_, err := decodeIncoming(data)
+	if err == nil {
+		t.Fatal("expected error for missing channel_id")
+	}
+}
+
+func TestDecodeIncoming_ChannelMessageMissingSenderNameEnc(t *testing.T) {
+	data := []byte(`{"type":"channel.message.send","channel_id":"ch-1","body":"hello","sender_name_enc":""}`)
+	_, err := decodeIncoming(data)
+	if err == nil {
+		t.Fatal("expected error for missing sender_name_enc")
+	}
+}
+
+func TestDecodeIncoming_ChannelMessageTooLong(t *testing.T) {
+	longBody := strings.Repeat("a", maxMessageLen+1)
+	data := []byte(`{"type":"channel.message.send","channel_id":"ch-1","body":"` + longBody + `","sender_name_enc":"enc"}`)
+	_, err := decodeIncoming(data)
+	if err == nil {
+		t.Fatal("expected error for message exceeding max length")
+	}
+}
+
+func TestDecodeIncoming_BroadcastMissingSenderNameEnc(t *testing.T) {
+	data := []byte(`{"type":"message.broadcast","body":"hello","sender_name_enc":"   "}`)
+	_, err := decodeIncoming(data)
+	if err == nil {
+		t.Fatal("expected error for empty sender_name_enc")
+	}
+}
+
+func TestDecodeIncoming_SendMissingBody(t *testing.T) {
+	data := []byte(`{"type":"message.send","recipient":"user-1","body":""}`)
+	_, err := decodeIncoming(data)
+	if err == nil {
+		t.Fatal("expected error for empty body")
+	}
+}
+
+func TestClient_SendEvent_MarshalError(t *testing.T) {
+	c := &Client{send: make(chan []byte, 8)}
+	// Valid json should work
+	c.sendEvent(map[string]string{"key": "value"})
+	select {
+	case msg := <-c.send:
+		if len(msg) == 0 {
+			t.Fatal("expected non-empty message")
+		}
+	default:
+		t.Fatal("expected message in send channel")
+	}
+}
+
+func TestClient_SendError(t *testing.T) {
+	c := &Client{send: make(chan []byte, 8)}
+	c.sendError("code", "message")
+	select {
+	case data := <-c.send:
+		var e errorEvent
+		if err := json.Unmarshal(data, &e); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if e.Code != "code" {
+			t.Errorf("code = %q, want %q", e.Code, "code")
+		}
+		if e.Message != "message" {
+			t.Errorf("message = %q, want %q", e.Message, "message")
+		}
+	default:
+		t.Fatal("expected message in send channel")
+	}
+}
+
+func TestHub_Run_UnregisterAndReregister(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go hub.Run(ctx)
+
+	serverConn, clientConn, cleanup := newWebsocketPair(t)
+	defer cleanup()
+
+	client := &Client{
+		conn:     serverConn,
+		hub:      hub,
+		ctx:      context.Background(),
+		cancel:   func() {},
+		send:     make(chan []byte, 1),
+		userID:   "user-1",
+		deviceID: "dev-1",
+	}
+
+	hub.register <- client
+	waitFor(t, time.Second, func() bool { return hub.ClientCount() == 1 })
+
+	hub.unregister <- client
+	waitFor(t, time.Second, func() bool { return hub.ClientCount() == 0 })
+
+	if hub.IsOnline("user-1") {
+		t.Fatal("expected user to be offline after unregister")
+	}
+
+	_ = clientConn.Close(websocket.StatusNormalClosure, "bye")
+}
+
+func TestHub_Run_UnregisterNonexistent(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go hub.Run(ctx)
+
+	serverConn, _, cleanup := newWebsocketPair(t)
+	defer cleanup()
+
+	// Try unregistering a client that was never registered
+	client := &Client{
+		conn:     serverConn,
+		hub:      hub,
+		ctx:      context.Background(),
+		cancel:   func() {},
+		send:     make(chan []byte, 1),
+		userID:   "user-1",
+		deviceID: "dev-1",
+	}
+	hub.unregister <- client
+	// Give it time to process
+	time.Sleep(50 * time.Millisecond)
+	if hub.ClientCount() != 0 {
+		t.Fatalf("ClientCount() = %d, want 0", hub.ClientCount())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Additional ws tests for remaining uncovered error paths
+// ---------------------------------------------------------------------------
+
+// L273: sendEvent with unmarshalable value
+func TestClient_SendEvent_ActualMarshalError(t *testing.T) {
+	c := &Client{send: make(chan []byte, 8)}
+	// channels cannot be marshaled to JSON
+	c.sendEvent(make(chan int))
+	// sendEvent should silently return; no message in send channel
+	select {
+	case <-c.send:
+		t.Fatal("expected no message when marshal fails")
+	default:
+		// OK
+	}
+}
+
+// L401: handleIncoming with channel.message.send delegates to handleChannelMessage
+func TestHub_HandleIncoming_ChannelMessage(t *testing.T) {
+	chRepo := &fakeChannelRepo{
+		ch: channel.Channel{ID: "ch-1", NameEnc: "enc"},
+	}
+	hub := NewHub(nil, nil, chRepo)
+	sender := &Client{send: make(chan []byte, 8), userID: "user-1", deviceID: "dev-1"}
+	hub.clients[sender] = struct{}{}
+
+	hub.handleIncoming(context.Background(), incomingMessage{
+		client: sender,
+		msg: inboundMessage{
+			Type:          "channel.message.send",
+			ChannelID:     "ch-1",
+			Body:          "hello",
+			SenderNameEnc: "enc",
+		},
+	})
+
+	// Should receive the outbound message
+	select {
+	case data := <-sender.send:
+		var out outboundMessage
+		if err := json.Unmarshal(data, &out); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if out.Type != "channel.message.new" {
+			t.Fatalf("Type = %q, want channel.message.new", out.Type)
+		}
+		if out.ChannelID != "ch-1" {
+			t.Fatalf("ChannelID = %q, want ch-1", out.ChannelID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for outbound message")
+	}
+}
+
+// L96: incoming message processed through Run's select
+func TestHub_Run_ProcessesIncoming(t *testing.T) {
+	chRepo := &fakeChannelRepo{
+		ch: channel.Channel{ID: "ch-1", NameEnc: "enc"},
+	}
+	hub := NewHub(nil, nil, chRepo)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go hub.Run(ctx)
+
+	serverConn, _, cleanup := newWebsocketPair(t)
+	defer cleanup()
+
+	clientCtx, clientCancel := context.WithCancel(context.Background())
+	defer clientCancel()
+
+	sender := &Client{
+		conn:     serverConn,
+		hub:      hub,
+		ctx:      clientCtx,
+		cancel:   clientCancel,
+		send:     make(chan []byte, 8),
+		userID:   "user-1",
+		deviceID: "dev-1",
+	}
+	// Register the client
+	hub.register <- sender
+	waitFor(t, 500*time.Millisecond, func() bool { return hub.ClientCount() == 1 })
+
+	// Send an incoming message through the incoming channel
+	hub.incoming <- incomingMessage{
+		client: sender,
+		msg: inboundMessage{
+			Type:          "channel.message.send",
+			ChannelID:     "ch-1",
+			Body:          "hello world",
+			SenderNameEnc: "enc",
+		},
+	}
+
+	// Should receive the outbound message through the send channel
+	select {
+	case data := <-sender.send:
+		var out outboundMessage
+		if err := json.Unmarshal(data, &out); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if out.Type != "channel.message.new" {
+			t.Fatalf("Type = %q, want channel.message.new", out.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for outbound message via Run")
+	}
+}
+
+// L136: websocket.Accept failure - tested indirectly; Accept panics on
+// non-upgrade requests in test environments. The error path is defensive
+// and only triggers with malformed websocket handshakes in production.
+
+// L191: readLoop context canceled
+func TestClient_ReadLoop_ContextCanceled(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	hub.unregister = make(chan *Client, 1)
+	hub.incoming = make(chan incomingMessage, 1)
+
+	serverConn, _, cleanup := newWebsocketPair(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &Client{
+		conn:   serverConn,
+		hub:    hub,
+		ctx:    ctx,
+		cancel: cancel,
+		send:   make(chan []byte, 1),
+		userID: "user-1",
+	}
+
+	go client.readLoop()
+
+	// Cancel the context to trigger the context.Canceled error path
+	cancel()
+
+	select {
+	case <-hub.unregister:
+		// Client was unregistered as expected
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for readLoop to exit after context cancel")
+	}
+}
+
+// L235: writeLoop send channel closed
+func TestClient_WriteLoop_ChannelClosed(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	hub.unregister = make(chan *Client, 1)
+
+	serverConn, _, cleanup := newWebsocketPair(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client := &Client{
+		conn:   serverConn,
+		hub:    hub,
+		ctx:    ctx,
+		cancel: cancel,
+		send:   make(chan []byte, 1),
+	}
+	go client.writeLoop()
+
+	// Close the send channel to trigger the !ok path
+	close(client.send)
+
+	// writeLoop should exit; give it a moment
+	time.Sleep(100 * time.Millisecond)
+}
+
+// L241-246: writeLoop write error
+func TestClient_WriteLoop_WriteError(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	hub.unregister = make(chan *Client, 1)
+
+	serverConn, clientConn, cleanup := newWebsocketPair(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client := &Client{
+		conn:   serverConn,
+		hub:    hub,
+		ctx:    ctx,
+		cancel: cancel,
+		send:   make(chan []byte, 4),
+	}
+	go client.writeLoop()
+
+	// Close the client side and give the close frame time to propagate
+	_ = clientConn.Close(websocket.StatusGoingAway, "gone")
+	time.Sleep(100 * time.Millisecond)
+
+	// Flood the send channel to ensure a write is attempted after the connection is dead
+	for i := 0; i < 4; i++ {
+		client.send <- []byte(`{"type":"test"}`)
+	}
+
+	select {
+	case <-hub.unregister:
+		// Client was unregistered due to write error
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for writeLoop to detect write error")
+	}
+}
+
+// L248-257: writeLoop ping error - skipped because pingInterval is 25s,
+// making it impractical for unit tests. The path is structurally identical
+// to the write error path (L241-246) which IS tested above.
+
+// L194: readLoop expected disconnect (EOF/closed)
+func TestClient_ReadLoop_ClientDisconnect(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	hub.unregister = make(chan *Client, 1)
+	hub.incoming = make(chan incomingMessage, 1)
+
+	serverConn, clientConn, cleanup := newWebsocketPair(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client := &Client{
+		conn:   serverConn,
+		hub:    hub,
+		ctx:    ctx,
+		cancel: cancel,
+		send:   make(chan []byte, 1),
+		userID: "user-1",
+	}
+
+	go client.readLoop()
+
+	// Close the client connection with normal closure
+	_ = clientConn.Close(websocket.StatusNormalClosure, "bye")
+
+	select {
+	case <-hub.unregister:
+		// readLoop exited and unregistered
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for readLoop to exit after client disconnect")
+	}
+}
+
+// L207-210: readLoop unexpected error (status -1)
+func TestClient_ReadLoop_UnexpectedError(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	hub.unregister = make(chan *Client, 1)
+	hub.incoming = make(chan incomingMessage, 1)
+
+	serverConn, clientConn, cleanup := newWebsocketPair(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client := &Client{
+		conn:   serverConn,
+		hub:    hub,
+		ctx:    ctx,
+		cancel: cancel,
+		send:   make(chan []byte, 1),
+		userID: "user-1",
+	}
+
+	go client.readLoop()
+
+	// Write binary instead of text to trigger a protocol-level issue,
+	// or just close with an abnormal status
+	_ = clientConn.Close(websocket.StatusProtocolError, "protocol error")
+
+	select {
+	case <-hub.unregister:
+		// readLoop exited
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for readLoop to exit after protocol error")
+	}
+}

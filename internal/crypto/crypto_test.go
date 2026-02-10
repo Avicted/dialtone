@@ -78,6 +78,102 @@ func TestPrivateKeyFromBase64_Invalid(t *testing.T) {
 	}
 }
 
+func TestPrivateKeyFromBase64_WrongLength(t *testing.T) {
+	// Valid base64 but wrong key length
+	_, err := PrivateKeyFromBase64(base64.StdEncoding.EncodeToString([]byte("short")))
+	if err == nil {
+		t.Fatal("expected error for wrong-length private key")
+	}
+}
+
+func TestDecryptFromPeer_NilKeys(t *testing.T) {
+	kp, _ := GenerateKeyPair()
+
+	_, err := DecryptFromPeer(nil, kp.Public, "dGVzdA==")
+	if err == nil {
+		t.Fatal("expected error for nil private key")
+	}
+
+	_, err = DecryptFromPeer(kp.Private, (*ecdh.PublicKey)(nil), "dGVzdA==")
+	if err == nil {
+		t.Fatal("expected error for nil public key")
+	}
+}
+
+func TestEncrypt_DifferentKeys(t *testing.T) {
+	key1 := make([]byte, KeySize)
+	key2 := make([]byte, KeySize)
+	key2[0] = 1
+
+	ct1, err := Encrypt(key1, []byte("hello"))
+	if err != nil {
+		t.Fatalf("Encrypt() error = %v", err)
+	}
+	ct2, err := Encrypt(key2, []byte("hello"))
+	if err != nil {
+		t.Fatalf("Encrypt() error = %v", err)
+	}
+
+	// Must be able to decrypt with correct key
+	pt1, _ := Decrypt(key1, ct1)
+	pt2, _ := Decrypt(key2, ct2)
+	if string(pt1) != "hello" || string(pt2) != "hello" {
+		t.Fatal("decrypt failed with correct keys")
+	}
+}
+
+func TestDeriveSharedKey_Length(t *testing.T) {
+	alice, _ := GenerateKeyPair()
+	bob, _ := GenerateKeyPair()
+	key, err := DeriveSharedKey(alice.Private, bob.Public, nil)
+	if err != nil {
+		t.Fatalf("DeriveSharedKey() error = %v", err)
+	}
+	if len(key) != KeySize {
+		t.Fatalf("key length = %d, want %d", len(key), KeySize)
+	}
+}
+
+func TestEncryptForPeer_EmptyMessage(t *testing.T) {
+	alice, _ := GenerateKeyPair()
+	bob, _ := GenerateKeyPair()
+
+	encoded, err := EncryptForPeer(alice.Private, bob.Public, []byte{})
+	if err != nil {
+		t.Fatalf("EncryptForPeer() error = %v", err)
+	}
+
+	pt, err := DecryptFromPeer(bob.Private, alice.Public, encoded)
+	if err != nil {
+		t.Fatalf("DecryptFromPeer() error = %v", err)
+	}
+	if len(pt) != 0 {
+		t.Fatalf("expected empty plaintext, got %d bytes", len(pt))
+	}
+}
+
+func TestDecryptFromPeer_TamperedCiphertext(t *testing.T) {
+	alice, _ := GenerateKeyPair()
+	bob, _ := GenerateKeyPair()
+
+	encoded, err := EncryptForPeer(alice.Private, bob.Public, []byte("secret"))
+	if err != nil {
+		t.Fatalf("EncryptForPeer() error = %v", err)
+	}
+
+	// Tamper with the base64 encoded ciphertext
+	raw, _ := base64.StdEncoding.DecodeString(encoded)
+	if len(raw) > NonceSize {
+		raw[NonceSize] ^= 0xff
+	}
+	tampered := base64.StdEncoding.EncodeToString(raw)
+
+	_, err = DecryptFromPeer(bob.Private, alice.Public, tampered)
+	if err == nil {
+		t.Fatal("expected error for tampered ciphertext")
+	}
+}
+
 func TestDeriveSharedKey_Symmetry(t *testing.T) {
 	alice, _ := GenerateKeyPair()
 	bob, _ := GenerateKeyPair()

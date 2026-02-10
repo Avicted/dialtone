@@ -249,3 +249,338 @@ func TestGetKeyEnvelope_Found(t *testing.T) {
 		t.Fatalf("Envelope = %q, want %q", got.Envelope, "env")
 	}
 }
+
+func TestCreateChannel_NilRepo(t *testing.T) {
+	svc := &Service{}
+	_, err := svc.CreateChannel(context.Background(), "admin", "enc")
+	if err == nil {
+		t.Fatal("expected error for nil repo")
+	}
+}
+
+func TestCreateChannel_EmptyUserID(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	_, err := svc.CreateChannel(context.Background(), "", "enc")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestCreateChannel_EmptyName(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	_, err := svc.CreateChannel(context.Background(), "admin", "")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestCreateChannel_WhitespaceName(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	_, err := svc.CreateChannel(context.Background(), "admin", "   ")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestCreateChannel_NonAdmin(t *testing.T) {
+	svc, _ := newServiceWithAdmin(false)
+	_, err := svc.CreateChannel(context.Background(), "admin", "enc")
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("expected ErrForbidden, got %v", err)
+	}
+}
+
+func TestCreateChannel_UserNotFound(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	_, err := svc.CreateChannel(context.Background(), "nonexistent", "enc")
+	if err == nil {
+		t.Fatal("expected error for nonexistent user")
+	}
+}
+
+func TestCreateChannel_RepoError(t *testing.T) {
+	repo := &errRepo{createErr: errors.New("db error")}
+	userRepo := &fakeUserRepo{user: user.User{ID: "admin", IsAdmin: true}}
+	userSvc := user.NewService(userRepo, "pepper")
+	svc := NewService(repo, userSvc)
+	svc.idGen = func() string { return "ch-1" }
+	svc.now = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
+	_, err := svc.CreateChannel(context.Background(), "admin", "enc")
+	if err == nil {
+		t.Fatal("expected error from repo")
+	}
+}
+
+func TestListChannels_NilRepo(t *testing.T) {
+	svc := &Service{}
+	_, err := svc.ListChannels(context.Background(), "admin")
+	if err == nil {
+		t.Fatal("expected error for nil repo")
+	}
+}
+
+func TestGetChannel_NilRepo(t *testing.T) {
+	svc := &Service{}
+	_, err := svc.GetChannel(context.Background(), "admin", "ch-1")
+	if err == nil {
+		t.Fatal("expected error for nil repo")
+	}
+}
+
+func TestGetChannel_EmptyChannelID(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	_, err := svc.GetChannel(context.Background(), "admin", "")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestDeleteChannel_NilRepo(t *testing.T) {
+	svc := &Service{}
+	err := svc.DeleteChannel(context.Background(), "admin", "ch-1")
+	if err == nil {
+		t.Fatal("expected error for nil repo")
+	}
+}
+
+func TestDeleteChannel_EmptyUserID(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	err := svc.DeleteChannel(context.Background(), "", "ch-1")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestDeleteChannel_EmptyChannelID(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	err := svc.DeleteChannel(context.Background(), "admin", "")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestDeleteChannel_Forbidden(t *testing.T) {
+	svc, _ := newServiceWithAdmin(false)
+	err := svc.DeleteChannel(context.Background(), "admin", "ch-1")
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("expected ErrForbidden, got %v", err)
+	}
+}
+
+func TestUpdateChannelName_NilRepo(t *testing.T) {
+	svc := &Service{}
+	_, err := svc.UpdateChannelName(context.Background(), "admin", "ch-1", "enc")
+	if err == nil {
+		t.Fatal("expected error for nil repo")
+	}
+}
+
+func TestUpdateChannelName_EmptyUserID(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	_, err := svc.UpdateChannelName(context.Background(), "", "ch-1", "enc")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestUpdateChannelName_EmptyChannelID(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	_, err := svc.UpdateChannelName(context.Background(), "admin", "", "enc")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestUpdateChannelName_EmptyName(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	_, err := svc.UpdateChannelName(context.Background(), "admin", "ch-1", "")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestUpdateChannelName_Forbidden(t *testing.T) {
+	svc, _ := newServiceWithAdmin(false)
+	_, err := svc.UpdateChannelName(context.Background(), "admin", "ch-1", "enc")
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("expected ErrForbidden, got %v", err)
+	}
+}
+
+func TestUpdateChannelName_RepoUpdateError(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	// Channel doesn't exist, so update returns ErrNotFound
+	_, err := svc.UpdateChannelName(context.Background(), "admin", "nonexistent", "enc")
+	if err == nil {
+		t.Fatal("expected error for nonexistent channel")
+	}
+}
+
+func TestListMessages_NilRepo(t *testing.T) {
+	svc := &Service{}
+	_, err := svc.ListMessages(context.Background(), "admin", "ch-1", 10)
+	if err == nil {
+		t.Fatal("expected error for nil repo")
+	}
+}
+
+func TestListMessages_EmptyUserID(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	_, err := svc.ListMessages(context.Background(), "", "ch-1", 10)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestListMessages_EmptyChannelID(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	_, err := svc.ListMessages(context.Background(), "admin", "", 10)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestListMessages_CustomLimit(t *testing.T) {
+	svc, repo := newServiceWithAdmin(true)
+	_, _ = svc.CreateChannel(context.Background(), "admin", "enc")
+	_, _ = svc.ListMessages(context.Background(), "admin", "ch-1", 50)
+	if repo.limit != 50 {
+		t.Fatalf("limit = %d, want 50", repo.limit)
+	}
+}
+
+func TestUpsertKeyEnvelope_NilRepo(t *testing.T) {
+	svc := &Service{}
+	env := KeyEnvelope{ChannelID: "ch-1", DeviceID: "dev-1", SenderDeviceID: "dev-1", SenderPublicKey: "pub", Envelope: "env"}
+	err := svc.UpsertKeyEnvelope(context.Background(), "admin", env)
+	if err == nil {
+		t.Fatal("expected error for nil repo")
+	}
+}
+
+func TestUpsertKeyEnvelope_EmptyUserID(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	env := KeyEnvelope{ChannelID: "ch-1", DeviceID: "dev-1", SenderDeviceID: "dev-1", SenderPublicKey: "pub", Envelope: "env"}
+	err := svc.UpsertKeyEnvelope(context.Background(), "", env)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestUpsertKeyEnvelope_EmptyChannelID(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	env := KeyEnvelope{ChannelID: "", DeviceID: "dev-1", SenderDeviceID: "dev-1", SenderPublicKey: "pub", Envelope: "env"}
+	err := svc.UpsertKeyEnvelope(context.Background(), "admin", env)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestUpsertKeyEnvelope_EmptyDeviceID(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	env := KeyEnvelope{ChannelID: "ch-1", DeviceID: "", SenderDeviceID: "dev-1", SenderPublicKey: "pub", Envelope: "env"}
+	err := svc.UpsertKeyEnvelope(context.Background(), "admin", env)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestUpsertKeyEnvelope_EmptySenderDeviceID(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	env := KeyEnvelope{ChannelID: "ch-1", DeviceID: "dev-1", SenderDeviceID: "", SenderPublicKey: "pub", Envelope: "env"}
+	err := svc.UpsertKeyEnvelope(context.Background(), "admin", env)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestUpsertKeyEnvelope_EmptySenderPublicKey(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	env := KeyEnvelope{ChannelID: "ch-1", DeviceID: "dev-1", SenderDeviceID: "dev-1", SenderPublicKey: "", Envelope: "env"}
+	err := svc.UpsertKeyEnvelope(context.Background(), "admin", env)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestUpsertKeyEnvelope_EmptyEnvelope(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	env := KeyEnvelope{ChannelID: "ch-1", DeviceID: "dev-1", SenderDeviceID: "dev-1", SenderPublicKey: "pub", Envelope: ""}
+	err := svc.UpsertKeyEnvelope(context.Background(), "admin", env)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestUpsertKeyEnvelope_PreservesExistingCreatedAt(t *testing.T) {
+	svc, repo := newServiceWithAdmin(true)
+	createdAt := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
+	env := KeyEnvelope{ChannelID: "ch-1", DeviceID: "dev-1", SenderDeviceID: "dev-1", SenderPublicKey: "pub", Envelope: "env", CreatedAt: createdAt}
+	if err := svc.UpsertKeyEnvelope(context.Background(), "admin", env); err != nil {
+		t.Fatalf("UpsertKeyEnvelope() error = %v", err)
+	}
+	if !repo.keyEnv.CreatedAt.Equal(createdAt) {
+		t.Fatalf("CreatedAt = %v, want %v", repo.keyEnv.CreatedAt, createdAt)
+	}
+}
+
+func TestGetKeyEnvelope_NilRepo(t *testing.T) {
+	svc := &Service{}
+	_, err := svc.GetKeyEnvelope(context.Background(), "admin", "ch-1", "dev-1")
+	if err == nil {
+		t.Fatal("expected error for nil repo")
+	}
+}
+
+func TestGetKeyEnvelope_EmptyChannelID(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	_, err := svc.GetKeyEnvelope(context.Background(), "admin", "", "dev-1")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestGetKeyEnvelope_EmptyDeviceID(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+	_, err := svc.GetKeyEnvelope(context.Background(), "admin", "ch-1", "")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestRequireAdmin_NilUsers(t *testing.T) {
+	svc := &Service{repo: &fakeRepo{}}
+	err := svc.requireAdmin(context.Background(), "admin")
+	if err == nil {
+		t.Fatal("expected error for nil users")
+	}
+}
+
+func TestNewService_Defaults(t *testing.T) {
+	repo := &fakeRepo{}
+	userRepo := &fakeUserRepo{user: user.User{ID: "admin", IsAdmin: true}}
+	userSvc := user.NewService(userRepo, "pepper")
+	svc := NewService(repo, userSvc)
+	if svc == nil {
+		t.Fatal("NewService() returned nil")
+	}
+	if svc.idGen == nil {
+		t.Fatal("idGen should not be nil")
+	}
+	if svc.now == nil {
+		t.Fatal("now should not be nil")
+	}
+}
+
+// errRepo is a fake repo that returns errors for specific operations
+type errRepo struct {
+	fakeRepo
+	createErr error
+}
+
+func (r *errRepo) CreateChannel(_ context.Context, _ Channel) error {
+	if r.createErr != nil {
+		return r.createErr
+	}
+	return nil
+}

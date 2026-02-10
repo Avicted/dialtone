@@ -45,19 +45,27 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("init store: %w", err)
 	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	return serve(ctx, cfg, store)
+}
+
+// serve wires up services, runs migrations, and starts the HTTP server.
+// It blocks until ctx is cancelled or the server encounters an error.
+func serve(ctx context.Context, cfg config.Config, store storage.Store) error {
+	defer func() {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer closeCancel()
+		_ = store.Close(closeCtx)
+	}()
+
 	migrateCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := store.Migrate(migrateCtx); err != nil {
 		return fmt.Errorf("run migrations: %w", err)
 	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = store.Close(ctx)
-	}()
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	hub := ws.NewHub(store.Broadcasts(), store.Devices(), store.Channels())
 	go hub.Run(ctx)
@@ -95,10 +103,11 @@ func run() error {
 		errCh <- srv.ListenAndServe()
 	}()
 
+	var err error
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
 		_ = srv.Shutdown(shutdownCtx)
 		err = <-errCh
 	case err = <-errCh:

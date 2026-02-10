@@ -331,3 +331,298 @@ func TestGetDirectoryKeyEnvelope_InvalidInput(t *testing.T) {
 		t.Fatalf("expected ErrInvalidInput, got %v", err)
 	}
 }
+
+func TestGetDirectoryKeyEnvelope_Success(t *testing.T) {
+	svc, repo := newTestService()
+
+	repo.keyEnvs["dev-1"] = DirectoryKeyEnvelope{DeviceID: "dev-1", SenderDeviceID: "dev-2", SenderPublicKey: "pub", Envelope: "env"}
+	env, err := svc.GetDirectoryKeyEnvelope(context.Background(), "dev-1")
+	if err != nil {
+		t.Fatalf("GetDirectoryKeyEnvelope() error = %v", err)
+	}
+	if env.Envelope != "env" {
+		t.Fatalf("Envelope = %q, want %q", env.Envelope, "env")
+	}
+}
+
+func TestGetDirectoryKeyEnvelope_NilRepo(t *testing.T) {
+	svc := &Service{}
+	_, err := svc.GetDirectoryKeyEnvelope(context.Background(), "dev-1")
+	if err == nil {
+		t.Fatal("expected error for nil repo")
+	}
+}
+
+func TestGetDirectoryKeyEnvelope_WhitespaceDeviceID(t *testing.T) {
+	svc, _ := newTestService()
+	_, err := svc.GetDirectoryKeyEnvelope(context.Background(), "   ")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestCreateWithPassword_NilRepo(t *testing.T) {
+	svc := &Service{}
+	_, err := svc.CreateWithPassword(context.Background(), "alice", "hash")
+	if err == nil {
+		t.Fatal("expected error for nil repo")
+	}
+}
+
+func TestCreateWithPassword_EmptyUsername(t *testing.T) {
+	svc, _ := newTestService()
+	_, err := svc.CreateWithPassword(context.Background(), "", "hash")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestCreateWithPassword_NoPepper(t *testing.T) {
+	repo := newFakeRepo()
+	svc := NewService(repo, "")
+	_, err := svc.CreateWithPassword(context.Background(), "alice", "hash")
+	if err == nil {
+		t.Fatal("expected error for empty pepper")
+	}
+}
+
+func TestCreateWithPasswordAndID_NilRepo(t *testing.T) {
+	svc := &Service{}
+	_, err := svc.CreateWithPasswordAndID(context.Background(), "id-1", "alice", "hash", false, false)
+	if err == nil {
+		t.Fatal("expected error for nil repo")
+	}
+}
+
+func TestCreateWithPasswordAndID_EmptyName(t *testing.T) {
+	svc, _ := newTestService()
+	_, err := svc.CreateWithPasswordAndID(context.Background(), "id-1", "", "hash", false, false)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestCreateWithPasswordAndID_EmptyPasswordHash(t *testing.T) {
+	svc, _ := newTestService()
+	_, err := svc.CreateWithPasswordAndID(context.Background(), "id-1", "alice", "", false, false)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestCreateWithPasswordAndID_NoPepper(t *testing.T) {
+	repo := newFakeRepo()
+	svc := NewService(repo, "")
+	_, err := svc.CreateWithPasswordAndID(context.Background(), "id-1", "alice", "hash", false, false)
+	if err == nil {
+		t.Fatal("expected error for empty pepper")
+	}
+}
+
+func TestCreate_NoPepper(t *testing.T) {
+	repo := newFakeRepo()
+	svc := NewService(repo, "")
+	_, err := svc.Create(context.Background(), "alice")
+	if err == nil {
+		t.Fatal("expected error for empty pepper")
+	}
+}
+
+func TestGetByID_NilRepo(t *testing.T) {
+	svc := &Service{}
+	_, err := svc.GetByID(context.Background(), "id")
+	if err == nil {
+		t.Fatal("expected error for nil repo")
+	}
+}
+
+func TestGetByUsername_NilRepo(t *testing.T) {
+	svc := &Service{}
+	_, err := svc.GetByUsername(context.Background(), "alice")
+	if err == nil {
+		t.Fatal("expected error for nil repo")
+	}
+}
+
+func TestGetByUsername_NoPepper(t *testing.T) {
+	repo := newFakeRepo()
+	svc := NewService(repo, "")
+	_, err := svc.GetByUsername(context.Background(), "alice")
+	if err == nil {
+		t.Fatal("expected error for empty pepper")
+	}
+}
+
+func TestUpsertProfile_NilRepo(t *testing.T) {
+	svc := &Service{}
+	err := svc.UpsertProfile(context.Background(), "user-1", "enc")
+	if err == nil {
+		t.Fatal("expected error for nil repo")
+	}
+}
+
+func TestUpsertProfile_EmptyNameEnc(t *testing.T) {
+	svc, _ := newTestService()
+	err := svc.UpsertProfile(context.Background(), "user-1", "")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestUpsertProfile_WhitespaceNameEnc(t *testing.T) {
+	svc, _ := newTestService()
+	err := svc.UpsertProfile(context.Background(), "user-1", "   ")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestListProfiles_NilRepo(t *testing.T) {
+	svc := &Service{}
+	_, err := svc.ListProfiles(context.Background())
+	if err == nil {
+		t.Fatal("expected error for nil repo")
+	}
+}
+
+func TestUpsertDirectoryKeyEnvelope_NilRepo(t *testing.T) {
+	svc := &Service{}
+	env := DirectoryKeyEnvelope{DeviceID: "dev-1", SenderDeviceID: "dev-2", SenderPublicKey: "pub", Envelope: "env"}
+	err := svc.UpsertDirectoryKeyEnvelope(context.Background(), env)
+	if err == nil {
+		t.Fatal("expected error for nil repo")
+	}
+}
+
+func TestUpsertDirectoryKeyEnvelope_EmptyDeviceID(t *testing.T) {
+	svc, _ := newTestService()
+	env := DirectoryKeyEnvelope{DeviceID: "", SenderDeviceID: "dev-2", SenderPublicKey: "pub", Envelope: "env"}
+	err := svc.UpsertDirectoryKeyEnvelope(context.Background(), env)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestUpsertDirectoryKeyEnvelope_EmptySenderDeviceID(t *testing.T) {
+	svc, _ := newTestService()
+	env := DirectoryKeyEnvelope{DeviceID: "dev-1", SenderDeviceID: "", SenderPublicKey: "pub", Envelope: "env"}
+	err := svc.UpsertDirectoryKeyEnvelope(context.Background(), env)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestUpsertDirectoryKeyEnvelope_EmptySenderPublicKey(t *testing.T) {
+	svc, _ := newTestService()
+	env := DirectoryKeyEnvelope{DeviceID: "dev-1", SenderDeviceID: "dev-2", SenderPublicKey: "", Envelope: "env"}
+	err := svc.UpsertDirectoryKeyEnvelope(context.Background(), env)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestUpsertDirectoryKeyEnvelope_EmptyEnvelope(t *testing.T) {
+	svc, _ := newTestService()
+	env := DirectoryKeyEnvelope{DeviceID: "dev-1", SenderDeviceID: "dev-2", SenderPublicKey: "pub", Envelope: ""}
+	err := svc.UpsertDirectoryKeyEnvelope(context.Background(), env)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestUpsertDirectoryKeyEnvelope_PreservesCreatedAt(t *testing.T) {
+	svc, repo := newTestService()
+	createdAt := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
+	env := DirectoryKeyEnvelope{DeviceID: "dev-1", SenderDeviceID: "dev-2", SenderPublicKey: "pub", Envelope: "env", CreatedAt: createdAt}
+	if err := svc.UpsertDirectoryKeyEnvelope(context.Background(), env); err != nil {
+		t.Fatalf("UpsertDirectoryKeyEnvelope() error = %v", err)
+	}
+	stored := repo.keyEnvs["dev-1"]
+	if !stored.CreatedAt.Equal(createdAt) {
+		t.Fatalf("CreatedAt = %v, want %v", stored.CreatedAt, createdAt)
+	}
+}
+
+func TestNormalizeUsername(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"Alice", "alice"},
+		{"  BOB  ", "bob"},
+		{"", ""},
+		{"  ", ""},
+	}
+	for _, tt := range tests {
+		got := normalizeUsername(tt.input)
+		if got != tt.want {
+			t.Errorf("normalizeUsername(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestHashUsername(t *testing.T) {
+	pepper := []byte("pepper")
+	h1 := hashUsername(pepper, "alice")
+	h2 := hashUsername(pepper, "alice")
+	if h1 != h2 {
+		t.Fatal("same input should produce same hash")
+	}
+	h3 := hashUsername(pepper, "bob")
+	if h1 == h3 {
+		t.Fatal("different inputs should produce different hashes")
+	}
+}
+
+func TestCreateWithPasswordAndID_RepoError(t *testing.T) {
+	repo := newFakeRepo()
+	svc, _ := newTestService()
+	// Create first user
+	_, _ = svc.CreateWithPasswordAndID(context.Background(), "id-1", "alice", "hash", false, false)
+	// Try creating with same username hash should fail
+	_, err := svc.CreateWithPasswordAndID(context.Background(), "id-2", "alice", "hash2", false, false)
+	if err == nil {
+		t.Fatal("expected error for duplicate username")
+	}
+	_ = repo // suppress unused
+}
+
+func TestCreateWithPassword_RepoError(t *testing.T) {
+	svc, _ := newTestService()
+	_, _ = svc.CreateWithPassword(context.Background(), "alice", "hash")
+	_, err := svc.CreateWithPassword(context.Background(), "alice", "hash2")
+	if err == nil {
+		t.Fatal("expected error for duplicate username")
+	}
+}
+
+func TestCreate_RepoError(t *testing.T) {
+	svc, _ := newTestService()
+	_, _ = svc.Create(context.Background(), "alice")
+	// ID will be same "test-id-1", so second create with different username should work name-wise
+	// but the hash will differ, let's test duplicate name_hash
+	svc.idGen = func() ID { return "test-id-2" }
+	_, err := svc.Create(context.Background(), "alice")
+	if err == nil {
+		t.Fatal("expected error for duplicate username")
+	}
+}
+
+func TestGetByID_NotFound(t *testing.T) {
+	svc, _ := newTestService()
+	_, err := svc.GetByID(context.Background(), "nonexistent")
+	if err == nil {
+		t.Fatal("expected error for nonexistent user")
+	}
+}
+
+func TestListProfiles_Empty(t *testing.T) {
+	svc, _ := newTestService()
+	profiles, err := svc.ListProfiles(context.Background())
+	if err != nil {
+		t.Fatalf("ListProfiles() error = %v", err)
+	}
+	if len(profiles) != 0 {
+		t.Fatalf("expected 0 profiles, got %d", len(profiles))
+	}
+}
