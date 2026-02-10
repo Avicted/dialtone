@@ -162,3 +162,90 @@ func TestUpsertKeyEnvelope_SetsTime(t *testing.T) {
 		t.Fatalf("expected CreatedAt to be set")
 	}
 }
+
+func TestListChannels_InvalidUser(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+
+	_, err := svc.ListChannels(context.Background(), "")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestListChannels_Success(t *testing.T) {
+	svc, repo := newServiceWithAdmin(true)
+
+	_, _ = svc.CreateChannel(context.Background(), "admin", "enc")
+	channels, err := svc.ListChannels(context.Background(), "admin")
+	if err != nil {
+		t.Fatalf("ListChannels() error = %v", err)
+	}
+	if len(channels) != 1 {
+		t.Fatalf("ListChannels() returned %d channels, want 1", len(channels))
+	}
+	if channels[0].ID != repo.channel.ID {
+		t.Fatalf("channel ID = %q, want %q", channels[0].ID, repo.channel.ID)
+	}
+}
+
+func TestGetChannel_InvalidInput(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+
+	_, err := svc.GetChannel(context.Background(), "", "ch-1")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestGetChannel_Success(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+
+	created, _ := svc.CreateChannel(context.Background(), "admin", "enc")
+	got, err := svc.GetChannel(context.Background(), "admin", created.ID)
+	if err != nil {
+		t.Fatalf("GetChannel() error = %v", err)
+	}
+	if got.ID != created.ID {
+		t.Fatalf("ID = %q, want %q", got.ID, created.ID)
+	}
+}
+
+func TestDeleteChannel_Admin(t *testing.T) {
+	svc, repo := newServiceWithAdmin(true)
+
+	_, _ = svc.CreateChannel(context.Background(), "admin", "enc")
+	if err := svc.DeleteChannel(context.Background(), "admin", "ch-1"); err != nil {
+		t.Fatalf("DeleteChannel() error = %v", err)
+	}
+	if repo.channel.ID != "" {
+		t.Fatal("expected channel to be deleted")
+	}
+}
+
+func TestGetKeyEnvelope_InvalidInput(t *testing.T) {
+	svc, _ := newServiceWithAdmin(true)
+
+	_, err := svc.GetKeyEnvelope(context.Background(), "", "ch-1", "dev-1")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestGetKeyEnvelope_Found(t *testing.T) {
+	svc, repo := newServiceWithAdmin(true)
+
+	repo.keyEnv = KeyEnvelope{
+		ChannelID:       "ch-1",
+		DeviceID:        "dev-1",
+		SenderDeviceID:  "dev-1",
+		SenderPublicKey: "pub",
+		Envelope:        "env",
+	}
+	got, err := svc.GetKeyEnvelope(context.Background(), "admin", "ch-1", "dev-1")
+	if err != nil {
+		t.Fatalf("GetKeyEnvelope() error = %v", err)
+	}
+	if got.Envelope != "env" {
+		t.Fatalf("Envelope = %q, want %q", got.Envelope, "env")
+	}
+}

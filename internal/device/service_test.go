@@ -185,3 +185,58 @@ func TestListByUser_NilRepo(t *testing.T) {
 		t.Fatal("expected error for nil repo")
 	}
 }
+
+func TestListAll_Success(t *testing.T) {
+	svc, _ := newTestService()
+
+	_, _ = svc.Create(context.Background(), "user-1", "key1")
+	_, _ = svc.Create(context.Background(), "user-2", "key2")
+
+	devices, err := svc.ListAll(context.Background())
+	if err != nil {
+		t.Fatalf("ListAll() error = %v", err)
+	}
+	if len(devices) != 2 {
+		t.Fatalf("ListAll() returned %d devices, want 2", len(devices))
+	}
+}
+
+func TestListAll_NilRepo(t *testing.T) {
+	svc := &Service{}
+
+	_, err := svc.ListAll(context.Background())
+	if err == nil {
+		t.Fatal("expected error for nil repo")
+	}
+}
+
+func TestGetByUserAndPublicKey_Success(t *testing.T) {
+	svc, _ := newTestService()
+
+	created, _ := svc.Create(context.Background(), "user-1", "key1")
+	got, err := svc.GetByUserAndPublicKey(context.Background(), "user-1", "key1")
+	if err != nil {
+		t.Fatalf("GetByUserAndPublicKey() error = %v", err)
+	}
+	if got.ID != created.ID {
+		t.Fatalf("ID = %q, want %q", got.ID, created.ID)
+	}
+}
+
+func TestGetByUserAndPublicKey_InvalidInput(t *testing.T) {
+	svc, _ := newTestService()
+
+	_, err := svc.GetByUserAndPublicKey(context.Background(), "", "key1")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestGetByUserAndPublicKey_NilRepo(t *testing.T) {
+	svc := &Service{}
+
+	_, err := svc.GetByUserAndPublicKey(context.Background(), "user-1", "key1")
+	if err == nil {
+		t.Fatal("expected error for nil repo")
+	}
+}
