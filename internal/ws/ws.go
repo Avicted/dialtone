@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -189,6 +190,9 @@ func (c *Client) readLoop() {
 			if errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
 				return
 			}
+			if isExpectedDisconnectError(err) {
+				return
+			}
 			status := websocket.CloseStatus(err)
 			if status == websocket.StatusNormalClosure || status == websocket.StatusGoingAway || status == websocket.StatusNoStatusRcvd {
 				return
@@ -206,6 +210,17 @@ func (c *Client) readLoop() {
 		}
 		c.hub.incoming <- incomingMessage{client: c, msg: msg}
 	}
+}
+
+func isExpectedDisconnectError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "use of closed network connection")
 }
 
 func (c *Client) writeLoop() {
