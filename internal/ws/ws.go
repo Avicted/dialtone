@@ -26,6 +26,7 @@ import (
 const (
 	sendBuffer    = 64
 	writeTimeout  = 5 * time.Second
+	pingInterval  = 25 * time.Second
 	maxMessageLen = 16384
 )
 
@@ -224,6 +225,8 @@ func isExpectedDisconnectError(err error) bool {
 }
 
 func (c *Client) writeLoop() {
+	pingTicker := time.NewTicker(pingInterval)
+	defer pingTicker.Stop()
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -238,6 +241,17 @@ func (c *Client) writeLoop() {
 			if err != nil {
 				if websocket.CloseStatus(err) == -1 {
 					securelog.Error("ws.write", err)
+				}
+				c.hub.unregister <- c
+				return
+			}
+		case <-pingTicker.C:
+			ctx, cancel := context.WithTimeout(c.ctx, writeTimeout)
+			err := c.conn.Ping(ctx)
+			cancel()
+			if err != nil {
+				if websocket.CloseStatus(err) == -1 {
+					securelog.Error("ws.ping", err)
 				}
 				c.hub.unregister <- c
 				return
