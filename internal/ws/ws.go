@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -184,7 +185,14 @@ func (c *Client) readLoop() {
 	for {
 		_, data, err := c.conn.Read(c.ctx)
 		if err != nil {
-			if websocket.CloseStatus(err) == -1 {
+			if errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			status := websocket.CloseStatus(err)
+			if status == websocket.StatusNormalClosure || status == websocket.StatusGoingAway || status == websocket.StatusNoStatusRcvd {
+				return
+			}
+			if status == -1 {
 				securelog.Error("ws.read", err)
 			}
 			return

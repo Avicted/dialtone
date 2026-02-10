@@ -544,6 +544,14 @@ func (m *chatModel) shareKnownChannelKeys() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	channels, err := m.api.ListChannels(ctx, m.auth.Token)
+	if err != nil {
+		return err
+	}
+	allowed := make(map[string]struct{}, len(channels))
+	for _, ch := range channels {
+		allowed[ch.ID] = struct{}{}
+	}
 	devices, err := m.api.ListAllDeviceKeys(ctx, m.auth.Token)
 	if err != nil {
 		return err
@@ -553,6 +561,10 @@ func (m *chatModel) shareKnownChannelKeys() error {
 	}
 	for channelID, key := range m.channelKeys {
 		if channelID == "" || len(key) != crypto.KeySize {
+			continue
+		}
+		if _, ok := allowed[channelID]; !ok {
+			delete(m.channelKeys, channelID)
 			continue
 		}
 		envelopes, err := buildChannelKeyEnvelopes(m.kp, m.auth.DeviceID, key, devices)
@@ -566,7 +578,7 @@ func (m *chatModel) shareKnownChannelKeys() error {
 			return err
 		}
 	}
-	return nil
+	return m.persistChannelKeys()
 }
 
 func (m *chatModel) deleteChannel(nameOrID string) {
@@ -871,6 +883,8 @@ func (m *chatModel) handleServerMessage(msg ServerMessage) {
 		delete(m.channelMsgs, msg.ChannelID)
 		delete(m.channelHistoryLoaded, msg.ChannelID)
 		delete(m.channelUnread, msg.ChannelID)
+		delete(m.channelKeys, msg.ChannelID)
+		_ = m.persistChannelKeys()
 		if m.activeChannel == msg.ChannelID {
 			m.activeChannel = ""
 			if info.Name != "" {

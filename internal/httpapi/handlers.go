@@ -446,6 +446,17 @@ func (h *Handler) handleChannelKeys(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("channel_id and envelopes are required"))
 		return
 	}
+	if _, err := h.channels.GetChannel(r.Context(), session.UserID, req.ChannelID); err != nil {
+		switch {
+		case errors.Is(err, channel.ErrInvalidInput):
+			writeError(w, http.StatusBadRequest, err)
+		case errors.Is(err, storage.ErrNotFound):
+			writeError(w, http.StatusNotFound, err)
+		default:
+			writeError(w, http.StatusInternalServerError, err)
+		}
+		return
+	}
 	for _, envReq := range req.Envelopes {
 		if envReq.SenderDeviceID != session.DeviceID {
 			writeError(w, http.StatusForbidden, errors.New("sender_device_id must match the current device"))

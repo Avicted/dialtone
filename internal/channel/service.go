@@ -65,6 +65,16 @@ func (s *Service) ListChannels(ctx context.Context, userID user.ID) ([]Channel, 
 	return s.repo.ListChannels(ctx)
 }
 
+func (s *Service) GetChannel(ctx context.Context, userID user.ID, channelID ID) (Channel, error) {
+	if s.repo == nil {
+		return Channel{}, errors.New("repository is required")
+	}
+	if userID == "" || channelID == "" {
+		return Channel{}, ErrInvalidInput
+	}
+	return s.repo.GetChannel(ctx, channelID)
+}
+
 func (s *Service) DeleteChannel(ctx context.Context, userID user.ID, channelID ID) error {
 	if s.repo == nil {
 		return errors.New("repository is required")
