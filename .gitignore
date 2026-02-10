@@ -8,6 +8,7 @@ bin/
 
 *.md
 !README.md
+!docs/*.md
 
 .env*
 !.env.example
