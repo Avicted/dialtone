@@ -146,6 +146,7 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, width,
 		sidebarMode:          sidebarChannels,
 		sidebarIndex:         0,
 	}
+	model.updateLayout()
 	if keysErr != nil {
 		model.errMsg = "failed to load channel keys"
 	}
