@@ -3,7 +3,7 @@
 [![CI](https://github.com/Avicted/dialtone/actions/workflows/ci.yml/badge.svg)](https://github.com/Avicted/dialtone/actions/workflows/ci.yml)
 [![Coverage](https://avicted.github.io/dialtone/badges/coverage.svg)](https://github.com/Avicted/dialtone/actions/workflows/ci.yml)
 
-Dialtone uses symmetric encryption for content and metadata, and public key encryption to share those symmetric keys across devices. The server never sees plaintext message content or channel names, but it can see routing metadata required for the system to function.
+Dialtone uses symmetric encryption for content and metadata, and public key encryption to share those symmetric keys across devices. The server never sees plaintext message content or channel names, but it can see routing metadata required for the system to function. Usernames are sent in plaintext during login/register and stored only as a peppered hash (no plaintext usernames in the database).
 
 ## Quick start
 
@@ -47,6 +47,17 @@ go run ./cmd/server
 ```bash
 curl -s -X POST http://localhost:8080/server/invites \
   -H "X-Admin-Token: $DIALTONE_ADMIN_TOKEN"
+```
+
+#### From withing the dialtone docker container using curl:
+```bash
+set -a
+. ./.env
+set +a
+
+docker exec -it dialtone sh -c 'curl -X POST \
+  -H "X-Admin-Token: $DIALTONE_ADMIN_TOKEN" \
+  http://localhost:8080/server/invites'
 ```
 
 The response includes token and expires_at. Use the token when registering a new user.
