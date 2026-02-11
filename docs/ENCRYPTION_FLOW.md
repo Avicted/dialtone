@@ -20,11 +20,21 @@ This document describes the encryption flow in Dialtone, what is encrypted, what
   - Encrypts message bodies and channel metadata (like channel names).
 
 - Directory key (symmetric)
-  - Encrypts directory/profile data (like usernames) stored server-side.
+  - Encrypts directory/profile data (profile display names) stored server-side.
 
 - Key envelopes
   - A symmetric key encrypted for a specific device using public key crypto.
   - Only the target device can decrypt it with its private key.
+
+## Username vs profile display name
+
+- Username
+  - Used for login/identity lookup.
+  - Sent in plaintext during login/register and stored only as a peppered hash.
+
+- Profile display name
+  - Optional, user-visible name stored in the directory.
+  - Encrypted with the directory key.
 
 ## Data flow overview
 
@@ -73,7 +83,7 @@ A passphrase is required to decrypt the keystore. If the passphrase is wrong, co
 - Message bodies (channel key)
 - Channel names (channel key)
 - Sender display names in messages (channel key)
-- Directory/profile data (directory key)
+- Profile display names (directory key)
 - Stored device keys and channel/directory keys in local keystore
 
 ## What is not encrypted (and why)
@@ -87,6 +97,10 @@ A passphrase is required to decrypt the keystore. If the passphrase is wrong, co
 - Public keys
   - Must be public to enable key sharing.
 
+- Usernames
+  - Sent in plaintext during login/register so the server can authenticate.
+  - Stored only as a peppered hash (no plaintext usernames in the database).
+
 - Network metadata
   - Standard transport metadata (IP, timing) is outside app-level encryption scope.
 
@@ -98,10 +112,17 @@ A passphrase is required to decrypt the keystore. If the passphrase is wrong, co
 4) Client sends ciphertext to the server.
 5) Receiver decrypts ciphertext using the same channel key.
 
+## Message storage and encryption
+
+- Message bodies are encrypted client-side with the channel key before upload.
+- Sender display names in messages are encrypted client-side with the channel key.
+- The server stores and returns ciphertext for message bodies and sender names.
+- Message IDs, channel IDs, sender IDs, and timestamps are stored in plaintext for routing, indexing, and ordering.
+
 ## Directory/profile encryption flow (detail)
 
 1) Device obtains directory key (local keystore or key envelope).
-2) Client encrypts profile fields with directory key.
+2) Client encrypts profile display name with directory key.
 3) Server stores encrypted profile data.
 4) Other devices decrypt profile fields using directory key.
 
@@ -119,4 +140,4 @@ A passphrase is required to decrypt the keystore. If the passphrase is wrong, co
 
 ## Summary
 
-Dialtone uses symmetric encryption for content and metadata, and public key encryption to share those symmetric keys across devices. The server never sees plaintext message content or channel names, but it can see routing metadata required for the system to function.
+Dialtone uses symmetric encryption for content and metadata, and public key encryption to share those symmetric keys across devices. The server never sees plaintext message content or channel names, but it can see routing metadata required for the system to function. Usernames are sent in plaintext during auth but stored only as a peppered hash.

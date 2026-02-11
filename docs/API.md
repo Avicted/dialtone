@@ -11,6 +11,8 @@ The server listens at `DIALTONE_LISTEN_ADDR`. Use HTTPS in production.
 
 ## Auth
 
+Usernames are sent in plaintext during login/register so the server can authenticate. The server stores only a peppered hash (no plaintext usernames in the database).
+
 All authenticated HTTP requests use a bearer token:
 
 ```
