@@ -29,7 +29,7 @@ func setupPostgresStore(t *testing.T) (*PostgresStore, func()) {
 			"POSTGRES_PASSWORD": "dialtone",
 			"POSTGRES_DB":       "dialtone",
 		},
-		WaitingFor: wait.ForListeningPort("5432/tcp"),
+		WaitingFor: wait.ForLog("database system is ready to accept connections").WithStartupTimeout(60 * time.Second),
 	}
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
