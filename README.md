@@ -88,7 +88,7 @@ You can also provide STUN servers with `--stun`
 Client auto-start (recommended for debugging):
 
 ```bash
-./bin/dialtone --voice-debug --voice-ptt ""
+./bin/client --voice-debug --voice-ptt "" --voice-meter --voice-vad 20
 ```
 
 - `--voice-debug` writes voiced logs to a file (see the client UI for the log path).
