@@ -6,7 +6,7 @@ on:
       - "**"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   test:
@@ -33,6 +33,46 @@ jobs:
 
       - name: Coverage
         run: ./scripts/coverage.sh | tee coverage-report.txt
+
+      - name: Generate coverage badge
+        if: github.event.pull_request.head.repo.fork == false
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ { sub(/%/,"",$3); print $3 }')
+          if [[ -z "$total" ]]; then
+            echo "coverage total not found" >&2
+            exit 1
+          fi
+          color="red"
+          if awk "BEGIN {exit !($total >= 80)}"; then
+            color="brightgreen"
+          elif awk "BEGIN {exit !($total >= 60)}"; then
+            color="yellow"
+          fi
+          mkdir -p public/badges
+          cat > public/badges/coverage.svg <<EOF
+          <svg xmlns="http://www.w3.org/2000/svg" width="130" height="20" role="img" aria-label="coverage: ${total}%">
+            <linearGradient id="s" x2="0" y2="100%">
+              <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
+              <stop offset="1" stop-opacity=".1"/>
+            </linearGradient>
+            <rect rx="3" width="130" height="20" fill="#555"/>
+            <rect rx="3" x="62" width="68" height="20" fill="${color}"/>
+            <path fill="${color}" d="M62 0h4v20h-4z"/>
+            <rect rx="3" width="130" height="20" fill="url(#s)"/>
+            <g fill="#fff" text-anchor="middle" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11">
+              <text x="31" y="14">coverage</text>
+              <text x="96" y="14">${total}%</text>
+            </g>
+          </svg>
+          EOF
+
+      - name: Publish coverage badge
+        if: github.event.pull_request.head.repo.fork == false
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: public
+          keep_files: true
 
       - name: Upload coverage profile
         uses: actions/upload-artifact@v4
