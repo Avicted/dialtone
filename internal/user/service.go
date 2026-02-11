@@ -14,6 +14,11 @@ import (
 
 var ErrInvalidInput = errors.New("invalid input")
 
+const (
+	minUsernameLen = 2
+	maxUsernameLen = 20
+)
+
 type Service struct {
 	repo   Repository
 	idGen  func() ID
@@ -38,8 +43,8 @@ func (s *Service) Create(ctx context.Context, username string) (User, error) {
 	}
 
 	name := normalizeUsername(username)
-	if name == "" {
-		return User{}, ErrInvalidInput
+	if err := validateUsername(name); err != nil {
+		return User{}, err
 	}
 	if len(s.pepper) == 0 {
 		return User{}, errors.New("username pepper is required")
@@ -67,7 +72,10 @@ func (s *Service) CreateWithPassword(ctx context.Context, username, passwordHash
 	}
 
 	name := normalizeUsername(username)
-	if name == "" || strings.TrimSpace(passwordHash) == "" {
+	if err := validateUsername(name); err != nil {
+		return User{}, err
+	}
+	if strings.TrimSpace(passwordHash) == "" {
 		return User{}, ErrInvalidInput
 	}
 	if len(s.pepper) == 0 {
@@ -98,7 +106,10 @@ func (s *Service) CreateWithPasswordAndID(ctx context.Context, id ID, username, 
 		return User{}, ErrInvalidInput
 	}
 	name := normalizeUsername(username)
-	if name == "" || strings.TrimSpace(passwordHash) == "" {
+	if err := validateUsername(name); err != nil {
+		return User{}, err
+	}
+	if strings.TrimSpace(passwordHash) == "" {
 		return User{}, ErrInvalidInput
 	}
 	if len(s.pepper) == 0 {
@@ -147,8 +158,8 @@ func (s *Service) GetByUsername(ctx context.Context, username string) (User, err
 		return User{}, errors.New("repository is required")
 	}
 	name := normalizeUsername(username)
-	if name == "" {
-		return User{}, ErrInvalidInput
+	if err := validateUsername(name); err != nil {
+		return User{}, err
 	}
 	if len(s.pepper) == 0 {
 		return User{}, errors.New("username pepper is required")
@@ -206,6 +217,16 @@ func (s *Service) GetDirectoryKeyEnvelope(ctx context.Context, deviceID string) 
 
 func normalizeUsername(username string) string {
 	return strings.ToLower(strings.TrimSpace(username))
+}
+
+func validateUsername(name string) error {
+	if name == "" {
+		return ErrInvalidInput
+	}
+	if len(name) < minUsernameLen || len(name) > maxUsernameLen {
+		return ErrInvalidInput
+	}
+	return nil
 }
 
 func hashUsername(pepper []byte, username string) string {

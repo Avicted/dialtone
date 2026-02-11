@@ -23,6 +23,11 @@ var (
 	ErrTokenExpired = errors.New("token expired")
 )
 
+const (
+	minUsernameLen = 2
+	maxUsernameLen = 20
+)
+
 type Session struct {
 	Token     string
 	UserID    user.ID
@@ -59,8 +64,8 @@ func (s *Service) Register(ctx context.Context, username, password, publicKey, i
 		return user.User{}, device.Device{}, Session{}, errors.New("invites service is required")
 	}
 	name := normalizeUsername(username)
-	if name == "" {
-		return user.User{}, device.Device{}, Session{}, ErrInvalidInput
+	if err := validateUsername(name); err != nil {
+		return user.User{}, device.Device{}, Session{}, err
 	}
 	if err := validateRegisterPassword(password); err != nil {
 		return user.User{}, device.Device{}, Session{}, err
@@ -107,8 +112,8 @@ func (s *Service) Login(ctx context.Context, username, password, publicKey strin
 		return user.User{}, device.Device{}, Session{}, errors.New("services are required")
 	}
 	name := normalizeUsername(username)
-	if name == "" {
-		return user.User{}, device.Device{}, Session{}, ErrInvalidInput
+	if err := validateUsername(name); err != nil {
+		return user.User{}, device.Device{}, Session{}, err
 	}
 	if strings.TrimSpace(password) == "" || len(password) < 8 {
 		return user.User{}, device.Device{}, Session{}, ErrInvalidInput
@@ -217,6 +222,16 @@ func randomToken() (string, error) {
 
 func normalizeUsername(username string) string {
 	return strings.ToLower(strings.TrimSpace(username))
+}
+
+func validateUsername(name string) error {
+	if name == "" {
+		return ErrInvalidInput
+	}
+	if len(name) < minUsernameLen || len(name) > maxUsernameLen {
+		return fmt.Errorf("%w: username must be %d-%d characters", ErrInvalidInput, minUsernameLen, maxUsernameLen)
+	}
+	return nil
 }
 
 type tokenStore struct {

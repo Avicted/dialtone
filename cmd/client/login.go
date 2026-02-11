@@ -27,6 +27,11 @@ type loginModel struct {
 	selectIndex   int
 }
 
+const (
+	minUsernameLen = 2
+	maxUsernameLen = 20
+)
+
 func newLoginModel(defaultServer string) loginModel {
 	server := textinput.New()
 	server.Placeholder = "http://localhost:8080"
@@ -41,8 +46,8 @@ func newLoginModel(defaultServer string) loginModel {
 	server.Focus()
 
 	username := textinput.New()
-	username.Placeholder = "username"
-	username.CharLimit = 64
+	username.Placeholder = "username (2-20 chars)"
+	username.CharLimit = maxUsernameLen
 	username.Width = 30
 
 	password := textinput.New()
@@ -307,8 +312,12 @@ func (m loginModel) validateSubmit() string {
 	if strings.TrimSpace(m.serverURL()) == "" {
 		return "server url is required"
 	}
-	if m.username() == "" || m.password() == "" {
+	username := strings.TrimSpace(m.username())
+	if username == "" || m.password() == "" {
 		return "username and password are required"
+	}
+	if len(username) < minUsernameLen || len(username) > maxUsernameLen {
+		return fmt.Sprintf("username must be %d-%d characters", minUsernameLen, maxUsernameLen)
 	}
 	if len(m.passphrase()) < 8 {
 		return "keystore passphrase must be at least 8 characters"

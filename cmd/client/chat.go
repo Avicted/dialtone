@@ -561,6 +561,7 @@ func (m *chatModel) refreshChannels(showMessage bool) {
 		return
 	}
 	needsRefresh := false
+	allEncrypted := true
 	for _, ch := range channels {
 		if _, err := m.ensureChannelKey(ch.ID); err != nil {
 			needsRefresh = true
@@ -568,6 +569,8 @@ func (m *chatModel) refreshChannels(showMessage bool) {
 		name := m.decryptChannelName(ch.ID, ch.NameEnc)
 		if name == "<encrypted>" {
 			needsRefresh = true
+		} else {
+			allEncrypted = false
 		}
 		m.channels[ch.ID] = channelInfo{ID: ch.ID, Name: name}
 	}
@@ -583,6 +586,9 @@ func (m *chatModel) refreshChannels(showMessage bool) {
 			b.WriteString(")")
 		}
 		m.appendSystemMessage(b.String())
+		if allEncrypted {
+			m.appendSystemMessage("All channels are <encrypted> because no other online user has shared channel keys yet. They will decrypt once another user comes online and shares keys (or an admin re-shares them).")
+		}
 	}
 	m.ensureSidebarIndex()
 	m.channelRefreshNeeded = needsRefresh
@@ -1207,6 +1213,8 @@ func (m *chatModel) renderMessages() string {
 		}
 		if msg.isSystem {
 			sender = "system"
+		} else {
+			sender = formatUsername(sender)
 		}
 
 		var style lipgloss.Style
@@ -1252,7 +1260,7 @@ func (m *chatModel) renderSidebar() string {
 							style = sidebarOfflineStyle
 						}
 					}
-					name := entry.Name
+					name := formatUsername(entry.Name)
 					if entry.Admin {
 						name = fmt.Sprintf("%s (admin)", name)
 					}
@@ -1278,7 +1286,7 @@ func (m *chatModel) renderSidebar() string {
 							style = sidebarOfflineStyle
 						}
 					}
-					name := entry.Name
+					name := formatUsername(entry.Name)
 					if entry.Admin {
 						name = fmt.Sprintf("%s (admin)", name)
 					}
@@ -1637,7 +1645,7 @@ func (m chatModel) View() string {
 	header := fmt.Sprintf(
 		"  %s  %s  %s  %s",
 		appNameStyle.Render("* dialtone"),
-		headerStyle.Render(m.auth.Username),
+		headerStyle.Render(formatUsername(m.auth.Username)),
 		labelStyle.Render(shortID(m.auth.UserID)),
 		labelStyle.Render(m.activeChannelLabel()),
 	)
@@ -1700,6 +1708,17 @@ func shortID(id string) string {
 		return id[:8]
 	}
 	return id
+}
+
+func formatUsername(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return name
+	}
+	if strings.HasPrefix(name, "<") && strings.HasSuffix(name, ">") {
+		return name
+	}
+	return "<" + name + ">"
 }
 
 func clampMin(v, minimum int) int {
