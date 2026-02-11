@@ -25,14 +25,14 @@ func setupPostgresDB(t *testing.T) (*sql.DB, func()) {
 			"POSTGRES_PASSWORD": "dialtone",
 			"POSTGRES_DB":       "dialtone",
 		},
-		WaitingFor: wait.ForListeningPort("5432/tcp"),
+		WaitingFor: wait.ForLog("database system is ready to accept connections").WithStartupTimeout(60 * time.Second),
 	}
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
 		Started:          true,
 	})
 	if err != nil {
-		t.Fatalf("start postgres: %v", err)
+		t.Skipf("start postgres container: %v", err)
 	}
 
 	host, err := container.Host(ctx)
@@ -46,6 +46,7 @@ func setupPostgresDB(t *testing.T) (*sql.DB, func()) {
 		t.Fatalf("postgres port: %v", err)
 	}
 	conn := fmt.Sprintf("postgres://dialtone:dialtone@%s:%s/dialtone?sslmode=disable", host, port.Port())
+	waitForPostgres(t, conn)
 
 	db, err := sql.Open("pgx", conn)
 	if err != nil {
