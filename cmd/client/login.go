@@ -48,28 +48,28 @@ func newLoginModel(defaultServer string) loginModel {
 	username := textinput.New()
 	username.Placeholder = "username (2-20 chars)"
 	username.CharLimit = maxUsernameLen
-	username.Width = 30
+	username.Width = 40
 
 	password := textinput.New()
 	password.Placeholder = "password (min 8 chars)"
 	password.EchoMode = textinput.EchoPassword
 	password.EchoCharacter = '*'
 	password.CharLimit = 128
-	password.Width = 30
+	password.Width = 40
 
 	passphrase := textinput.New()
 	passphrase.Placeholder = "keystore passphrase"
 	passphrase.EchoMode = textinput.EchoPassword
 	passphrase.EchoCharacter = '*'
 	passphrase.CharLimit = 128
-	passphrase.Width = 30
+	passphrase.Width = 40
 
 	confirm := textinput.New()
 	confirm.Placeholder = "confirm password"
 	confirm.EchoMode = textinput.EchoPassword
 	confirm.EchoCharacter = '*'
 	confirm.CharLimit = 128
-	confirm.Width = 30
+	confirm.Width = 40
 
 	invite := textinput.New()
 	invite.Placeholder = "invite token"
@@ -177,9 +177,17 @@ func (m loginModel) Update(msg tea.Msg) (loginModel, tea.Cmd) {
 	case 2:
 		m.passwordInput, cmd = m.passwordInput.Update(msg)
 	case 3:
-		m.passphraseInp, cmd = m.passphraseInp.Update(msg)
+		if m.isRegister {
+			m.confirmInput, cmd = m.confirmInput.Update(msg)
+		} else {
+			m.passphraseInp, cmd = m.passphraseInp.Update(msg)
+		}
 	case 4:
-		m.confirmInput, cmd = m.confirmInput.Update(msg)
+		if m.isRegister {
+			m.passphraseInp, cmd = m.passphraseInp.Update(msg)
+		} else {
+			m.serverInput, cmd = m.serverInput.Update(msg)
+		}
 	case 5:
 		m.inviteInput, cmd = m.inviteInput.Update(msg)
 	default:
@@ -226,10 +234,14 @@ func (m *loginModel) applyFocus() {
 	case 2:
 		m.passwordInput.Focus()
 	case 3:
-		m.passphraseInp.Focus()
-	case 4:
 		if m.isRegister {
 			m.confirmInput.Focus()
+		} else {
+			m.passphraseInp.Focus()
+		}
+	case 4:
+		if m.isRegister {
+			m.passphraseInp.Focus()
 		} else {
 			m.serverInput.Focus()
 		}
@@ -268,11 +280,17 @@ func (m loginModel) View() string {
 	labels := []string{"Server", "Username", "Password", "Keystore Passphrase"}
 	inputs := []textinput.Model{m.serverInput, m.usernameInput, m.passwordInput, m.passphraseInp}
 	if m.isRegister {
-		labels = append(labels, "Confirm Password", "Invite Token")
-		inputs = append(inputs, m.confirmInput, m.inviteInput)
+		labels = []string{"Server", "Username", "Password", "Confirm Password", "Keystore Passphrase", "Invite Token"}
+		inputs = []textinput.Model{m.serverInput, m.usernameInput, m.passwordInput, m.confirmInput, m.passphraseInp, m.inviteInput}
+	}
+	maxLabel := 0
+	for _, label := range labels {
+		if len(label) > maxLabel {
+			maxLabel = len(label)
+		}
 	}
 	for i, input := range inputs {
-		line := labelStyle.Render(fmt.Sprintf("  %s: ", labels[i])) + input.View()
+		line := labelStyle.Render(fmt.Sprintf("  %-*s: ", maxLabel, labels[i])) + input.View()
 		b.WriteString(centerText(line, m.width))
 		b.WriteString("\n")
 	}
