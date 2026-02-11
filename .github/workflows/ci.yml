@@ -7,6 +7,8 @@ on:
   push:
     branches:
       - "main"
+      - "master"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -38,7 +40,7 @@ jobs:
         run: ./scripts/coverage.sh | tee coverage-report.txt
 
       - name: Generate coverage badge
-        if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false)
+        if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false)
         run: |
           total=$(go tool cover -func=coverage.out | awk '/^total:/ { sub(/%/,"",$3); print $3 }')
           if [[ -z "$total" ]]; then
@@ -70,7 +72,7 @@ jobs:
           EOF
 
       - name: Publish coverage badge
-        if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false)
+        if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false)
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
