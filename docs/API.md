@@ -392,13 +392,3 @@ Requires `Authorization: Bearer <token>` header.
   "message": "string"
 }
 ```
-
-## Encryption expectations
-
-The server stores and forwards encrypted payloads. Clients must:
-- Encrypt channel names and message bodies before sending.
-- Encrypt sender names per channel.
-- Share per-channel key envelopes via `/channels/keys`.
-- Trusted users share a directory key via `/directory/keys` to decrypt user profile names.
-
-The server does not validate ciphertext content; it only validates required fields and message types.

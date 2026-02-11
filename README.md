@@ -3,9 +3,15 @@
 [![CI](https://github.com/Avicted/dialtone/actions/workflows/ci.yml/badge.svg)](https://github.com/Avicted/dialtone/actions/workflows/ci.yml)
 [![Coverage](https://avicted.github.io/dialtone/badges/coverage.svg)](https://github.com/Avicted/dialtone/actions/workflows/ci.yml)
 
-Dialtone uses symmetric encryption for content and metadata, and public key encryption to share those symmetric keys across devices. The server never sees plaintext message content or channel names, but it can see routing metadata required for the system to function. Usernames are sent in plaintext during login/register and stored only as a peppered hash (no plaintext usernames in the database).
+Dialtone is a realtime websocket chat with end-to-end encrypted message bodies and channel names.
 
-## Quick start
+Dialtone uses symmetric encryption for message bodies and channel names, and public key encryption to share those symmetric keys across devices. The server never sees plaintext message content or channel names, but it can see routing metadata required for the system to function. Usernames are sent in plaintext during login/register and stored only as a peppered hash (no plaintext usernames in the database).
+
+## Client
+![docs/dialtone-client-01.png](docs/dialtone-client-01.png)
+![docs/dialtone-client-02.png](docs/dialtone-client-02.png)
+
+## Quick start (server)
 
 ### Requirements
 - Go 1.22+
@@ -49,7 +55,7 @@ curl -s -X POST http://localhost:8080/server/invites \
   -H "X-Admin-Token: $DIALTONE_ADMIN_TOKEN"
 ```
 
-#### From withing the dialtone docker container using curl:
+#### From within the dialtone docker container using curl:
 ```bash
 set -a
 . ./.env

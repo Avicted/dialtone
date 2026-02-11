@@ -1,10 +1,10 @@
 # Encryption Flow
 
-This document describes the encryption flow in Dialtone, what is encrypted, what is not, and why. It is intended for public, technical documentation.
+This document describes the encryption flow in Dialtone, what is encrypted, what is not, and why.
 
 ## Goals and threat model (short version)
 
-- Protect message content and channel metadata from the server and network observers.
+- Protect message content and channel names from the server and network observers.
 - Allow multi-device access by securely sharing symmetric keys via public key encryption.
 - Accept that compromised client endpoints can read decrypted content.
 
@@ -90,6 +90,7 @@ A passphrase is required to decrypt the keystore. If the passphrase is wrong, co
 
 - User IDs, device IDs, channel IDs
   - Needed for routing, indexing, and access control.
+  - Device ID is a server-generated identifier for a specific client installation/device. It is not a cryptographic key or a public key.
 
 - Timestamps and message metadata
   - Needed for ordering and display.
@@ -140,4 +141,4 @@ A passphrase is required to decrypt the keystore. If the passphrase is wrong, co
 
 ## Summary
 
-Dialtone uses symmetric encryption for content and metadata, and public key encryption to share those symmetric keys across devices. The server never sees plaintext message content or channel names, but it can see routing metadata required for the system to function. Usernames are sent in plaintext during auth but stored only as a peppered hash.
+Dialtone uses symmetric encryption for message bodies and channel names, and public key encryption to share those symmetric keys across devices. The server never sees plaintext message content or channel names, but it can see routing metadata required for the system to function. Usernames are sent in plaintext during auth but stored only as a peppered hash.
