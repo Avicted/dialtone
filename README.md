@@ -1,23 +1,25 @@
 # dialtone
 
-Real-time chat backend in Go with end-to-end encryption. The server never sees plaintext messages.
+End-to-end encrypted real-time chat. The server never sees plaintext messages.
 
-## Requirements
+## Quick start
+
+### Requirements
 - Go 1.22+
 - Postgres 16+
 
-## Configuration
-Copy the example env file and update values:
+### Configure
+Copy the example env file and set required values:
 
 ```bash
 cp .env.example .env
 ```
 
-Set these required values in `.env`:
-- `DIALTONE_DB_URL`
-- `DIALTONE_USERNAME_PEPPER`
-- `DIALTONE_CHANNEL_KEY`
-- `DIALTONE_ADMIN_TOKEN`
+Required variables:
+- DIALTONE_DB_URL
+- DIALTONE_USERNAME_PEPPER
+- DIALTONE_CHANNEL_KEY
+- DIALTONE_ADMIN_TOKEN
 
 Generate secrets:
 
@@ -25,10 +27,9 @@ Generate secrets:
 openssl rand -base64 32
 ```
 
-Use that output for both `DIALTONE_USERNAME_PEPPER` and `DIALTONE_CHANNEL_KEY`. Set a strong random value for `DIALTONE_ADMIN_TOKEN`.
+Use the output for DIALTONE_USERNAME_PEPPER and DIALTONE_CHANNEL_KEY. Set a strong random value for DIALTONE_ADMIN_TOKEN.
 
-## Run (development)
-Load env vars, then start the server:
+### Run server
 
 ```bash
 set -a
@@ -38,66 +39,27 @@ set +a
 go run ./cmd/server
 ```
 
-## Docker Compose (Postgres only)
-Start Postgres using the env file:
+### Create initial invite
 
 ```bash
-docker compose up -d
+curl -s -X POST http://localhost:8080/server/invites \
+  -H "X-Admin-Token: $DIALTONE_ADMIN_TOKEN"
 ```
 
-For local development outside of compose, `DIALTONE_DB_URL` should point at `localhost` instead of `postgres`.
+The response includes token and expires_at. Use the token when registering a new user.
 
-## Create the initial invite
-Invites are created by `POST /server/invites` and require the admin token in the `X-Admin-Token` header.
+## Reverse proxy
+You can place a reverse proxy (for example HAProxy) in front of the server to perform SSL/TLS termination. Keep the backend connection private and protected.
 
-If the server runs in a container named `dialup`:
+## Client storage
+Local client keys are stored under ~/.config/dialtone on Linux and %APPDATA%\\dialtone on Windows. The keystore is encrypted with a passphrase you enter at login.
 
-```bash
-docker exec -it dialup sh -lc 'curl -s -X POST http://localhost:8080/server/invites -H "X-Admin-Token: $DIALTONE_ADMIN_TOKEN"'
-```
-
-If you are calling the server directly:
-
-```bash
-curl -s -X POST https://your-domain/server/invites -H "X-Admin-Token: $DIALTONE_ADMIN_TOKEN"
-```
-
-The response includes `token` and `expires_at`. Use the token when registering a new user.
-
-## Encryption at rest
-The server encrypts sensitive fields before storing them in Postgres. A channel key is required and must be provided via `DIALTONE_CHANNEL_KEY` as a base64-encoded 32-byte value.
-
-Encrypted fields:
-- users.username
-- devices.public_key
-- broadcast_messages.sender_name
-- broadcast_messages.sender_public_key
-
-Lookup behavior:
-- The application stores a keyed hash of usernames and device public keys for equality lookups.
-- Existing plaintext rows are encrypted lazily the first time they are read.
-
-## Project layout
-- cmd/server: server entrypoint
-- cmd/client: terminal client
-- internal/auth: authentication
-- internal/crypto: encryption primitives and key exchange
-- internal/httpapi: REST handlers
-- internal/ws: WebSocket hub and client handling
-- internal/storage: data persistence interfaces and implementations
-- internal/user: user domain
-- internal/message: message domain
-
-## Client keystore
-The client stores device, channel, and directory keys under `~/.config/dialtone`. These files are encrypted with a passphrase you enter at login. Keep the passphrase consistent across runs; if it is lost, the local keys cannot be recovered.
-
-## API documentation
-See [docs/API.md](docs/API.md).
+## Documentation
+- [API](docs/API.md)
+- [Encryption flow](docs/ENCRYPTION_FLOW.md)
 
 ## Database diagram
 ![docs/dialtone-db-diagram.png](docs/dialtone-db-diagram.png)
 
-## Security constraints
-- TLS for all transport
-- Message content must be encrypted before reaching the server
-- Use only Go standard library crypto packages
+## License
+MIT

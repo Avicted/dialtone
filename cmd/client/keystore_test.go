@@ -46,6 +46,41 @@ func TestLoadOrCreateKeyPair(t *testing.T) {
 	}
 }
 
+func TestKeystoreEncryptedStoredInConfigDir(t *testing.T) {
+	configDir := setTestConfigDir(t)
+	passphrase := "passphrase123"
+
+	kp, err := loadOrCreateKeyPair(passphrase)
+	if err != nil {
+		t.Fatalf("loadOrCreateKeyPair: %v", err)
+	}
+
+	path, err := deviceKeyPath()
+	if err != nil {
+		t.Fatalf("deviceKeyPath: %v", err)
+	}
+	expectedPath := filepath.Join(configDir, "dialtone", "device_key.json")
+	if path != expectedPath {
+		t.Fatalf("unexpected path: %q", path)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read keystore: %v", err)
+	}
+	var stored storedKey
+	wasEncrypted, err := decryptKeystoreJSON(passphrase, data, &stored)
+	if err != nil {
+		t.Fatalf("decryptKeystoreJSON: %v", err)
+	}
+	if !wasEncrypted {
+		t.Fatalf("expected encrypted keystore")
+	}
+	if stored.PrivateKey != crypto.PrivateKeyToBase64(kp.Private) {
+		t.Fatalf("unexpected private key payload")
+	}
+}
+
 func TestChannelKeysSaveLoad(t *testing.T) {
 	setTestConfigDir(t)
 	key := make([]byte, crypto.KeySize)
