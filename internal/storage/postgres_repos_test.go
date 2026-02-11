@@ -50,6 +50,7 @@ func setupPostgresStore(t *testing.T) (*PostgresStore, func()) {
 		t.Fatalf("postgres port: %v", err)
 	}
 	conn := fmt.Sprintf("postgres://dialtone:dialtone@%s:%s/dialtone?sslmode=disable", host, port.Port())
+	waitForPostgres(t, conn)
 
 	store, err := NewPostgresStore(ctx, conn)
 	if err != nil {

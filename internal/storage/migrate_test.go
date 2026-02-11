@@ -46,6 +46,7 @@ func setupPostgresDB(t *testing.T) (*sql.DB, func()) {
 		t.Fatalf("postgres port: %v", err)
 	}
 	conn := fmt.Sprintf("postgres://dialtone:dialtone@%s:%s/dialtone?sslmode=disable", host, port.Port())
+	waitForPostgres(t, conn)
 
 	db, err := sql.Open("pgx", conn)
 	if err != nil {

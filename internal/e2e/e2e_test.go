@@ -3,6 +3,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -304,9 +305,31 @@ func startPostgres(t *testing.T, ctx context.Context) (string, func()) {
 		t.Fatalf("postgres port: %v", err)
 	}
 	conn := fmt.Sprintf("postgres://dialtone:dialtone@%s:%s/dialtone?sslmode=disable", host, port.Port())
+	waitForPostgres(t, conn)
 
 	return conn, func() {
 		_ = container.Terminate(context.Background())
+	}
+}
+
+func waitForPostgres(t *testing.T, conn string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		db, err := sql.Open("pgx", conn)
+		if err == nil {
+			err = db.PingContext(context.Background())
+		}
+		if db != nil {
+			_ = db.Close()
+		}
+		if err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("wait for postgres: %v", err)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 }
 
