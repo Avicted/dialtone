@@ -61,6 +61,7 @@ type chatModel struct {
 	auth                  *AuthResponse
 	kp                    *crypto.KeyPair
 	keystorePassphrase    string
+	wsConnect             func(serverURL, token string) (*WSClient, error)
 	ws                    *WSClient
 	wsCh                  chan ServerMessage
 	messages              []chatMessage
@@ -139,6 +140,7 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, keysto
 		auth:                 auth,
 		kp:                   kp,
 		keystorePassphrase:   keystorePassphrase,
+		wsConnect:            ConnectWS,
 		viewport:             vp,
 		input:                input,
 		width:                width,
@@ -185,7 +187,11 @@ func (m chatModel) connectWS() tea.Cmd {
 	serverURL := m.api.serverURL
 	token := m.auth.Token
 	return func() tea.Msg {
-		ws, err := ConnectWS(serverURL, token)
+		connector := m.wsConnect
+		if connector == nil {
+			return wsErrorMsg{err: fmt.Errorf("missing websocket connector")}
+		}
+		ws, err := connector(serverURL, token)
 		if err != nil {
 			return wsErrorMsg{err: err}
 		}

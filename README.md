@@ -94,6 +94,9 @@ The client stores device, channel, and directory keys under `~/.config/dialtone`
 ## API documentation
 See [docs/API.md](docs/API.md).
 
+## Database diagram
+![docs/dialtone-db-diagram.png](docs/dialtone-db-diagram.png)
+
 ## Security constraints
 - TLS for all transport
 - Message content must be encrypted before reaching the server

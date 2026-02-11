@@ -149,3 +149,32 @@ func TestRootModelUpdateAuthErrorMsg(t *testing.T) {
 		t.Fatalf("expected error message")
 	}
 }
+
+func TestRootModelInit(t *testing.T) {
+	api := &APIClient{serverURL: "http://server", httpClient: http.DefaultClient}
+	m := newRootModel(api)
+	if cmd := m.Init(); cmd == nil {
+		t.Fatalf("expected init command")
+	}
+}
+
+func TestRootModelViewChat(t *testing.T) {
+	api := &APIClient{serverURL: "http://server", httpClient: http.DefaultClient}
+	m := newRootModel(api)
+	m.state = stateChat
+	m.chat = newChatForTest(t, api)
+	if view := m.View(); view == "" {
+		t.Fatalf("expected chat view")
+	}
+}
+
+func TestRootModelAuthSuccessSavesServerHistory(t *testing.T) {
+	setTestConfigDir(t)
+	api := &APIClient{serverURL: "http://server", httpClient: http.DefaultClient}
+	m := newRootModel(api)
+	m.login.serverInput.SetValue("http://server")
+	_, _ = m.Update(authSuccessMsg{auth: &AuthResponse{Username: "alice", UserID: "user"}, kp: newTestKeyPair(t)})
+	if history := loadServerHistory(); len(history) == 0 {
+		t.Fatalf("expected server history")
+	}
+}
