@@ -335,6 +335,58 @@ Requires `Authorization: Bearer <token>` header.
 }
 ```
 
+`voice_join`
+
+```json
+{
+  "type": "voice_join",
+  "channel_id": "string"
+}
+```
+
+`voice_leave`
+
+```json
+{
+  "type": "voice_leave",
+  "channel_id": "string"
+}
+```
+
+`webrtc_offer`
+
+```json
+{
+  "type": "webrtc_offer",
+  "channel_id": "string",
+  "recipient": "string",
+  "sdp": "string"
+}
+```
+
+`webrtc_answer`
+
+```json
+{
+  "type": "webrtc_answer",
+  "channel_id": "string",
+  "recipient": "string",
+  "sdp": "string"
+}
+```
+
+`ice_candidate`
+
+```json
+{
+  "type": "ice_candidate",
+  "channel_id": "string",
+  "recipient": "string",
+  "candidate": "string"
+}
+```
+```
+
 ### Server -> Client events
 
 `channel.message.new`
@@ -364,6 +416,57 @@ Requires `Authorization: Bearer <token>` header.
 {
   "type": "channel.deleted",
   "channel_id": "string"
+}
+```
+
+`voice_join`
+```json
+{
+  "type": "voice_join",
+  "channel_id": "string",
+  "sender": "string"
+}
+```
+
+`voice_leave`
+```json
+{
+  "type": "voice_leave",
+  "channel_id": "string",
+  "sender": "string"
+}
+```
+
+`webrtc_offer`
+```json
+{
+  "type": "webrtc_offer",
+  "channel_id": "string",
+  "sender": "string",
+  "recipient": "string",
+  "sdp": "string"
+}
+```
+
+`webrtc_answer`
+```json
+{
+  "type": "webrtc_answer",
+  "channel_id": "string",
+  "sender": "string",
+  "recipient": "string",
+  "sdp": "string"
+}
+```
+
+`ice_candidate`
+```json
+{
+  "type": "ice_candidate",
+  "channel_id": "string",
+  "sender": "string",
+  "recipient": "string",
+  "candidate": "string"
 }
 ```
 

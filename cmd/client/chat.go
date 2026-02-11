@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Avicted/dialtone/internal/crypto"
+	"github.com/Avicted/dialtone/internal/ipc"
 )
 
 const (
@@ -47,6 +48,7 @@ type userEntry struct {
 	Online bool
 	Known  bool
 	Admin  bool
+	Speak  bool
 }
 
 type sidebarMode int
@@ -64,6 +66,18 @@ type chatModel struct {
 	wsConnect             func(serverURL, token string) (*WSClient, error)
 	ws                    *WSClient
 	wsCh                  chan ServerMessage
+	voiceIPCAddr          string
+	voiceIPC              *voiceIPC
+	voiceRoom             string
+	voiceCh               chan ipc.Message
+	voiceSpeaking         map[string]bool
+	voiceAutoStart        bool
+	voicedPath            string
+	voiceAutoStarting     bool
+	voicePendingCmd       *ipc.Message
+	voicePendingRoom      string
+	voicePendingNotice    string
+	voiceProc             *voiceAutoProcess
 	messages              []chatMessage
 	channels              map[string]channelInfo
 	channelMsgs           map[string][]chatMessage
@@ -90,6 +104,7 @@ type chatModel struct {
 	height                int
 	channelRefreshNeeded  bool
 	channelRefreshRetries int
+	voiceReconnectAttempt int
 }
 
 type wsConnectedMsg struct {
@@ -101,9 +116,18 @@ type wsMessageMsg ServerMessage
 
 type wsErrorMsg struct{ err error }
 
+type voiceIPCConnectedMsg struct{ ch chan ipc.Message }
+type voiceReconnectTick struct{}
+
+type voiceIPCMsg ipc.Message
+
+type voiceIPCErrorMsg struct{ err error }
+
 type presenceTick struct{}
 
 type shareTick struct{}
+
+type voicePingTick struct{}
 
 type shareKeysMsg struct{ err error }
 
@@ -121,7 +145,7 @@ type channelRefreshTick struct{}
 
 var errDirectoryKeyPending = fmt.Errorf("directory key pending")
 
-func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, keystorePassphrase string, width, height int) chatModel {
+func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, keystorePassphrase string, width, height int, voiceIPCAddr string) chatModel {
 	input := textinput.New()
 	input.Placeholder = "type a message..."
 	input.CharLimit = 16384
@@ -141,6 +165,9 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, keysto
 		kp:                   kp,
 		keystorePassphrase:   keystorePassphrase,
 		wsConnect:            ConnectWS,
+		voiceIPCAddr:         voiceIPCAddr,
+		voiceIPC:             newVoiceIPC(voiceIPCAddr),
+		voiceSpeaking:        make(map[string]bool),
 		viewport:             vp,
 		input:                input,
 		width:                width,
@@ -211,6 +238,27 @@ func waitForWSMsg(ch <-chan ServerMessage) tea.Cmd {
 	}
 }
 
+func waitForVoiceMsg(ch <-chan ipc.Message) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return voiceIPCErrorMsg{err: fmt.Errorf("voice daemon disconnected")}
+		}
+		return voiceIPCMsg(msg)
+	}
+}
+
+func (m chatModel) connectVoiceIPC() tea.Cmd {
+	if m.voiceIPC == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ch := make(chan ipc.Message, 16)
+		go m.voiceIPC.readLoop(ch)
+		return voiceIPCConnectedMsg{ch: ch}
+	}
+}
+
 func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -242,7 +290,8 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		switch msg.String() {
 		case "enter":
 			if m.connected {
-				m.sendCurrentMessage()
+				cmd := m.sendCurrentMessage()
+				return m, cmd
 			}
 			return m, nil
 		case "ctrl+h":
@@ -315,6 +364,69 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		m.errMsg = msg.err.Error()
 		return m, nil
 
+	case voiceIPCConnectedMsg:
+		m.voiceReconnectAttempt = 0
+		m.voiceCh = msg.ch
+		m.voiceAutoStarting = false
+		if m.auth != nil && m.auth.UserID != "" && m.voiceIPC != nil {
+			if err := m.voiceIPC.send(ipc.Message{Cmd: ipc.CommandIdentify, User: m.auth.UserID}); err != nil {
+				m.appendSystemMessage(fmt.Sprintf("voice identity send failed: %v", err))
+			}
+		}
+		if m.voicePendingCmd != nil && m.voiceIPC != nil {
+			if err := m.voiceIPC.send(*m.voicePendingCmd); err != nil {
+				m.appendSystemMessage(fmt.Sprintf("voice command failed: %v", err))
+				m.voiceIPC.reset()
+				m.voiceCh = nil
+				m.clearPendingVoiceCommand()
+				m.voiceReconnectAttempt++
+				return m, m.scheduleVoiceReconnect(m.voiceReconnectAttempt)
+			}
+			if m.voicePendingCmd.Cmd == ipc.CommandVoiceJoin && m.voicePendingRoom != "" {
+				m.voiceRoom = m.voicePendingRoom
+			}
+			if m.voicePendingCmd.Cmd == ipc.CommandVoiceLeave {
+				m.voiceRoom = ""
+			}
+			if m.voicePendingNotice != "" {
+				m.appendSystemMessage(m.voicePendingNotice)
+			}
+			m.clearPendingVoiceCommand()
+		}
+		return m, tea.Batch(waitForVoiceMsg(m.voiceCh), m.scheduleVoicePing())
+
+	case voiceIPCMsg:
+		m.handleVoiceEvent(ipc.Message(msg))
+		return m, waitForVoiceMsg(m.voiceCh)
+
+	case voiceIPCErrorMsg:
+		if !m.voiceAutoStarting {
+			m.appendSystemMessage("voice daemon disconnected")
+		}
+		m.voiceCh = nil
+		if m.voiceIPC == nil {
+			return m, nil
+		}
+		m.voiceIPC.reset()
+		m.voiceReconnectAttempt++
+		return m, m.scheduleVoiceReconnect(m.voiceReconnectAttempt)
+
+	case voiceReconnectTick:
+		return m, m.connectVoiceIPC()
+
+	case voicePingTick:
+		if m.voiceIPC == nil {
+			m.voiceReconnectAttempt++
+			return m, m.scheduleVoiceReconnect(m.voiceReconnectAttempt)
+		}
+		if err := m.voiceIPC.send(ipc.Message{Cmd: ipc.CommandPing}); err != nil {
+			m.errMsg = fmt.Sprintf("voice ping failed: %v", err)
+			m.voiceIPC.reset()
+			m.voiceReconnectAttempt++
+			return m, m.scheduleVoiceReconnect(m.voiceReconnectAttempt)
+		}
+		return m, m.scheduleVoicePing()
+
 	case directorySyncMsg:
 		if msg.err != nil {
 			if !errors.Is(msg.err, errDirectoryKeyPending) {
@@ -386,32 +498,32 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 	return m, cmd
 }
 
-func (m *chatModel) sendCurrentMessage() {
+func (m *chatModel) sendCurrentMessage() tea.Cmd {
 	body := strings.TrimSpace(m.input.Value())
 	if body == "" || m.ws == nil {
-		return
+		return nil
 	}
 	if strings.HasPrefix(body, "/") {
-		m.handleCommand(body)
+		cmd := m.handleCommand(body)
 		m.input.Reset()
-		return
+		return cmd
 	}
 
 	if m.activeChannel != "" {
 		key, err := m.ensureChannelKey(m.activeChannel)
 		if err != nil {
 			m.errMsg = fmt.Sprintf("channel key: %v", err)
-			return
+			return nil
 		}
 		encryptedBody, err := encryptChannelField(key, body)
 		if err != nil {
 			m.errMsg = fmt.Sprintf("encrypt channel message: %v", err)
-			return
+			return nil
 		}
 		senderNameEnc, err := encryptChannelField(key, m.auth.Username)
 		if err != nil {
 			m.errMsg = fmt.Sprintf("encrypt sender name: %v", err)
-			return
+			return nil
 		}
 		_ = m.ws.Send(SendMessage{
 			Type:          "channel.message.send",
@@ -420,29 +532,33 @@ func (m *chatModel) sendCurrentMessage() {
 			SenderNameEnc: senderNameEnc,
 		})
 		m.input.Reset()
-		return
+		return nil
 	}
 	m.appendSystemMessage("no global chat; select a channel with the sidebar or /channel list")
+	return nil
 }
 
-func (m *chatModel) handleCommand(raw string) {
+func (m *chatModel) handleCommand(raw string) tea.Cmd {
 	parts := strings.Fields(raw)
 	if len(parts) == 0 {
-		return
+		return nil
 	}
 	cmd := strings.ToLower(parts[0])
+	if cmd == "/voice" {
+		return m.handleVoiceCommand(raw, parts)
+	}
 	if cmd == "/help" {
 		m.appendSystemMessage(m.helpText())
-		return
+		return nil
 	}
 	if cmd == "/server" {
 		if len(parts) < 2 {
 			m.appendSystemMessage(m.serverHelpText())
-			return
+			return nil
 		}
 		if !m.auth.IsAdmin {
 			m.appendSystemMessage("admin only: server invites")
-			return
+			return nil
 		}
 		action := strings.ToLower(parts[1])
 		switch action {
@@ -451,15 +567,15 @@ func (m *chatModel) handleCommand(raw string) {
 		default:
 			m.appendSystemMessage("unknown server command")
 		}
-		return
+		return nil
 	}
 	if cmd != "/channel" {
 		m.appendSystemMessage("unknown command")
-		return
+		return nil
 	}
 	if len(parts) < 2 {
 		m.appendSystemMessage(m.channelHelpText())
-		return
+		return nil
 	}
 	action := strings.ToLower(parts[1])
 
@@ -471,51 +587,199 @@ func (m *chatModel) handleCommand(raw string) {
 	case "create":
 		if !m.auth.IsAdmin {
 			m.appendSystemMessage("admin only")
-			return
+			return nil
 		}
 		if len(parts) < 3 {
 			m.appendSystemMessage("usage: /channel create <name>")
-			return
+			return nil
 		}
 		name := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
 		m.createChannel(name)
 	case "delete":
 		if !m.auth.IsAdmin {
 			m.appendSystemMessage("admin only")
-			return
+			return nil
 		}
 		if len(parts) < 3 {
 			m.appendSystemMessage("usage: /channel delete <channel_id|name>")
-			return
+			return nil
 		}
 		nameOrID := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
 		m.deleteChannel(nameOrID)
 	case "rename":
 		if !m.auth.IsAdmin {
 			m.appendSystemMessage("admin only")
-			return
+			return nil
 		}
 		remaining := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
 		if remaining == "" {
 			m.appendSystemMessage("usage: /channel rename <channel_id|name> <new name>")
-			return
+			return nil
 		}
 		bits := strings.SplitN(remaining, " ", 2)
 		if len(bits) < 2 || strings.TrimSpace(bits[1]) == "" {
 			m.appendSystemMessage("usage: /channel rename <channel_id|name> <new name>")
-			return
+			return nil
 		}
 		m.renameChannel(strings.TrimSpace(bits[0]), strings.TrimSpace(bits[1]))
 	default:
 		m.appendSystemMessage("unknown channel command")
 	}
+	return nil
 }
 
 func (m *chatModel) helpText() string {
 	if m.auth.IsAdmin {
-		return "commands: /help | /channel list | /channel create <name> | /channel rename <channel_id|name> <new name> | /channel delete <channel_id|name> | /server invite"
+		return "commands: /help | /voice join [channel] | /voice leave | /voice mute | /voice unmute | /channel list | /channel create <name> | /channel rename <channel_id|name> <new name> | /channel delete <channel_id|name> | /server invite"
 	}
-	return "commands: /help | /channel list"
+	return "commands: /help | /voice join [channel] | /voice leave | /voice mute | /voice unmute | /channel list"
+}
+
+func (m *chatModel) handleVoiceEvent(msg ipc.Message) {
+	switch msg.Event {
+	case ipc.EventVoiceReady:
+		m.appendSystemMessage("voice daemon ready")
+		if msg.Room != "" && m.voiceRoom == msg.Room {
+			m.voiceRoom = ""
+		}
+	case ipc.EventVoiceConnected:
+		if msg.Room != "" {
+			m.voiceRoom = msg.Room
+		}
+		m.appendSystemMessage("voice connected")
+	case ipc.EventUserSpeaking:
+		if msg.User == "" {
+			return
+		}
+		if m.voiceSpeaking == nil {
+			m.voiceSpeaking = make(map[string]bool)
+		}
+		m.voiceSpeaking[msg.User] = msg.Active
+	case ipc.EventError:
+		if msg.Error != "" {
+			if m.voiceAutoStarting && isVoiceIPCNotRunning(errors.New(msg.Error)) {
+				return
+			}
+			m.appendSystemMessage(fmt.Sprintf("voice error: %s", msg.Error))
+		}
+	case ipc.EventPong:
+		return
+	}
+}
+
+func (m *chatModel) handleVoiceCommand(raw string, parts []string) tea.Cmd {
+	if len(parts) < 2 {
+		m.appendSystemMessage("voice commands: /voice join [channel] | /voice leave | /voice mute | /voice unmute")
+		return nil
+	}
+	if m.voiceIPC == nil {
+		m.appendSystemMessage("voice daemon not configured")
+		return nil
+	}
+	action := strings.ToLower(parts[1])
+	switch action {
+	case "join":
+		room := ""
+		if len(parts) > 2 {
+			room = strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
+		} else {
+			room = m.activeChannel
+		}
+		if room == "" {
+			m.appendSystemMessage("usage: /voice join [channel] (or select a channel)")
+			return nil
+		}
+		resolvedID, _, ok := m.resolveChannel(room, false)
+		if !ok {
+			return nil
+		}
+		return m.dispatchVoiceCommand(
+			ipc.Message{Cmd: ipc.CommandVoiceJoin, Room: resolvedID},
+			resolvedID,
+			"voice join requested",
+			"voice join",
+		)
+	case "leave":
+		room := m.voiceRoom
+		if room == "" {
+			room = m.activeChannel
+		}
+		if room == "" {
+			m.appendSystemMessage("usage: /voice leave (no active voice room)")
+			return nil
+		}
+		return m.dispatchVoiceCommand(
+			ipc.Message{Cmd: ipc.CommandVoiceLeave, Room: room},
+			"",
+			"voice leave requested",
+			"voice leave",
+		)
+	case "mute":
+		return m.dispatchVoiceCommand(
+			ipc.Message{Cmd: ipc.CommandMute},
+			"",
+			"voice mute requested",
+			"voice mute",
+		)
+	case "unmute":
+		return m.dispatchVoiceCommand(
+			ipc.Message{Cmd: ipc.CommandUnmute},
+			"",
+			"voice unmute requested",
+			"voice unmute",
+		)
+	default:
+		m.appendSystemMessage("voice commands: /voice join [channel] | /voice leave | /voice mute | /voice unmute")
+		return nil
+	}
+}
+
+func (m *chatModel) dispatchVoiceCommand(cmd ipc.Message, pendingRoom, notice, label string) tea.Cmd {
+	if m.voiceIPC == nil {
+		m.appendSystemMessage("voice daemon not configured")
+		return nil
+	}
+	if err := m.voiceIPC.send(cmd); err != nil {
+		m.voiceIPC.reset()
+		m.voiceCh = nil
+		if m.voiceAutoStart && isVoiceIPCNotRunning(err) {
+			if startErr := m.startVoiceDaemon(); startErr != nil {
+				m.appendSystemMessage(fmt.Sprintf("voice auto-start failed: %v", startErr))
+				return nil
+			}
+			m.queueVoiceCommand(cmd, pendingRoom, notice)
+			m.appendSystemMessage("starting voice daemon...")
+			m.voiceReconnectAttempt = 0
+			return m.connectVoiceIPC()
+		}
+		m.appendSystemMessage(fmt.Sprintf("%s failed: %v", label, err))
+		return nil
+	}
+	if cmd.Cmd == ipc.CommandVoiceJoin && pendingRoom != "" {
+		m.voiceRoom = pendingRoom
+	}
+	if cmd.Cmd == ipc.CommandVoiceLeave {
+		m.voiceRoom = ""
+	}
+	if notice != "" {
+		m.appendSystemMessage(notice)
+	}
+	if m.voiceCh == nil {
+		return m.connectVoiceIPC()
+	}
+	return nil
+}
+
+func (m *chatModel) queueVoiceCommand(cmd ipc.Message, pendingRoom, notice string) {
+	m.voicePendingCmd = &cmd
+	m.voicePendingRoom = pendingRoom
+	m.voicePendingNotice = notice
+}
+
+func (m *chatModel) clearPendingVoiceCommand() {
+	m.voicePendingCmd = nil
+	m.voicePendingRoom = ""
+	m.voicePendingNotice = ""
 }
 
 func (m *chatModel) channelHelpText() string {
@@ -1264,6 +1528,9 @@ func (m *chatModel) renderSidebar() string {
 					if entry.Admin {
 						name = fmt.Sprintf("%s (admin)", name)
 					}
+					if entry.Speak {
+						name = fmt.Sprintf("%s *", name)
+					}
 					lines = append(lines, style.Render(fmt.Sprintf("%s %s", prefix, name)))
 				}
 			}
@@ -1289,6 +1556,9 @@ func (m *chatModel) renderSidebar() string {
 					name := formatUsername(entry.Name)
 					if entry.Admin {
 						name = fmt.Sprintf("%s (admin)", name)
+					}
+					if entry.Speak {
+						name = fmt.Sprintf("%s *", name)
 					}
 					lines = append(lines, style.Render(fmt.Sprintf("%s %s", prefix, name)))
 				}
@@ -1362,7 +1632,7 @@ func (m *chatModel) channelUserEntries(channelID string) []userEntry {
 	for id, name := range seen {
 		status, ok := m.userPresence[id]
 		admin := m.userAdmins[id]
-		entries = append(entries, userEntry{ID: id, Name: name, Online: status, Known: ok, Admin: admin})
+		entries = append(entries, userEntry{ID: id, Name: name, Online: status, Known: ok, Admin: admin, Speak: m.voiceSpeaking[id]})
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Name == entries[j].Name {
@@ -1437,7 +1707,7 @@ func (m *chatModel) allUserEntries() []userEntry {
 	for id, name := range seen {
 		status, ok := m.userPresence[id]
 		admin := m.userAdmins[id]
-		entries = append(entries, userEntry{ID: id, Name: name, Online: status, Known: ok, Admin: admin})
+		entries = append(entries, userEntry{ID: id, Name: name, Online: status, Known: ok, Admin: admin, Speak: m.voiceSpeaking[id]})
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Name == entries[j].Name {
@@ -1512,6 +1782,25 @@ func (m *chatModel) refreshPresence() {
 func (m *chatModel) schedulePresenceTick() tea.Cmd {
 	return tea.Tick(5*time.Second, func(time.Time) tea.Msg {
 		return presenceTick{}
+	})
+}
+
+func (m *chatModel) scheduleVoicePing() tea.Cmd {
+	return tea.Tick(15*time.Second, func(time.Time) tea.Msg {
+		return voicePingTick{}
+	})
+}
+
+func (m *chatModel) scheduleVoiceReconnect(attempt int) tea.Cmd {
+	if attempt < 1 {
+		attempt = 1
+	}
+	if attempt > 5 {
+		attempt = 5
+	}
+	delay := time.Duration(1<<attempt) * time.Second
+	return tea.Tick(delay, func(time.Time) tea.Msg {
+		return voiceReconnectTick{}
 	})
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -37,6 +38,8 @@ type Hub struct {
 	clients    map[*Client]struct{}
 	byDevice   map[deviceKey]*Client
 	byUser     map[user.ID]map[*Client]struct{}
+	voiceRooms map[channel.ID]map[*Client]struct{}
+	voiceRoom  map[*Client]channel.ID
 	broadcasts message.BroadcastRepository
 	devices    device.Repository
 	channels   channel.Repository
@@ -52,6 +55,8 @@ func NewHub(broadcasts message.BroadcastRepository, devices device.Repository, c
 		clients:    make(map[*Client]struct{}),
 		byDevice:   make(map[deviceKey]*Client),
 		byUser:     make(map[user.ID]map[*Client]struct{}),
+		voiceRooms: make(map[channel.ID]map[*Client]struct{}),
+		voiceRoom:  make(map[*Client]channel.ID),
 		broadcasts: broadcasts,
 		devices:    devices,
 		channels:   channels,
@@ -84,6 +89,7 @@ func (h *Hub) Run(ctx context.Context) {
 			}
 			delete(h.clients, c)
 			delete(h.byDevice, c.deviceKey())
+			h.removeFromVoiceRoomLocked(c)
 			if clients := h.byUser[c.userID]; clients != nil {
 				delete(clients, c)
 				if len(clients) == 0 {
@@ -304,6 +310,8 @@ type inboundMessage struct {
 	PublicKey     string            `json:"public_key"`
 	SenderNameEnc string            `json:"sender_name_enc,omitempty"`
 	Envelopes     map[string]string `json:"key_envelopes,omitempty"`
+	SDP           string            `json:"sdp,omitempty"`
+	Candidate     string            `json:"candidate,omitempty"`
 }
 
 type outboundMessage struct {
@@ -325,6 +333,15 @@ type errorEvent struct {
 	Type    string `json:"type"`
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+type voiceSignalEvent struct {
+	Type      string     `json:"type"`
+	ChannelID channel.ID `json:"channel_id"`
+	Sender    user.ID    `json:"sender"`
+	Recipient user.ID    `json:"recipient,omitempty"`
+	SDP       string     `json:"sdp,omitempty"`
+	Candidate string     `json:"candidate,omitempty"`
 }
 
 type tokenValidator interface {
@@ -384,6 +401,22 @@ func decodeIncoming(data []byte) (inboundMessage, error) {
 		if strings.TrimSpace(msg.SenderNameEnc) == "" {
 			return inboundMessage{}, errors.New("sender_name_enc is required")
 		}
+	case "voice_join":
+		if msg.ChannelID == "" {
+			return inboundMessage{}, errors.New("channel_id is required")
+		}
+	case "voice_leave":
+		if msg.ChannelID == "" {
+			return inboundMessage{}, errors.New("channel_id is required")
+		}
+	case "webrtc_offer", "webrtc_answer":
+		if msg.ChannelID == "" || strings.TrimSpace(msg.SDP) == "" || msg.Recipient == "" {
+			return inboundMessage{}, errors.New("channel_id, recipient, and sdp are required")
+		}
+	case "ice_candidate":
+		if msg.ChannelID == "" || strings.TrimSpace(msg.Candidate) == "" || msg.Recipient == "" {
+			return inboundMessage{}, errors.New("channel_id, recipient, and candidate are required")
+		}
 	}
 	return msg, nil
 }
@@ -400,9 +433,168 @@ func (h *Hub) handleIncoming(ctx context.Context, incoming incomingMessage) {
 		}
 	case "channel.message.send":
 		h.handleChannelMessage(ctx, incoming.client, incoming.msg)
+	case "voice_join":
+		h.handleVoiceJoin(ctx, incoming.client, incoming.msg)
+	case "voice_leave":
+		h.handleVoiceLeave(incoming.client, incoming.msg)
+	case "webrtc_offer", "webrtc_answer", "ice_candidate":
+		h.handleVoiceSignal(incoming.client, incoming.msg)
 	default:
 		incoming.client.sendError("unsupported_type", "unsupported message type")
 	}
+}
+
+func (h *Hub) handleVoiceJoin(ctx context.Context, client *Client, msg inboundMessage) {
+	if client == nil || client.userID == "" {
+		return
+	}
+	log.Printf("ws.voice_join channel=%s", msg.ChannelID)
+	if msg.ChannelID == "" {
+		client.sendError("invalid_message", "channel_id is required")
+		return
+	}
+	if h.channels == nil {
+		client.sendError("server_error", "channel storage unavailable")
+		return
+	}
+	if _, err := h.channels.GetChannel(ctx, msg.ChannelID); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			client.sendError("channel_not_found", "channel does not exist")
+			return
+		}
+		securelog.Error("ws.getChannel", err)
+		client.sendError("server_error", "failed to resolve channel")
+		return
+	}
+
+	h.mu.Lock()
+	h.removeFromVoiceRoomLocked(client)
+	clients := h.voiceRooms[msg.ChannelID]
+	if clients == nil {
+		clients = make(map[*Client]struct{})
+		h.voiceRooms[msg.ChannelID] = clients
+	}
+	clients[client] = struct{}{}
+	h.voiceRoom[client] = msg.ChannelID
+	peers := make([]*Client, 0, len(clients))
+	for peer := range clients {
+		peers = append(peers, peer)
+	}
+	h.mu.Unlock()
+
+	event := voiceSignalEvent{
+		Type:      "voice_join",
+		ChannelID: msg.ChannelID,
+		Sender:    client.userID,
+	}
+	for _, peer := range peers {
+		peer.sendEvent(event)
+	}
+}
+
+func (h *Hub) handleVoiceLeave(client *Client, msg inboundMessage) {
+	if client == nil || client.userID == "" {
+		return
+	}
+	log.Printf("ws.voice_leave channel=%s", msg.ChannelID)
+	if msg.ChannelID == "" {
+		client.sendError("invalid_message", "channel_id is required")
+		return
+	}
+
+	var peers []*Client
+	h.mu.Lock()
+	roomID, ok := h.voiceRoom[client]
+	if ok && roomID == msg.ChannelID {
+		peers = h.removeFromVoiceRoomLocked(client)
+	}
+	h.mu.Unlock()
+
+	if len(peers) == 0 {
+		return
+	}
+	event := voiceSignalEvent{
+		Type:      "voice_leave",
+		ChannelID: msg.ChannelID,
+		Sender:    client.userID,
+	}
+	for _, peer := range peers {
+		peer.sendEvent(event)
+	}
+}
+
+func (h *Hub) handleVoiceSignal(client *Client, msg inboundMessage) {
+	if client == nil || client.userID == "" {
+		return
+	}
+	log.Printf("ws.voice_signal type=%s channel=%s", msg.Type, msg.ChannelID)
+	if msg.ChannelID == "" {
+		client.sendError("invalid_message", "channel_id is required")
+		return
+	}
+
+	h.mu.RLock()
+	roomID := h.voiceRoom[client]
+	clients := h.voiceRooms[msg.ChannelID]
+	var peers []*Client
+	if roomID == msg.ChannelID {
+		if msg.Recipient != "" {
+			if targets := h.byUser[msg.Recipient]; targets != nil {
+				for peer := range targets {
+					if peer != client {
+						if _, ok := clients[peer]; ok {
+							peers = append(peers, peer)
+						}
+					}
+				}
+			}
+		} else {
+			for peer := range clients {
+				if peer != client {
+					peers = append(peers, peer)
+				}
+			}
+		}
+	}
+	h.mu.RUnlock()
+	if roomID != msg.ChannelID {
+		client.sendError("voice_not_joined", "join voice before signaling")
+		return
+	}
+
+	event := voiceSignalEvent{
+		Type:      msg.Type,
+		ChannelID: msg.ChannelID,
+		Sender:    client.userID,
+		Recipient: msg.Recipient,
+		SDP:       msg.SDP,
+		Candidate: msg.Candidate,
+	}
+	for _, peer := range peers {
+		peer.sendEvent(event)
+	}
+}
+
+func (h *Hub) removeFromVoiceRoomLocked(client *Client) []*Client {
+	roomID, ok := h.voiceRoom[client]
+	if !ok {
+		return nil
+	}
+	clients := h.voiceRooms[roomID]
+	delete(h.voiceRoom, client)
+	if clients != nil {
+		delete(clients, client)
+		if len(clients) == 0 {
+			delete(h.voiceRooms, roomID)
+			return nil
+		}
+		peers := make([]*Client, 0, len(clients))
+		for peer := range clients {
+			peers = append(peers, peer)
+		}
+		return peers
+	}
+	return nil
 }
 
 func (h *Hub) handleBroadcast(ctx context.Context, sender *Client, msg inboundMessage) {

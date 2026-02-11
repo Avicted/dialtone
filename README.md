@@ -46,6 +46,45 @@ export $(grep -v '^#' .env | xargs)
 go run ./cmd/server
 ```
 
+## Voice (TURN/STUN)
+
+Dialtone voice uses WebRTC and benefits from TURN for NAT traversal. A coturn service is included in docker-compose for local testing.
+
+### Voice requirements
+
+- CGO enabled (`CGO_ENABLED=1`)
+- libopus installed (for Opus encoding)
+- An audio backend (ALSA/PulseAudio/PipeWire on Linux; WASAPI on Windows)
+
+### Configure TURN
+
+Update `.env` with TURN credentials:
+
+```
+TURN_USER=turn
+TURN_PASS=turnpass
+TURN_REALM=dialtone
+```
+
+Start coturn:
+
+```bash
+docker compose up -d coturn
+```
+
+Run the voice daemon with TURN (and optional STUN) settings:
+
+```bash
+go run ./cmd/voiced \
+  --server http://localhost:8080 \
+  --token <dialtone-token> \
+  --turn localhost:3478 \
+  --turn-user $TURN_USER \
+  --turn-pass $TURN_PASS
+```
+
+You can also provide STUN servers with `--stun`, for example `--stun stun.l.google.com:19302`.
+
 ### Create initial invite
 
 ```bash

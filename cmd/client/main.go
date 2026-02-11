@@ -19,6 +19,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, newProgram pr
 	fs := flag.NewFlagSet("dialtone", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	serverAddr := fs.String("server", "", "dialtone server address")
+	voiceIPCAddr := fs.String("voice-ipc", defaultVoiceIPCAddr(), "voice daemon ipc socket/pipe")
+	voiceAuto := fs.Bool("voice-auto", true, "auto-start voice daemon when needed")
+	voicedPath := fs.String("voiced", "", "path to voiced binary")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -34,7 +37,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, newProgram pr
 	}
 
 	api := NewAPIClient(*serverAddr)
-	m := newRootModel(api)
+	m := newRootModel(api, *voiceIPCAddr)
+	m.voiceAutoStart = *voiceAuto
+	m.voicedPath = *voicedPath
 
 	if newProgram == nil {
 		newProgram = func(model tea.Model, options ...tea.ProgramOption) programRunner {

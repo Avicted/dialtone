@@ -13,5 +13,27 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  coturn:
+    image: coturn/coturn:4.8.0-alpine
+    restart: unless-stopped
+    env_file:
+      - .env
+    command:
+      - -n
+      - --log-file=stdout
+      - --fingerprint
+      - --lt-cred-mech
+      - --user=${TURN_USER}:${TURN_PASS}
+      - --realm=${TURN_REALM}
+      - --no-cli
+      - --no-tls
+      - --no-dtls
+      - --min-port=49160
+      - --max-port=49200
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "49160-49200:49160-49200/udp"
+
 volumes:
   pgdata:
