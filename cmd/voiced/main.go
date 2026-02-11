@@ -31,6 +31,8 @@ func run() error {
 	turnServers := fs.String("turn", "", "comma-separated TURN servers")
 	turnUser := fs.String("turn-user", "", "TURN username")
 	turnPass := fs.String("turn-pass", "", "TURN password")
+	vadThreshold := fs.Int64("vad-threshold", defaultVADThreshold, "voice activity threshold (lower = more sensitive)")
+	meter := fs.Bool("meter", false, "log voice input levels")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
 	}
@@ -44,13 +46,17 @@ func run() error {
 	if *ipcAddr == "" {
 		return fmt.Errorf("ipc address is required")
 	}
+	if *vadThreshold <= 0 {
+		return fmt.Errorf("vad-threshold must be > 0")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	log.Printf("starting voice daemon server=%s ipc=%s", *serverAddr, *ipcAddr)
+	log.Printf("voice config ptt=%q vad_threshold=%d meter=%v", *pttBind, *vadThreshold, *meter)
 	iceConfig := buildICEConfig(*stunServers, *turnServers, *turnUser, *turnPass)
-	daemon := newVoiceDaemon(*serverAddr, *token, *pttBind, iceConfig)
+	daemon := newVoiceDaemon(*serverAddr, *token, *pttBind, iceConfig, *vadThreshold, *meter)
 	if err := daemon.Run(ctx, *ipcAddr); err != nil {
 		return err
 	}

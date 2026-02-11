@@ -26,6 +26,9 @@ type rootModel struct {
 	voice          string
 	voiceAutoStart bool
 	voicedPath     string
+	voiceArgs      []string
+	voiceDebug     bool
+	voiceLogPath   string
 }
 
 type authSuccessMsg struct {
@@ -76,6 +79,9 @@ func (m rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.chat = newChatModel(m.api, auth.auth, auth.kp, m.login.passphrase(), m.width, m.height, m.voice)
 		m.chat.voiceAutoStart = m.voiceAutoStart
 		m.chat.voicedPath = m.voicedPath
+		m.chat.voiceArgs = m.voiceArgs
+		m.chat.voiceDebug = m.voiceDebug
+		m.chat.voiceLogPath = m.voiceLogPath
 		return m, m.chat.Init()
 	}
 

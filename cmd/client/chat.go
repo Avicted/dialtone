@@ -73,6 +73,10 @@ type chatModel struct {
 	voiceSpeaking         map[string]bool
 	voiceAutoStart        bool
 	voicedPath            string
+	voiceArgs             []string
+	voiceDebug            bool
+	voiceLogPath          string
+	voiceLogNotified      bool
 	voiceAutoStarting     bool
 	voicePendingCmd       *ipc.Message
 	voicePendingRoom      string
@@ -746,6 +750,10 @@ func (m *chatModel) dispatchVoiceCommand(cmd ipc.Message, pendingRoom, notice, l
 			if startErr := m.startVoiceDaemon(); startErr != nil {
 				m.appendSystemMessage(fmt.Sprintf("voice auto-start failed: %v", startErr))
 				return nil
+			}
+			if m.voiceLogPath != "" && !m.voiceLogNotified {
+				m.appendSystemMessage(fmt.Sprintf("voice log: %s", m.voiceLogPath))
+				m.voiceLogNotified = true
 			}
 			m.queueVoiceCommand(cmd, pendingRoom, notice)
 			m.appendSystemMessage("starting voice daemon...")

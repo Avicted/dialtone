@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	opusFrameSize = 960
-	opusMaxBytes  = 4000
-	vadThreshold  = 500
+	opusFrameSize       = 960
+	opusMaxBytes        = 4000
+	defaultVADThreshold = 500
+	meterInterval       = time.Second
 )
 
 func (d *voiceDaemon) runAudio(ctx context.Context) error {
@@ -105,14 +106,16 @@ func audioBackoff(attempt int) time.Duration {
 }
 
 func (d *voiceDaemon) updateVADFromFrame(frame []int16) bool {
-	active := isVoiceActive(frame)
+	level := voiceLevel(frame)
+	active := isVoiceActive(level, d.vadThreshold)
+	d.maybeLogMeter(level)
 	d.updateVAD(active)
 	return active
 }
 
-func isVoiceActive(frame []int16) bool {
+func voiceLevel(frame []int16) int64 {
 	if len(frame) == 0 {
-		return false
+		return 0
 	}
 	var sum int64
 	for _, sample := range frame {
@@ -122,6 +125,26 @@ func isVoiceActive(frame []int16) bool {
 			sum += int64(sample)
 		}
 	}
-	avg := sum / int64(len(frame))
-	return avg >= vadThreshold
+	return sum / int64(len(frame))
+}
+
+func isVoiceActive(level int64, threshold int64) bool {
+	return level >= threshold
+}
+
+func (d *voiceDaemon) maybeLogMeter(level int64) {
+	if !d.meter {
+		return
+	}
+	now := time.Now()
+	d.mu.Lock()
+	next := d.meterNext
+	if next.IsZero() || !now.Before(next) {
+		d.meterNext = now.Add(meterInterval)
+		threshold := d.vadThreshold
+		d.mu.Unlock()
+		log.Printf("voice meter: level=%d threshold=%d speaking=%v", level, threshold, d.isSpeaking())
+		return
+	}
+	d.mu.Unlock()
 }

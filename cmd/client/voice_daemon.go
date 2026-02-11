@@ -14,8 +14,9 @@ import (
 )
 
 type voiceAutoProcess struct {
-	cmd    *exec.Cmd
-	cancel context.CancelFunc
+	cmd     *exec.Cmd
+	cancel  context.CancelFunc
+	logFile *os.File
 }
 
 func (m *chatModel) startVoiceDaemon() error {
@@ -38,15 +39,31 @@ func (m *chatModel) startVoiceDaemon() error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	args := []string{"-server", m.api.serverURL, "-token", m.auth.Token, "-ipc", m.voiceIPCAddr}
+	if len(m.voiceArgs) > 0 {
+		args = append(args, m.voiceArgs...)
+	}
 	cmd := exec.CommandContext(ctx, path, args...)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	logFile, err := m.openVoiceLogFile()
+	if err != nil {
+		cancel()
+		return err
+	}
+	if logFile != nil {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	} else {
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+	}
 	if err := cmd.Start(); err != nil {
+		if logFile != nil {
+			_ = logFile.Close()
+		}
 		cancel()
 		return err
 	}
 
-	m.voiceProc = &voiceAutoProcess{cmd: cmd, cancel: cancel}
+	m.voiceProc = &voiceAutoProcess{cmd: cmd, cancel: cancel, logFile: logFile}
 	m.voiceAutoStarting = true
 	return nil
 }
@@ -62,7 +79,41 @@ func (m *chatModel) stopVoiceDaemon() {
 		_ = m.voiceProc.cmd.Process.Kill()
 		_, _ = m.voiceProc.cmd.Process.Wait()
 	}
+	if m.voiceProc.logFile != nil {
+		_ = m.voiceProc.logFile.Close()
+	}
+	m.voiceAutoStarting = false
 	m.voiceProc = nil
+}
+
+func (m *chatModel) openVoiceLogFile() (*os.File, error) {
+	if !m.voiceDebug && strings.TrimSpace(m.voiceLogPath) == "" {
+		return nil, nil
+	}
+	logPath, err := resolveVoiceLogPath(m.voiceLogPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	m.voiceLogPath = logPath
+	return file, nil
+}
+
+func resolveVoiceLogPath(explicit string) (string, error) {
+	if strings.TrimSpace(explicit) != "" {
+		return explicit, nil
+	}
+	dir, err := os.UserCacheDir()
+	if err != nil || dir == "" {
+		dir = os.TempDir()
+	}
+	return filepath.Join(dir, "dialtone", "voiced.log"), nil
 }
 
 func resolveVoicedPath(hint string) (string, error) {

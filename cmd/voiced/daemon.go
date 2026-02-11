@@ -9,16 +9,20 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Avicted/dialtone/internal/audio"
 	"github.com/Avicted/dialtone/internal/ipc"
 	voicewebrtc "github.com/Avicted/dialtone/internal/webrtc"
 	"github.com/pion/webrtc/v4"
 )
 
 type voiceDaemon struct {
-	serverURL string
-	token     string
-	pttBind   string
-	iceConfig webrtc.Configuration
+	serverURL    string
+	token        string
+	pttBind      string
+	iceConfig    webrtc.Configuration
+	vadThreshold int64
+	meter        bool
+	meterNext    time.Time
 
 	mu    sync.Mutex
 	room  string
@@ -26,20 +30,33 @@ type voiceDaemon struct {
 	local string
 	speak bool
 
-	ws  *WSClient
-	pc  *voicewebrtc.Manager
-	ipc *ipcServer
-	rem map[string]bool
-	sts *voiceStats
+	ws       *WSClient
+	pc       *voicewebrtc.Manager
+	ipc      *ipcServer
+	rem      map[string]bool
+	sts      *voiceStats
+	playback *audio.Playback
 }
 
-func newVoiceDaemon(serverURL, token, pttBind string, iceConfig webrtc.Configuration) *voiceDaemon {
-	return &voiceDaemon{serverURL: serverURL, token: token, pttBind: pttBind, iceConfig: iceConfig}
+func newVoiceDaemon(serverURL, token, pttBind string, iceConfig webrtc.Configuration, vadThreshold int64, meter bool) *voiceDaemon {
+	if vadThreshold <= 0 {
+		vadThreshold = defaultVADThreshold
+	}
+	return &voiceDaemon{
+		serverURL:    serverURL,
+		token:        token,
+		pttBind:      pttBind,
+		iceConfig:    iceConfig,
+		vadThreshold: vadThreshold,
+		meter:        meter,
+		meterNext:    time.Time{},
+	}
 }
 
 func (d *voiceDaemon) Run(ctx context.Context, ipcAddr string) error {
 	d.sts = newVoiceStats()
 	go d.sts.LogLoop(ctx)
+	d.startPlayback(ctx)
 
 	manager, err := voicewebrtc.NewManager(d.iceConfig, d.handleICECandidate, d.handlePeerState, d.handleRemoteTrack)
 	if err != nil {
@@ -78,6 +95,7 @@ func (d *voiceDaemon) Run(ctx context.Context, ipcAddr string) error {
 		select {
 		case <-ctx.Done():
 			d.closeWS()
+			d.closePlayback()
 			_ = server.Close()
 			return nil
 		case msg, ok := <-wsCh:
@@ -386,6 +404,37 @@ func (d *voiceDaemon) closeWS() {
 	if ws != nil {
 		ws.Close()
 	}
+}
+
+func (d *voiceDaemon) startPlayback(ctx context.Context) {
+	playback, err := audio.StartPlayback(ctx)
+	if err != nil {
+		log.Printf("audio playback failed: %v", err)
+		return
+	}
+	d.mu.Lock()
+	d.playback = playback
+	d.mu.Unlock()
+}
+
+func (d *voiceDaemon) closePlayback() {
+	d.mu.Lock()
+	playback := d.playback
+	d.playback = nil
+	d.mu.Unlock()
+	if playback != nil {
+		_ = playback.Close()
+	}
+}
+
+func (d *voiceDaemon) writePlayback(samples []int16) {
+	d.mu.Lock()
+	playback := d.playback
+	d.mu.Unlock()
+	if playback == nil || len(samples) == 0 {
+		return
+	}
+	playback.Write(samples)
 }
 
 func (d *voiceDaemon) runPTT(ctx context.Context) error {

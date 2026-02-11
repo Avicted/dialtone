@@ -83,7 +83,19 @@ go run ./cmd/voiced \
   --turn-pass $TURN_PASS
 ```
 
-You can also provide STUN servers with `--stun`, for example `--stun stun.l.google.com:19302`.
+You can also provide STUN servers with `--stun`
+
+Client auto-start (recommended for debugging):
+
+```bash
+./bin/dialtone --voice-debug --voice-ptt ""
+```
+
+- `--voice-debug` writes voiced logs to a file (see the client UI for the log path).
+- `--voice-ptt ""` disables push-to-talk and uses VAD (useful on Wayland).
+- `--voice-vad <n>` lowers or raises the VAD threshold (lower = more sensitive).
+- `--voice-meter` logs mic levels to the voiced log file once per second.
+- `--voice-stun/--voice-turn/--voice-turn-user/--voice-turn-pass` are passed to the auto-started voice daemon.
 
 ### Create initial invite
 

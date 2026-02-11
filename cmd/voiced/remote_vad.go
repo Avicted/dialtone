@@ -40,7 +40,9 @@ func (d *voiceDaemon) handleRemoteTrack(peerID string, track *webrtc.TrackRemote
 			if n <= 0 {
 				continue
 			}
-			active := isVoiceActive(pcm[:n])
+			d.writePlayback(pcm[:n])
+			level := voiceLevel(pcm[:n])
+			active := isVoiceActive(level, d.vadThreshold)
 			d.setRemoteSpeaking(peerID, active)
 		}
 	}()
