@@ -2,6 +2,9 @@
 
 This document describes the HTTP and WebSocket API so new clients can be implemented.
 
+## Database diagram
+![dialtone-db-diagram.png](dialtone-db-diagram.png)
+
 ## Base URL
 
 The server listens at `DIALTONE_LISTEN_ADDR`. Use HTTPS in production.

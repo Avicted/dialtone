@@ -58,8 +58,6 @@ Local client keys are stored under ~/.config/dialtone on Linux and %APPDATA%\\di
 - [API](docs/API.md)
 - [Encryption flow](docs/ENCRYPTION_FLOW.md)
 
-## Database diagram
-![docs/dialtone-db-diagram.png](docs/dialtone-db-diagram.png)
 
 ## License
 MIT
