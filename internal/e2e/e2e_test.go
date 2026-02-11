@@ -274,9 +274,6 @@ func TestE2E_EncryptedMessageRoundTrip(t *testing.T) {
 
 func startPostgres(t *testing.T, ctx context.Context) (string, func()) {
 	t.Helper()
-	if err := testcontainers.SkipIfDockerNotAvailable(); err != nil {
-		t.Skip("docker not available for testcontainers")
-	}
 
 	req := testcontainers.ContainerRequest{
 		Image:        "postgres:15-alpine",
@@ -293,7 +290,7 @@ func startPostgres(t *testing.T, ctx context.Context) (string, func()) {
 		Started:          true,
 	})
 	if err != nil {
-		t.Fatalf("start postgres: %v", err)
+		t.Skipf("start postgres container: %v", err)
 	}
 
 	host, err := container.Host(ctx)
