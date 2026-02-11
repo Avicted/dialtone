@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -14,6 +15,19 @@ func TestLoginValidateSubmit(t *testing.T) {
 	if msg := m.validateSubmit(); msg != "" {
 		t.Fatalf("unexpected error: %s", msg)
 	}
+
+	m.usernameInput.SetValue("a")
+	if msg := m.validateSubmit(); msg == "" {
+		t.Fatalf("expected username length error")
+	}
+
+	m.usernameInput.CharLimit = 0
+	m.usernameInput.SetValue(strings.Repeat("a", 21))
+	if msg := m.validateSubmit(); msg == "" {
+		t.Fatalf("expected username max length error")
+	}
+
+	m.usernameInput.SetValue("alice")
 
 	m.passphraseInp.SetValue("short")
 	if msg := m.validateSubmit(); msg == "" {

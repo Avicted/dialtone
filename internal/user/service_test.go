@@ -3,6 +3,7 @@ package user
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -114,6 +115,25 @@ func TestCreate_WhitespaceUsername(t *testing.T) {
 	svc, _ := newTestService()
 
 	_, err := svc.Create(context.Background(), "   ")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestCreate_ShortUsername(t *testing.T) {
+	svc, _ := newTestService()
+
+	_, err := svc.Create(context.Background(), "a")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestCreate_LongUsername(t *testing.T) {
+	svc, _ := newTestService()
+	longName := strings.Repeat("a", 21)
+
+	_, err := svc.Create(context.Background(), longName)
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput, got %v", err)
 	}

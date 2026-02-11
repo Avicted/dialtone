@@ -224,6 +224,23 @@ func TestRegister_EmptyUsername(t *testing.T) {
 	}
 }
 
+func TestRegister_ShortUsername(t *testing.T) {
+	svc := newTestService()
+	_, _, _, err := svc.Register(context.Background(), "a", "password123", "a2V5", "invite-1")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestRegister_LongUsername(t *testing.T) {
+	svc := newTestService()
+	longName := strings.Repeat("a", 21)
+	_, _, _, err := svc.Register(context.Background(), longName, "password123", "a2V5", "invite-1")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
 func TestLogin_Success(t *testing.T) {
 	svc := newTestService()
 	ctx := context.Background()
