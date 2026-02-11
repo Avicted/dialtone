@@ -19,6 +19,9 @@ import (
 
 func setupPostgresStore(t *testing.T) (*PostgresStore, func()) {
 	t.Helper()
+	if err := testcontainers.SkipIfDockerNotAvailable(); err != nil {
+		t.Skip("docker not available for testcontainers")
+	}
 
 	ctx := context.Background()
 	req := testcontainers.ContainerRequest{
