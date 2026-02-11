@@ -1,5 +1,8 @@
 # dialtone
 
+[![CI](https://github.com/Avicted/dialtone/actions/workflows/ci.yml/badge.svg)](https://github.com/Avicted/dialtone/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/badge/coverage-report%20only-lightgrey)](https://github.com/Avicted/dialtone/actions/workflows/ci.yml)
+
 End-to-end encrypted real-time chat. The server never sees plaintext messages.
 
 ## Quick start
