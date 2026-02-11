@@ -41,9 +41,7 @@ Use the output for DIALTONE_USERNAME_PEPPER and DIALTONE_CHANNEL_KEY. Set a stro
 ### Run server
 
 ```bash
-set -a
-. ./.env
-set +a
+export $(grep -v '^#' .env | xargs)
 
 go run ./cmd/server
 ```
@@ -57,9 +55,7 @@ curl -s -X POST http://localhost:8080/server/invites \
 
 #### From within the dialtone docker container using curl:
 ```bash
-set -a
-. ./.env
-set +a
+export $(grep -v '^#' .env | xargs)
 
 docker exec -it dialtone sh -c 'curl -X POST \
   -H "X-Admin-Token: $DIALTONE_ADMIN_TOKEN" \
