@@ -44,6 +44,7 @@ func (m *chatModel) startVoiceDaemon() error {
 		args = append(args, m.voiceArgs...)
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Env = voiceDaemonEnv()
 	logFile, err := m.openVoiceLogFile()
 	if err != nil {
 		cancel()
@@ -67,6 +68,21 @@ func (m *chatModel) startVoiceDaemon() error {
 	m.voiceProc = &voiceAutoProcess{cmd: cmd, cancel: cancel, logFile: logFile}
 	m.voiceAutoStarting = true
 	return nil
+}
+
+func voiceDaemonEnv() []string {
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "XDG_ACTIVATION_TOKEN=") {
+			continue
+		}
+		if strings.HasPrefix(entry, "DESKTOP_STARTUP_ID=") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
 }
 
 func (m *chatModel) stopVoiceDaemon() {

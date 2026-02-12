@@ -10,6 +10,31 @@ func TestPortalSessionHandleTokenStable(t *testing.T) {
 	}
 }
 
+func TestPortalParentWindow(t *testing.T) {
+	t.Setenv("DIALTONE_PORTAL_PARENT_WINDOW", "")
+	t.Setenv("WINDOWID", "")
+	if got := portalParentWindow(); got != "" {
+		t.Fatalf("expected empty parent window, got %q", got)
+	}
+
+	t.Setenv("DIALTONE_PORTAL_PARENT_WINDOW", "x11:0xabc")
+	t.Setenv("WINDOWID", "123")
+	if got := portalParentWindow(); got != "x11:0xabc" {
+		t.Fatalf("expected explicit parent window override, got %q", got)
+	}
+
+	t.Setenv("DIALTONE_PORTAL_PARENT_WINDOW", "")
+	t.Setenv("WINDOWID", "123")
+	if got := portalParentWindow(); got != "x11:0x7b" {
+		t.Fatalf("expected decimal WINDOWID converted to x11 handle, got %q", got)
+	}
+
+	t.Setenv("WINDOWID", "0x2A")
+	if got := portalParentWindow(); got != "x11:0x2a" {
+		t.Fatalf("expected hex WINDOWID normalized, got %q", got)
+	}
+}
+
 func TestPortalPreferredTrigger(t *testing.T) {
 	tests := []struct {
 		name    string

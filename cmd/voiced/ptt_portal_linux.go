@@ -5,6 +5,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -221,6 +223,7 @@ func bindPortalShortcutWithTrigger(ctx context.Context, conn *dbus.Conn, session
 	options := map[string]dbus.Variant{
 		"handle_token": dbus.MakeVariant(portalToken("bind")),
 	}
+	parentWindow := portalParentWindow()
 
 	var requestPath dbus.ObjectPath
 	call := conn.Object(portalService, portalObjectPath).CallWithContext(
@@ -229,7 +232,7 @@ func bindPortalShortcutWithTrigger(ctx context.Context, conn *dbus.Conn, session
 		0,
 		sessionPath,
 		shortcuts,
-		"",
+		parentWindow,
 		options,
 	)
 	if call.Err != nil {
@@ -340,6 +343,28 @@ func portalPreferredTrigger(binding string) string {
 
 func portalToken(prefix string) string {
 	return fmt.Sprintf("dialtone_%s_%d", prefix, time.Now().UnixNano())
+}
+
+func portalParentWindow() string {
+	if explicit := strings.TrimSpace(os.Getenv("DIALTONE_PORTAL_PARENT_WINDOW")); explicit != "" {
+		return explicit
+	}
+
+	windowID := strings.TrimSpace(os.Getenv("WINDOWID"))
+	if windowID == "" {
+		return ""
+	}
+	if strings.Contains(windowID, ":") {
+		return windowID
+	}
+	if strings.HasPrefix(windowID, "0x") || strings.HasPrefix(windowID, "0X") {
+		return "x11:" + strings.ToLower(windowID)
+	}
+	decimalID, err := strconv.ParseUint(windowID, 10, 64)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("x11:0x%x", decimalID)
 }
 
 type portalShortcutSpec struct {
