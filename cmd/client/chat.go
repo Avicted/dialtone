@@ -1525,25 +1525,18 @@ func (m *chatModel) renderSidebar() string {
 		lines = append(lines, labelStyle.Render("(none)"))
 	} else {
 		for _, entry := range users {
-			prefix := "?"
-			style := labelStyle
-			if entry.Known {
-				if entry.Online {
-					prefix = "+"
-					style = sidebarOnlineStyle
-				} else {
-					prefix = "-"
-					style = sidebarOfflineStyle
-				}
+			style := sidebarOfflineStyle
+			if entry.Known && entry.Online {
+				style = sidebarOnlineStyle
 			}
 			name := formatUsername(entry.Name)
 			if entry.Admin {
 				name = fmt.Sprintf("%s (admin)", name)
 			}
 			if entry.Speak {
-				name = fmt.Sprintf("%s *", name)
+				name = fmt.Sprintf("%s +", name)
 			}
-			lines = append(lines, style.Render(fmt.Sprintf("%s %s", prefix, name)))
+			lines = append(lines, style.Render(name))
 		}
 	}
 

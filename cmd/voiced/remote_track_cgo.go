@@ -4,6 +4,7 @@ package main
 
 import (
 	"log"
+	"time"
 
 	"github.com/Avicted/dialtone/internal/audio"
 	"github.com/hraban/opus"
@@ -11,6 +12,7 @@ import (
 )
 
 const maxRemoteFrameSize = opusFrameSize * 6
+const remoteSpeakingTimeout = 600 * time.Millisecond
 
 func (d *voiceDaemon) handleRemoteTrack(peerID string, track *webrtc.TrackRemote) {
 	if track == nil || track.Kind() != webrtc.RTPCodecTypeAudio {
@@ -23,10 +25,15 @@ func (d *voiceDaemon) handleRemoteTrack(peerID string, track *webrtc.TrackRemote
 	}
 
 	go func() {
+		done := make(chan struct{})
+		pulse := make(chan struct{}, 1)
+		go d.trackRemoteSpeaking(peerID, pulse, done)
+
 		pcm := make([]int16, maxRemoteFrameSize)
 		for {
 			pkt, _, err := track.ReadRTP()
 			if err != nil {
+				close(done)
 				d.setRemoteSpeaking(peerID, false)
 				return
 			}
@@ -42,9 +49,41 @@ func (d *voiceDaemon) handleRemoteTrack(peerID string, track *webrtc.TrackRemote
 				continue
 			}
 			d.writePlayback(pcm[:n])
-			level := voiceLevel(pcm[:n])
-			active := isVoiceActive(level, d.vadThreshold)
-			d.setRemoteSpeaking(peerID, active)
+			select {
+			case pulse <- struct{}{}:
+			default:
+			}
 		}
 	}()
+}
+
+func (d *voiceDaemon) trackRemoteSpeaking(peerID string, pulse <-chan struct{}, done <-chan struct{}) {
+	timer := time.NewTimer(remoteSpeakingTimeout)
+	defer timer.Stop()
+
+	active := false
+	for {
+		select {
+		case <-done:
+			return
+		case <-pulse:
+			if !active {
+				d.setRemoteSpeaking(peerID, true)
+				active = true
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(remoteSpeakingTimeout)
+		case <-timer.C:
+			if active {
+				d.setRemoteSpeaking(peerID, false)
+				active = false
+			}
+			timer.Reset(remoteSpeakingTimeout)
+		}
+	}
 }
