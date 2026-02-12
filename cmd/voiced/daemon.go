@@ -252,6 +252,8 @@ func (d *voiceDaemon) handleWSMessage(msg VoiceSignal) {
 			return
 		}
 		d.setVoiceMembersForRoom(msg.ChannelID, msg.Users)
+	case "voice.presence", "voice.presence.snapshot":
+		return
 	case "webrtc_offer":
 		if msg.Sender == "" || msg.SDP == "" || d.pc == nil {
 			return

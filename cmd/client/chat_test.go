@@ -314,6 +314,7 @@ func TestChatModelRenderSidebarAndSelection(t *testing.T) {
 	m.activeChannel = "a"
 	m.voiceRoom = "b"
 	m.resetVoiceMembersForRoom("b")
+	m.voiceSpeaking[m.auth.UserID] = true
 	m.channelUnread["b"] = 2
 	out := m.renderSidebar()
 	if !strings.Contains(out, "Channels") || !strings.Contains(out, "Users") {
@@ -331,14 +332,25 @@ func TestChatModelRenderSidebarAndSelection(t *testing.T) {
 	if !strings.Contains(out, "♪ beta") {
 		t.Fatalf("expected voice marker on joined channel")
 	}
+	if !strings.Contains(out, "+ <"+m.auth.Username+">") {
+		t.Fatalf("expected speaking marker in in-voice section")
+	}
 
 	m.userNames["user-1"] = "alice"
 	m.userAdmins["user-1"] = true
 	m.userPresence["user-1"] = true
+	m.voiceSpeaking["user-1"] = true
 	m.channelMsgs["a"] = []chatMessage{{sender: "user-1", senderName: "alice"}}
 	out = m.renderSidebar()
 	if !strings.Contains(out, "admin") || !strings.Contains(out, "alpha") {
 		t.Fatalf("expected admin label")
+	}
+	usersIdx := strings.Index(out, "Users")
+	if usersIdx == -1 {
+		t.Fatalf("expected users section")
+	}
+	if strings.Contains(out[usersIdx:], "+ <alice>") {
+		t.Fatalf("did not expect speaking marker in users section")
 	}
 }
 
@@ -823,6 +835,31 @@ func TestChatModelHandleVoiceMembersEvent(t *testing.T) {
 	out := m.renderSidebar()
 	if !strings.Contains(out, "In Voice") || !strings.Contains(out, "(you)") {
 		t.Fatalf("expected in-voice roster rendering")
+	}
+}
+
+func TestChatModelRenderSidebarServerVoicePresence(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+	m.userNames["user-2"] = "bobross"
+	m.userPresence["user-2"] = true
+
+	m.handleServerMessage(ServerMessage{
+		Type:       "voice.presence.snapshot",
+		VoiceRooms: map[string][]string{"ch-1": {"user-2"}},
+	})
+	out := m.renderSidebar()
+	if !strings.Contains(out, "In Voice") || !strings.Contains(out, "general") || !strings.Contains(out, "<bobross>") {
+		t.Fatalf("expected server voice presence in sidebar")
+	}
+	if strings.Contains(out, "(not connected)") {
+		t.Fatalf("unexpected disconnected placeholder when server presence exists")
+	}
+
+	m.handleServerMessage(ServerMessage{Type: "voice.presence", ChannelID: "ch-1", Sender: "user-2", Active: false})
+	out = m.renderSidebar()
+	if strings.Contains(out, "<bobross>") {
+		t.Fatalf("expected bobross removed after inactive update")
 	}
 }
 

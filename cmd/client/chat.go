@@ -64,6 +64,7 @@ type chatModel struct {
 	voiceRoom             string
 	voiceCh               chan ipc.Message
 	voiceMembers          map[string]bool
+	serverVoiceRooms      map[string]map[string]bool
 	voiceSpeaking         map[string]bool
 	voiceAutoStart        bool
 	voicedPath            string
@@ -165,6 +166,7 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, keysto
 		voiceIPCAddr:         voiceIPCAddr,
 		voiceIPC:             newVoiceIPC(voiceIPCAddr),
 		voiceMembers:         make(map[string]bool),
+		serverVoiceRooms:     make(map[string]map[string]bool),
 		voiceSpeaking:        make(map[string]bool),
 		viewport:             vp,
 		input:                input,
@@ -1411,6 +1413,7 @@ func (m *chatModel) handleServerMessage(msg ServerMessage) {
 		delete(m.channelMsgs, msg.ChannelID)
 		delete(m.channelHistoryLoaded, msg.ChannelID)
 		delete(m.channelUnread, msg.ChannelID)
+		delete(m.serverVoiceRooms, msg.ChannelID)
 		delete(m.channelKeys, msg.ChannelID)
 		_ = m.persistChannelKeys()
 		if m.activeChannel == msg.ChannelID {
@@ -1423,6 +1426,12 @@ func (m *chatModel) handleServerMessage(msg ServerMessage) {
 		}
 		m.ensureSidebarIndex()
 		m.refreshViewport()
+
+	case "voice.presence.snapshot":
+		m.applyServerVoicePresenceSnapshot(msg.VoiceRooms)
+
+	case "voice.presence":
+		m.applyServerVoicePresence(msg.ChannelID, msg.Sender, msg.Active)
 
 	case "error":
 		m.errMsg = fmt.Sprintf("[%s] %s", msg.Code, msg.Message)
@@ -1537,7 +1546,28 @@ func (m *chatModel) renderSidebar() string {
 
 	lines = append(lines, "", sidebarTitleStyle.Render("In Voice"), "")
 	if voiceChannelID == "" {
-		lines = append(lines, labelStyle.Render("(not connected)"))
+		rooms := m.serverVoiceRoomEntries()
+		if len(rooms) == 0 {
+			lines = append(lines, labelStyle.Render("(not connected)"))
+		} else {
+			for _, room := range rooms {
+				lines = append(lines, subtitleStyle.Render(m.channelDisplayName(room.ChannelID)))
+				for _, entry := range room.Members {
+					style := sidebarOfflineStyle
+					if entry.ID == m.auth.UserID || (entry.Known && entry.Online) {
+						style = sidebarOnlineStyle
+					}
+					name := formatUsername(entry.Name)
+					if entry.ID == m.auth.UserID {
+						name = fmt.Sprintf("%s (you)", name)
+					}
+					if entry.Admin {
+						name = fmt.Sprintf("%s (admin)", name)
+					}
+					lines = append(lines, style.Render(name))
+				}
+			}
+		}
 	} else {
 		lines = append(lines, subtitleStyle.Render(m.channelDisplayName(voiceChannelID)))
 		members := m.voiceMemberEntries()
@@ -1582,9 +1612,6 @@ func (m *chatModel) renderSidebar() string {
 				style = sidebarOnlineStyle
 			}
 			name := formatUsername(entry.Name)
-			if entry.Speak {
-				name = fmt.Sprintf("+ %s", name)
-			}
 			if entry.Admin {
 				name = fmt.Sprintf("%s (admin)", name)
 			}
@@ -1637,6 +1664,54 @@ func (m *chatModel) voiceMemberEntries() []userEntry {
 		return entries[i].Name < entries[j].Name
 	})
 	return entries
+}
+
+type voiceRoomEntry struct {
+	ChannelID string
+	Members   []userEntry
+}
+
+func (m *chatModel) serverVoiceRoomEntries() []voiceRoomEntry {
+	if len(m.serverVoiceRooms) == 0 {
+		return nil
+	}
+	rooms := make([]voiceRoomEntry, 0, len(m.serverVoiceRooms))
+	for channelID, roomMembers := range m.serverVoiceRooms {
+		if len(roomMembers) == 0 {
+			continue
+		}
+		members := make([]userEntry, 0, len(roomMembers))
+		for userID := range roomMembers {
+			status, ok := m.userPresence[userID]
+			if m.auth != nil && userID == m.auth.UserID {
+				status = true
+				ok = true
+			}
+			members = append(members, userEntry{
+				ID:     userID,
+				Name:   m.userDisplayName(userID),
+				Online: status,
+				Known:  ok,
+				Admin:  m.userAdmins[userID],
+			})
+		}
+		sort.Slice(members, func(i, j int) bool {
+			if members[i].Name == members[j].Name {
+				return members[i].ID < members[j].ID
+			}
+			return members[i].Name < members[j].Name
+		})
+		rooms = append(rooms, voiceRoomEntry{ChannelID: channelID, Members: members})
+	}
+	sort.Slice(rooms, func(i, j int) bool {
+		leftName := m.channelDisplayName(rooms[i].ChannelID)
+		rightName := m.channelDisplayName(rooms[j].ChannelID)
+		if leftName == rightName {
+			return rooms[i].ChannelID < rooms[j].ChannelID
+		}
+		return leftName < rightName
+	})
+	return rooms
 }
 
 func (m *chatModel) channelUserEntries(channelID string) []userEntry {
@@ -2073,6 +2148,58 @@ func (m *chatModel) channelDisplayName(channelID string) string {
 		}
 	}
 	return shortID(channelID)
+}
+
+func (m *chatModel) applyServerVoicePresenceSnapshot(rooms map[string][]string) {
+	if m.serverVoiceRooms == nil {
+		m.serverVoiceRooms = make(map[string]map[string]bool)
+	}
+	clear(m.serverVoiceRooms)
+	for channelID, users := range rooms {
+		roomID := strings.TrimSpace(channelID)
+		if roomID == "" {
+			continue
+		}
+		members := make(map[string]bool)
+		for _, userID := range users {
+			id := strings.TrimSpace(userID)
+			if id == "" {
+				continue
+			}
+			members[id] = true
+		}
+		if len(members) > 0 {
+			m.serverVoiceRooms[roomID] = members
+		}
+	}
+}
+
+func (m *chatModel) applyServerVoicePresence(channelID, userID string, active bool) {
+	roomID := strings.TrimSpace(channelID)
+	id := strings.TrimSpace(userID)
+	if roomID == "" || id == "" {
+		return
+	}
+	if m.serverVoiceRooms == nil {
+		m.serverVoiceRooms = make(map[string]map[string]bool)
+	}
+	if active {
+		members := m.serverVoiceRooms[roomID]
+		if members == nil {
+			members = make(map[string]bool)
+			m.serverVoiceRooms[roomID] = members
+		}
+		members[id] = true
+		return
+	}
+	members := m.serverVoiceRooms[roomID]
+	if members == nil {
+		return
+	}
+	delete(members, id)
+	if len(members) == 0 {
+		delete(m.serverVoiceRooms, roomID)
+	}
 }
 
 func (m *chatModel) setVoiceMembers(users []string) {

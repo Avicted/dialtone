@@ -102,11 +102,14 @@ func (h *Hub) Run(ctx context.Context) {
 			}
 			h.mu.Unlock()
 			h.count.Add(-1)
-			if leftRoom != "" && len(leftPeers) > 0 {
-				event := voiceSignalEvent{Type: "voice_leave", ChannelID: leftRoom, Sender: c.userID}
-				for _, peer := range leftPeers {
-					peer.sendEvent(event)
+			if leftRoom != "" {
+				if len(leftPeers) > 0 {
+					event := voiceSignalEvent{Type: "voice_leave", ChannelID: leftRoom, Sender: c.userID}
+					for _, peer := range leftPeers {
+						peer.sendEvent(event)
+					}
 				}
+				h.broadcastVoicePresence(leftRoom, c.userID, false)
 			}
 			c.close(websocket.StatusNormalClosure, "bye")
 		case msg := <-h.incoming:
@@ -172,6 +175,7 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	go client.writeLoop()
 	go client.readLoop()
 
+	h.sendVoicePresenceSnapshot(client)
 	h.sendHistory(ctx, client)
 }
 
@@ -346,13 +350,15 @@ type errorEvent struct {
 }
 
 type voiceSignalEvent struct {
-	Type      string     `json:"type"`
-	ChannelID channel.ID `json:"channel_id"`
-	Sender    user.ID    `json:"sender"`
-	Users     []user.ID  `json:"users,omitempty"`
-	Recipient user.ID    `json:"recipient,omitempty"`
-	SDP       string     `json:"sdp,omitempty"`
-	Candidate string     `json:"candidate,omitempty"`
+	Type       string                   `json:"type"`
+	ChannelID  channel.ID               `json:"channel_id"`
+	Sender     user.ID                  `json:"sender"`
+	Users      []user.ID                `json:"users,omitempty"`
+	Active     bool                     `json:"active,omitempty"`
+	VoiceRooms map[channel.ID][]user.ID `json:"voice_rooms,omitempty"`
+	Recipient  user.ID                  `json:"recipient,omitempty"`
+	SDP        string                   `json:"sdp,omitempty"`
+	Candidate  string                   `json:"candidate,omitempty"`
 }
 
 type tokenValidator interface {
@@ -479,7 +485,8 @@ func (h *Hub) handleVoiceJoin(ctx context.Context, client *Client, msg inboundMe
 	}
 
 	h.mu.Lock()
-	h.removeFromVoiceRoomLocked(client)
+	previousRoom := h.voiceRoom[client]
+	previousPeers := h.removeFromVoiceRoomLocked(client)
 	clients := h.voiceRooms[msg.ChannelID]
 	if clients == nil {
 		clients = make(map[*Client]struct{})
@@ -497,6 +504,16 @@ func (h *Hub) handleVoiceJoin(ctx context.Context, client *Client, msg inboundMe
 	}
 	h.mu.Unlock()
 
+	if previousRoom != "" && previousRoom != msg.ChannelID {
+		if len(previousPeers) > 0 {
+			leaveEvent := voiceSignalEvent{Type: "voice_leave", ChannelID: previousRoom, Sender: client.userID}
+			for _, peer := range previousPeers {
+				peer.sendEvent(leaveEvent)
+			}
+		}
+		h.broadcastVoicePresence(previousRoom, client.userID, false)
+	}
+
 	sort.Slice(roster, func(i, j int) bool {
 		return roster[i] < roster[j]
 	})
@@ -510,6 +527,7 @@ func (h *Hub) handleVoiceJoin(ctx context.Context, client *Client, msg inboundMe
 	for _, peer := range peers {
 		peer.sendEvent(event)
 	}
+	h.broadcastVoicePresence(msg.ChannelID, client.userID, true)
 }
 
 func (h *Hub) handleVoiceLeave(client *Client, msg inboundMessage) {
@@ -523,24 +541,29 @@ func (h *Hub) handleVoiceLeave(client *Client, msg inboundMessage) {
 	}
 
 	var peers []*Client
+	left := false
 	h.mu.Lock()
 	roomID, ok := h.voiceRoom[client]
 	if ok && roomID == msg.ChannelID {
 		peers = h.removeFromVoiceRoomLocked(client)
+		left = true
 	}
 	h.mu.Unlock()
 
-	if len(peers) == 0 {
+	if !left {
 		return
 	}
-	event := voiceSignalEvent{
-		Type:      "voice_leave",
-		ChannelID: msg.ChannelID,
-		Sender:    client.userID,
+	if len(peers) > 0 {
+		event := voiceSignalEvent{
+			Type:      "voice_leave",
+			ChannelID: msg.ChannelID,
+			Sender:    client.userID,
+		}
+		for _, peer := range peers {
+			peer.sendEvent(event)
+		}
 	}
-	for _, peer := range peers {
-		peer.sendEvent(event)
-	}
+	h.broadcastVoicePresence(msg.ChannelID, client.userID, false)
 }
 
 func (h *Hub) handleVoiceSignal(client *Client, msg inboundMessage) {
@@ -615,6 +638,58 @@ func (h *Hub) removeFromVoiceRoomLocked(client *Client) []*Client {
 		return peers
 	}
 	return nil
+}
+
+func (h *Hub) sendVoicePresenceSnapshot(client *Client) {
+	if h == nil || client == nil {
+		return
+	}
+	h.mu.RLock()
+	snapshot := h.voicePresenceSnapshotLocked()
+	h.mu.RUnlock()
+	client.sendEvent(voiceSignalEvent{Type: "voice.presence.snapshot", VoiceRooms: snapshot})
+}
+
+func (h *Hub) voicePresenceSnapshotLocked() map[channel.ID][]user.ID {
+	snapshot := make(map[channel.ID][]user.ID)
+	for roomID, clients := range h.voiceRooms {
+		seen := make(map[user.ID]struct{}, len(clients))
+		users := make([]user.ID, 0, len(clients))
+		for peer := range clients {
+			if peer == nil || peer.userID == "" {
+				continue
+			}
+			if _, ok := seen[peer.userID]; ok {
+				continue
+			}
+			seen[peer.userID] = struct{}{}
+			users = append(users, peer.userID)
+		}
+		if len(users) == 0 {
+			continue
+		}
+		sort.Slice(users, func(i, j int) bool {
+			return users[i] < users[j]
+		})
+		snapshot[roomID] = users
+	}
+	return snapshot
+}
+
+func (h *Hub) broadcastVoicePresence(channelID channel.ID, sender user.ID, active bool) {
+	if h == nil || channelID == "" || sender == "" {
+		return
+	}
+	h.mu.RLock()
+	clients := make([]*Client, 0, len(h.clients))
+	for client := range h.clients {
+		clients = append(clients, client)
+	}
+	h.mu.RUnlock()
+	event := voiceSignalEvent{Type: "voice.presence", ChannelID: channelID, Sender: sender, Active: active}
+	for _, client := range clients {
+		client.sendEvent(event)
+	}
 }
 
 func (h *Hub) handleBroadcast(ctx context.Context, sender *Client, msg inboundMessage) {

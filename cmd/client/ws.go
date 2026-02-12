@@ -21,17 +21,19 @@ type WSClient struct {
 }
 
 type ServerMessage struct {
-	Type           string `json:"type"`
-	MessageID      string `json:"message_id"`
-	Sender         string `json:"sender"`
-	SenderNameEnc  string `json:"sender_name_enc,omitempty"`
-	ChannelID      string `json:"channel_id,omitempty"`
-	ChannelNameEnc string `json:"channel_name_enc,omitempty"`
-	DeviceID       string `json:"device_id,omitempty"`
-	Body           string `json:"body"`
-	SentAt         string `json:"sent_at"`
-	Code           string `json:"code"`
-	Message        string `json:"message"`
+	Type           string              `json:"type"`
+	MessageID      string              `json:"message_id"`
+	Sender         string              `json:"sender"`
+	SenderNameEnc  string              `json:"sender_name_enc,omitempty"`
+	ChannelID      string              `json:"channel_id,omitempty"`
+	ChannelNameEnc string              `json:"channel_name_enc,omitempty"`
+	DeviceID       string              `json:"device_id,omitempty"`
+	Body           string              `json:"body"`
+	SentAt         string              `json:"sent_at"`
+	Code           string              `json:"code"`
+	Message        string              `json:"message"`
+	Active         bool                `json:"active,omitempty"`
+	VoiceRooms     map[string][]string `json:"voice_rooms,omitempty"`
 }
 
 type SendMessage struct {
