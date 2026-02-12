@@ -89,7 +89,7 @@ func (d *voiceDaemon) Run(ctx context.Context, ipcAddr string) error {
 	}()
 
 	pttErrCh := make(chan error, 1)
-	if d.pttBind != "" {
+	if d.hasPTTBinding() {
 		go func() {
 			pttErrCh <- d.runPTT(ctx)
 		}()
@@ -122,9 +122,16 @@ func (d *voiceDaemon) Run(ctx context.Context, ipcAddr string) error {
 			return nil
 		case err := <-pttErrCh:
 			if err != nil {
-				return fmt.Errorf("ptt failed: %w", err)
+				log.Printf("ptt unavailable; falling back to VAD: %v", err)
+				d.disablePTT()
+				continue
 			}
-			return nil
+			if ctx.Err() != nil {
+				return nil
+			}
+			log.Printf("ptt stopped; falling back to VAD")
+			d.disablePTT()
+			continue
 		case err := <-audioErrCh:
 			if err != nil {
 				return fmt.Errorf("audio pipeline failed: %w", err)
@@ -461,10 +468,27 @@ func (d *voiceDaemon) runPTT(ctx context.Context) error {
 }
 
 func (d *voiceDaemon) updateVAD(active bool) {
-	if d.pttBind != "" {
+	if d.hasPTTBinding() {
 		return
 	}
 	d.setSpeaking(active)
+}
+
+func (d *voiceDaemon) hasPTTBinding() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return strings.TrimSpace(d.pttBind) != ""
+}
+
+func (d *voiceDaemon) disablePTT() {
+	d.mu.Lock()
+	alreadyDisabled := strings.TrimSpace(d.pttBind) == ""
+	d.pttBind = ""
+	d.mu.Unlock()
+	if alreadyDisabled {
+		return
+	}
+	d.setSpeaking(false)
 }
 
 func (d *voiceDaemon) setSpeaking(active bool) {

@@ -1163,6 +1163,7 @@ func TestChatModelDispatchVoiceLeaveDoesNotClearRoomBeforeAck(t *testing.T) {
 
 	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
 	m.voiceIPC = newVoiceIPC(addr)
+	m.voiceCh = make(chan ipc.Message, 1)
 	m.voiceRoom = "room-1"
 
 	cmd := m.dispatchVoiceCommand(

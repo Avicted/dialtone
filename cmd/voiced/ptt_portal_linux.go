@@ -21,6 +21,7 @@ const (
 	portalActivationSignalSuffix   = ".Activated"
 	portalDeactivationSignalSuffix = ".Deactivated"
 	portalResponseSignal           = "org.freedesktop.portal.Request.Response"
+	portalRequestTimeout           = 45 * time.Second
 )
 
 type portalPTTBackend struct {
@@ -39,19 +40,22 @@ func newPortalPTTBackend(binding string) (pttBackend, error) {
 		return nil, fmt.Errorf("connect session bus: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	sessionPath, err := createPortalSession(ctx, conn)
+	createCtx, cancelCreate := context.WithTimeout(context.Background(), portalRequestTimeout)
+	sessionPath, err := createPortalSession(createCtx, conn)
+	cancelCreate()
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
-	if err := bindPortalShortcut(ctx, conn, sessionPath, binding); err != nil {
+
+	bindCtx, cancelBind := context.WithTimeout(context.Background(), portalRequestTimeout)
+	if err := bindPortalShortcut(bindCtx, conn, sessionPath, binding); err != nil {
+		cancelBind()
 		_ = closePortalSession(conn, sessionPath)
 		_ = conn.Close()
 		return nil, err
 	}
+	cancelBind()
 	return &portalPTTBackend{binding: binding, conn: conn, sessionPath: sessionPath}, nil
 }
 
