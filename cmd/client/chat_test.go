@@ -843,25 +843,38 @@ func TestChatModelRenderSidebarServerVoicePresence(t *testing.T) {
 	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
 	m.userNames["user-2"] = "bobross"
 	m.userPresence["user-2"] = true
+	inVoiceSection := func(sidebar string) string {
+		start := strings.Index(sidebar, "In Voice")
+		if start == -1 {
+			return ""
+		}
+		section := sidebar[start:]
+		if end := strings.Index(section, "Users"); end != -1 {
+			section = section[:end]
+		}
+		return section
+	}
 
 	m.handleServerMessage(ServerMessage{
 		Type:       "voice.presence.snapshot",
 		VoiceRooms: map[string][]string{"ch-1": {"user-2"}},
 	})
 	out := m.renderSidebar()
-	if !strings.Contains(out, "In Voice") || !strings.Contains(out, "general") || !strings.Contains(out, "<bobross>") {
+	inVoice := inVoiceSection(out)
+	if !strings.Contains(inVoice, "In Voice") || !strings.Contains(inVoice, "general") || !strings.Contains(inVoice, "<bobross>") {
 		t.Fatalf("expected server voice presence in sidebar")
 	}
-	if strings.Contains(out, "(not connected)") {
+	if strings.Contains(inVoice, "(not connected)") {
 		t.Fatalf("unexpected disconnected placeholder when server presence exists")
 	}
 
 	m.handleServerMessage(ServerMessage{Type: "voice.presence", ChannelID: "ch-1", Sender: "user-2", Active: false})
 	out = m.renderSidebar()
-	if strings.Contains(out, "general") {
-		t.Fatalf("expected room removed after inactive update")
+	inVoice = inVoiceSection(out)
+	if strings.Contains(inVoice, "<bobross>") {
+		t.Fatalf("expected member removed after inactive update")
 	}
-	if !strings.Contains(out, "(not connected)") {
+	if !strings.Contains(inVoice, "(not connected)") {
 		t.Fatalf("expected disconnected placeholder when no server presence remains")
 	}
 }

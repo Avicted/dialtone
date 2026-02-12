@@ -58,17 +58,30 @@ Dialtone voice uses WebRTC and benefits from TURN for NAT traversal. A coturn se
 
 ### Configure TURN
 
-Update `.env` with TURN credentials:
+Update `.env` with TURN settings:
 
 ```
 TURN_USER=turn
-TURN_PASS=turnpass
-TURN_REALM=dialtone
-TURN_MIN_PORT=50000
-TURN_MAX_PORT=50040
+TURN_PASS=replace-with-strong-random-password
+TURN_REALM=turn.example.com
+TURN_EXTERNAL_IP=203.0.113.10
+TURN_PORT=3478
+TURN_TLS_PORT=5349
+TURN_CERT_FILE=/etc/coturn/certs/fullchain.pem
+TURN_KEY_FILE=/etc/coturn/certs/privkey.pem
+TURN_MIN_PORT=49152
+TURN_MAX_PORT=49252
 ```
 
-If a host port is already in use (for example by KDE Connect), pick a different UDP range by changing `TURN_MIN_PORT`/`TURN_MAX_PORT`.
+Use a DNS record such as `turn.example.com` that resolves to your server's public IP.
+
+Open firewall ports for TURN:
+
+- `3478/tcp` and `3478/udp`
+- `5349/tcp`
+- `TURN_MIN_PORT`-`TURN_MAX_PORT` (UDP relay range)
+
+If a host port is already in use, choose a different TURN listening port or relay UDP range.
 
 Start coturn:
 
@@ -85,7 +98,7 @@ go build -o ./bin/dialtone-voiced ./cmd/voiced
   --server http://localhost:8080 \
   --token <dialtone-token> \
   --ptt-backend auto \
-  --turn localhost:3478 \
+  --turn turn:turn.example.com:3478?transport=udp,turn:turn.example.com:3478?transport=tcp,turns:turn.example.com:5349?transport=tcp \
   --turn-user $TURN_USER \
   --turn-pass $TURN_PASS
 ```
