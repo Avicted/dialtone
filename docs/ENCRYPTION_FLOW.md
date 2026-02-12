@@ -39,12 +39,15 @@ This document describes the encryption flow in Dialtone, what is encrypted, what
 ## Data flow overview
 
 ```mermaid
-flowchart LR
-    A[User types message] --> B[Client encrypts with channel key]
-    B --> C[Ciphertext sent to server]
-    C --> D[Server stores/relays ciphertext]
-    D --> E[Client receives ciphertext]
-    E --> F[Client decrypts with channel key]
+flowchart TD
+  A[User writes message] --> B[Client encrypts with channel key]
+  B --> C[Ciphertext sent to server]
+  C --> D[Server stores and relays ciphertext]
+  D --> E[Recipient client receives ciphertext]
+  E --> F[Client decrypts with channel key]
+  F --> G{Another message?}
+  G -->|Yes| A
+  G -->|No| H[Wait for next message]
 ```
 
 ## Key lifecycle and sharing
@@ -55,18 +58,18 @@ sequenceDiagram
     participant Server
     participant DeviceB as Device B
 
-    DeviceA->>Server: Upload public key (login/register)
-    DeviceB->>Server: Upload public key (login/register)
+  DeviceA->>Server: Upload public key
+  DeviceB->>Server: Upload public key
 
     Note over DeviceA: Create channel key
-    DeviceA->>Server: Create channel (name encrypted)
+  DeviceA->>Server: Create channel (encrypted name)
 
     Note over DeviceA: Build key envelopes
-    DeviceA->>Server: Upload channel key envelopes
+  DeviceA->>Server: Upload key envelopes
 
-    DeviceB->>Server: Request channel key envelope
+  DeviceB->>Server: Request key envelope
     Server->>DeviceB: Encrypted envelope
-    DeviceB->>DeviceB: Decrypt envelope with private key
+    Note over DeviceB: Decrypt envelope (private key)
 ```
 
 ## Local keystore encryption
