@@ -7,6 +7,10 @@ Dialtone is a realtime websocket chat with end-to-end encrypted message bodies a
 
 Dialtone uses symmetric encryption for message bodies and channel names, and public key encryption to share those symmetric keys across devices. The server never sees plaintext message content or channel names, but it can see routing metadata required for the system to function. Usernames are sent in plaintext during login/register and stored only as a peppered hash (no plaintext usernames in the database).
 
+## Platform support
+- Linux is the only supported platform for now.
+- Windows and macOS are not supported for production use at this time.
+
 ## Client
 ![Dialtone client screen 1](docs/dialtone-client-01.png)
 
@@ -110,6 +114,7 @@ docker compose up -d coturn
 ### 1) Requirements
 - A running Dialtone server URL from your admin
 - An invite token from your admin (for first-time registration)
+- Linux host
 - Go 1.22+ (if building from source)
 
 ### 2) Build the client
@@ -135,7 +140,7 @@ Voice chat requires TURN to be configured by the server admin.
 Voice prerequisites:
 - CGO enabled (`CGO_ENABLED=1`)
 - `libopus` installed
-- Audio backend (ALSA/PulseAudio/PipeWire on Linux; WASAPI on Windows)
+- Audio backend (ALSA/PulseAudio/PipeWire)
 
 Build voice daemon:
 
@@ -162,7 +167,7 @@ For voice chat, add the TURN settings provided by your admin:
 `--voice-ptt ""` disables push-to-talk and uses VAD.
 
 ## Client storage
-Local client keys are stored under `~/.config/dialtone` on Linux and `%APPDATA%\\dialtone` on Windows. The keystore is encrypted with a passphrase you enter at login.
+On Linux, local client keys are stored under `~/.config/dialtone`. The keystore is encrypted with a passphrase you enter at login.
 
 ## Documentation
 - [API](docs/API.md)
