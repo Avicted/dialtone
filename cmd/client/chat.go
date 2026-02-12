@@ -1489,6 +1489,7 @@ func (m *chatModel) renderSidebar() string {
 	lines := make([]string, 0, 20)
 	lines = append(lines, sidebarTitleStyle.Render("Channels"), "")
 	channels := m.channelList()
+	voiceChannelID := m.voiceChannelIndicatorID()
 	if len(channels) == 0 {
 		lines = append(lines, labelStyle.Render("(none)"))
 	} else {
@@ -1501,8 +1502,15 @@ func (m *chatModel) renderSidebar() string {
 			if name == "" {
 				name = shortID(ch.ID)
 			}
+			markers := ""
 			if ch.ID == m.activeChannel {
-				name = "* " + name
+				markers += "* "
+			}
+			if ch.ID == voiceChannelID {
+				markers += "♪ "
+			}
+			if markers != "" {
+				name = markers + name
 			}
 			unread := m.channelUnread[ch.ID]
 			if unread > 0 && ch.ID != m.activeChannel {
@@ -1881,11 +1889,12 @@ func (m chatModel) View() string {
 	var b strings.Builder
 
 	header := fmt.Sprintf(
-		"  %s  %s  %s  %s",
+		"  %s  %s  %s  %s  %s",
 		appNameStyle.Render("* dialtone"),
 		headerStyle.Render(formatUsername(m.auth.Username)),
 		labelStyle.Render(shortID(m.auth.UserID)),
 		labelStyle.Render(m.activeChannelLabel()),
+		labelStyle.Render(m.voiceStatusLabel()),
 	)
 	connStatus := connectedStyle.Render("online")
 	if !m.connected {
@@ -1927,10 +1936,70 @@ func (m *chatModel) activeChannelLabel() string {
 	if m.activeChannel == "" {
 		return "no channel"
 	}
-	if info, ok := m.channels[m.activeChannel]; ok && info.Name != "" {
-		return "channel: " + info.Name
+	return "channel: " + m.channelDisplayName(m.activeChannel)
+}
+
+func (m *chatModel) voiceStatusLabel() string {
+	if m.voicePendingCmd != nil {
+		switch m.voicePendingCmd.Cmd {
+		case ipc.CommandVoiceJoin:
+			if channelID := m.voiceChannelIndicatorID(); channelID != "" {
+				return "voice: connecting " + m.channelDisplayName(channelID)
+			}
+			return "voice: connecting"
+		case ipc.CommandVoiceLeave:
+			if m.voiceRoom != "" {
+				return "voice: leaving " + m.channelDisplayName(m.voiceRoom)
+			}
+			return "voice: leaving"
+		default:
+			if m.voiceRoom != "" {
+				return "voice: " + m.channelDisplayName(m.voiceRoom)
+			}
+			return "voice: updating"
+		}
 	}
-	return "channel: " + shortID(m.activeChannel)
+	if m.voiceAutoStarting {
+		if channelID := m.voiceChannelIndicatorID(); channelID != "" {
+			return "voice: starting " + m.channelDisplayName(channelID)
+		}
+		return "voice: starting"
+	}
+	if m.voiceRoom != "" {
+		return "voice: " + m.channelDisplayName(m.voiceRoom)
+	}
+	if m.voiceCh == nil && m.voiceReconnectAttempt > 0 {
+		return "voice: reconnecting"
+	}
+	return "voice: off"
+}
+
+func (m *chatModel) voiceChannelIndicatorID() string {
+	if m.voiceRoom != "" {
+		return m.voiceRoom
+	}
+	if m.voicePendingCmd != nil && m.voicePendingCmd.Cmd == ipc.CommandVoiceJoin {
+		if m.voicePendingRoom != "" {
+			return m.voicePendingRoom
+		}
+		if m.voicePendingCmd.Room != "" {
+			return m.voicePendingCmd.Room
+		}
+	}
+	return ""
+}
+
+func (m *chatModel) channelDisplayName(channelID string) string {
+	if channelID == "" {
+		return ""
+	}
+	if info, ok := m.channels[channelID]; ok {
+		name := strings.TrimSpace(info.Name)
+		if name != "" {
+			return name
+		}
+	}
+	return shortID(channelID)
 }
 
 func formatTime(ts string) string {

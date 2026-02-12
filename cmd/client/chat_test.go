@@ -312,6 +312,7 @@ func TestChatModelRenderSidebarAndSelection(t *testing.T) {
 	m.channels["a"] = channelInfo{ID: "a", Name: "alpha"}
 	m.channels["b"] = channelInfo{ID: "b", Name: "beta"}
 	m.activeChannel = "a"
+	m.voiceRoom = "b"
 	m.channelUnread["b"] = 2
 	out := m.renderSidebar()
 	if !strings.Contains(out, "Channels") || !strings.Contains(out, "Users") {
@@ -322,6 +323,9 @@ func TestChatModelRenderSidebarAndSelection(t *testing.T) {
 	}
 	if !strings.Contains(out, "alpha") || !strings.Contains(out, "(2)") {
 		t.Fatalf("unexpected sidebar output")
+	}
+	if !strings.Contains(out, "♪ beta") {
+		t.Fatalf("expected voice marker on joined channel")
 	}
 
 	m.userNames["user-1"] = "alice"
@@ -748,6 +752,49 @@ func TestChatModelActiveChannelLabel(t *testing.T) {
 	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
 	if m.activeChannelLabel() != "channel: general" {
 		t.Fatalf("unexpected label")
+	}
+}
+
+func TestChatModelVoiceStatusLabel(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	if got := m.voiceStatusLabel(); got != "voice: off" {
+		t.Fatalf("unexpected status: %s", got)
+	}
+
+	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+	m.voiceRoom = "ch-1"
+	if got := m.voiceStatusLabel(); got != "voice: general" {
+		t.Fatalf("unexpected connected status: %s", got)
+	}
+
+	joinCmd := ipc.Message{Cmd: ipc.CommandVoiceJoin, Room: "ch-2"}
+	m.channels["ch-2"] = channelInfo{ID: "ch-2", Name: "voice-lobby"}
+	m.voicePendingCmd = &joinCmd
+	m.voicePendingRoom = "ch-2"
+	m.voiceRoom = ""
+	if got := m.voiceStatusLabel(); got != "voice: connecting voice-lobby" {
+		t.Fatalf("unexpected connecting status: %s", got)
+	}
+
+	m.voicePendingCmd = nil
+	m.voicePendingRoom = ""
+	m.voiceReconnectAttempt = 1
+	m.voiceCh = nil
+	if got := m.voiceStatusLabel(); got != "voice: reconnecting" {
+		t.Fatalf("unexpected reconnect status: %s", got)
+	}
+}
+
+func TestChatModelViewIncludesVoiceStatus(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	if out := m.View(); !strings.Contains(out, "voice: off") {
+		t.Fatalf("expected default voice status in header")
+	}
+
+	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+	m.voiceRoom = "ch-1"
+	if out := m.View(); !strings.Contains(out, "voice: general") {
+		t.Fatalf("expected connected voice status in header")
 	}
 }
 
