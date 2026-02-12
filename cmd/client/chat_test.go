@@ -313,10 +313,14 @@ func TestChatModelRenderSidebarAndSelection(t *testing.T) {
 	m.channels["b"] = channelInfo{ID: "b", Name: "beta"}
 	m.activeChannel = "a"
 	m.voiceRoom = "b"
+	m.resetVoiceMembersForRoom("b")
 	m.channelUnread["b"] = 2
 	out := m.renderSidebar()
 	if !strings.Contains(out, "Channels") || !strings.Contains(out, "Users") {
 		t.Fatalf("expected channels and users sections")
+	}
+	if !strings.Contains(out, "In Voice") {
+		t.Fatalf("expected in-voice section")
 	}
 	if strings.Index(out, "Channels") > strings.Index(out, "Users") {
 		t.Fatalf("expected channels above users")
@@ -795,6 +799,30 @@ func TestChatModelViewIncludesVoiceStatus(t *testing.T) {
 	m.voiceRoom = "ch-1"
 	if out := m.View(); !strings.Contains(out, "voice: general") {
 		t.Fatalf("expected connected voice status in header")
+	}
+}
+
+func TestChatModelHandleVoiceMembersEvent(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+	m.voiceRoom = "ch-1"
+	m.handleVoiceEvent(ipc.Message{Event: ipc.EventVoiceMembers, Room: "ch-1", Users: []string{"user-2"}})
+
+	if !m.voiceMembers["user-2"] {
+		t.Fatalf("expected remote voice member")
+	}
+	if !m.voiceMembers[m.auth.UserID] {
+		t.Fatalf("expected local user included in voice members")
+	}
+
+	m.handleVoiceEvent(ipc.Message{Event: ipc.EventVoiceMembers, Room: "other-room", Users: []string{"user-3"}})
+	if m.voiceMembers["user-3"] {
+		t.Fatalf("expected stale room roster ignored")
+	}
+
+	out := m.renderSidebar()
+	if !strings.Contains(out, "In Voice") || !strings.Contains(out, "(you)") {
+		t.Fatalf("expected in-voice roster rendering")
 	}
 }
 

@@ -12,18 +12,20 @@ const (
 
 	EventVoiceReady     = "voice_ready"
 	EventVoiceConnected = "voice_connected"
+	EventVoiceMembers   = "voice_members"
 	EventUserSpeaking   = "user_speaking"
 	EventError          = "error"
 	EventPong           = "pong"
 )
 
 type Message struct {
-	Cmd    string `json:"cmd,omitempty"`
-	Event  string `json:"event,omitempty"`
-	Room   string `json:"room,omitempty"`
-	User   string `json:"user,omitempty"`
-	Active bool   `json:"active,omitempty"`
-	Error  string `json:"error,omitempty"`
+	Cmd    string   `json:"cmd,omitempty"`
+	Event  string   `json:"event,omitempty"`
+	Room   string   `json:"room,omitempty"`
+	User   string   `json:"user,omitempty"`
+	Users  []string `json:"users,omitempty"`
+	Active bool     `json:"active,omitempty"`
+	Error  string   `json:"error,omitempty"`
 }
 
 func NewDecoder(r interface{ Read([]byte) (int, error) }) *json.Decoder {

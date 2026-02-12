@@ -32,6 +32,7 @@ type voiceDaemon struct {
 	muted bool
 	local string
 	speak bool
+	memb  map[string]struct{}
 
 	ws       *WSClient
 	pc       *voicewebrtc.Manager
@@ -151,6 +152,7 @@ func (d *voiceDaemon) handleIPCCommand(ctx context.Context, msg ipc.Message) (ip
 		d.mu.Lock()
 		d.room = room
 		d.mu.Unlock()
+		d.resetVoiceMembersForCurrentRoom()
 		if err := d.sendSignal(VoiceSignal{Type: "voice_join", ChannelID: room}); err != nil {
 			if errors.Is(err, errWebsocketUnavailable) {
 				log.Printf("voice join deferred until websocket connected: room=%s", room)
@@ -161,6 +163,7 @@ func (d *voiceDaemon) handleIPCCommand(ctx context.Context, msg ipc.Message) (ip
 				d.room = ""
 			}
 			d.mu.Unlock()
+			d.clearVoiceMembers()
 			return ipc.Message{}, err
 		}
 		return ipc.Message{Event: ipc.EventVoiceConnected, Room: room}, nil
@@ -180,6 +183,7 @@ func (d *voiceDaemon) handleIPCCommand(ctx context.Context, msg ipc.Message) (ip
 			d.room = ""
 		}
 		d.mu.Unlock()
+		d.clearVoiceMembers()
 		if d.pc != nil {
 			d.pc.CloseAll()
 		}
@@ -204,6 +208,7 @@ func (d *voiceDaemon) handleIPCCommand(ctx context.Context, msg ipc.Message) (ip
 		d.mu.Lock()
 		d.local = user
 		d.mu.Unlock()
+		d.resetVoiceMembersForCurrentRoom()
 		return ipc.Message{}, nil
 	case ipc.CommandPing:
 		return ipc.Message{Event: ipc.EventPong}, nil
@@ -224,6 +229,7 @@ func (d *voiceDaemon) handleWSMessage(msg VoiceSignal) {
 		if msg.ChannelID != d.currentRoom() {
 			return
 		}
+		d.addVoiceMember(msg.Sender)
 		d.pc.ClosePeer(msg.Sender)
 		offer, err := d.pc.CreateOffer(msg.Sender)
 		if err != nil {
@@ -235,8 +241,17 @@ func (d *voiceDaemon) handleWSMessage(msg VoiceSignal) {
 		if msg.Sender == "" || d.pc == nil {
 			return
 		}
+		if msg.ChannelID != "" && msg.ChannelID != d.currentRoom() {
+			return
+		}
 		d.pc.ClosePeer(msg.Sender)
+		d.removeVoiceMember(msg.Sender)
 		d.setRemoteSpeaking(msg.Sender, false)
+	case "voice_roster":
+		if msg.ChannelID == "" {
+			return
+		}
+		d.setVoiceMembersForRoom(msg.ChannelID, msg.Users)
 	case "webrtc_offer":
 		if msg.Sender == "" || msg.SDP == "" || d.pc == nil {
 			return
@@ -401,6 +416,7 @@ func (d *voiceDaemon) onWSDisconnect() {
 		d.pc.CloseAll()
 	}
 	d.clearRemoteSpeaking()
+	d.resetVoiceMembersForCurrentRoom()
 }
 
 func (d *voiceDaemon) setWS(ws *WSClient) {

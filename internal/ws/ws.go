@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -348,6 +349,7 @@ type voiceSignalEvent struct {
 	Type      string     `json:"type"`
 	ChannelID channel.ID `json:"channel_id"`
 	Sender    user.ID    `json:"sender"`
+	Users     []user.ID  `json:"users,omitempty"`
 	Recipient user.ID    `json:"recipient,omitempty"`
 	SDP       string     `json:"sdp,omitempty"`
 	Candidate string     `json:"candidate,omitempty"`
@@ -486,10 +488,19 @@ func (h *Hub) handleVoiceJoin(ctx context.Context, client *Client, msg inboundMe
 	clients[client] = struct{}{}
 	h.voiceRoom[client] = msg.ChannelID
 	peers := make([]*Client, 0, len(clients))
+	roster := make([]user.ID, 0, len(clients))
 	for peer := range clients {
 		peers = append(peers, peer)
+		if peer.userID != "" {
+			roster = append(roster, peer.userID)
+		}
 	}
 	h.mu.Unlock()
+
+	sort.Slice(roster, func(i, j int) bool {
+		return roster[i] < roster[j]
+	})
+	client.sendEvent(voiceSignalEvent{Type: "voice_roster", ChannelID: msg.ChannelID, Users: roster})
 
 	event := voiceSignalEvent{
 		Type:      "voice_join",

@@ -13,12 +13,13 @@ import (
 )
 
 type VoiceSignal struct {
-	Type      string `json:"type"`
-	ChannelID string `json:"channel_id,omitempty"`
-	Sender    string `json:"sender,omitempty"`
-	Recipient string `json:"recipient,omitempty"`
-	SDP       string `json:"sdp,omitempty"`
-	Candidate string `json:"candidate,omitempty"`
+	Type      string   `json:"type"`
+	ChannelID string   `json:"channel_id,omitempty"`
+	Sender    string   `json:"sender,omitempty"`
+	Users     []string `json:"users,omitempty"`
+	Recipient string   `json:"recipient,omitempty"`
+	SDP       string   `json:"sdp,omitempty"`
+	Candidate string   `json:"candidate,omitempty"`
 }
 
 type WSClient struct {
