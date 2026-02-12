@@ -91,7 +91,11 @@ You can also provide STUN servers with `--stun`
 Client auto-start (recommended for debugging):
 
 ```bash
+# Voice activation
 ./bin/client --voice-debug --voice-ptt "" --voice-meter --voice-vad 20
+
+# PTT
+./bin/client --voice-debug --voice-ptt "" --voice-meter --voice-ptt-backend portal --voice-ptt caps
 ```
 
 - `--voice-debug` writes `dialtone-voiced` logs to a file (see the client UI for the log path).
