@@ -64,7 +64,11 @@ Update `.env` with TURN credentials:
 TURN_USER=turn
 TURN_PASS=turnpass
 TURN_REALM=dialtone
+TURN_MIN_PORT=50000
+TURN_MAX_PORT=50040
 ```
+
+If a host port is already in use (for example by KDE Connect), pick a different UDP range by changing `TURN_MIN_PORT`/`TURN_MAX_PORT`.
 
 Start coturn:
 
@@ -95,7 +99,7 @@ Client auto-start (recommended for debugging):
 ./bin/client --voice-debug --voice-ptt "" --voice-meter --voice-vad 20
 
 # PTT
-./bin/client --voice-debug --voice-ptt "" --voice-meter --voice-ptt-backend portal --voice-ptt caps
+./bin/client --voice-debug --voice-meter --voice-ptt-backend portal --voice-ptt caps
 ```
 
 - `--voice-debug` writes `dialtone-voiced` logs to a file (see the client UI for the log path).

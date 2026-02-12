@@ -1545,36 +1545,37 @@ func (m *chatModel) renderSidebar() string {
 	}
 
 	lines = append(lines, "", sidebarTitleStyle.Render("In Voice"), "")
-	if voiceChannelID == "" {
-		rooms := m.serverVoiceRoomEntries()
-		if len(rooms) == 0 {
-			lines = append(lines, labelStyle.Render("(not connected)"))
-		} else {
-			for _, room := range rooms {
-				lines = append(lines, subtitleStyle.Render(m.channelDisplayName(room.ChannelID)))
-				for _, entry := range room.Members {
-					style := sidebarOfflineStyle
-					if entry.ID == m.auth.UserID || (entry.Known && entry.Online) {
-						style = sidebarOnlineStyle
-					}
-					name := formatUsername(entry.Name)
-					if entry.ID == m.auth.UserID {
-						name = fmt.Sprintf("%s (you)", name)
-					}
-					if entry.Admin {
-						name = fmt.Sprintf("%s (admin)", name)
-					}
-					lines = append(lines, style.Render(name))
+	rooms := m.serverVoiceRoomEntries()
+	if voiceChannelID != "" {
+		joinedMembers := m.voiceMemberEntries()
+		if len(joinedMembers) > 0 {
+			replaced := false
+			for i := range rooms {
+				if rooms[i].ChannelID == voiceChannelID {
+					rooms[i].Members = joinedMembers
+					replaced = true
+					break
 				}
 			}
+			if !replaced {
+				rooms = append(rooms, voiceRoomEntry{ChannelID: voiceChannelID, Members: joinedMembers})
+			}
+			sort.Slice(rooms, func(i, j int) bool {
+				leftName := m.channelDisplayName(rooms[i].ChannelID)
+				rightName := m.channelDisplayName(rooms[j].ChannelID)
+				if leftName == rightName {
+					return rooms[i].ChannelID < rooms[j].ChannelID
+				}
+				return leftName < rightName
+			})
 		}
+	}
+	if len(rooms) == 0 {
+		lines = append(lines, labelStyle.Render("(not connected)"))
 	} else {
-		lines = append(lines, subtitleStyle.Render(m.channelDisplayName(voiceChannelID)))
-		members := m.voiceMemberEntries()
-		if len(members) == 0 {
-			lines = append(lines, labelStyle.Render("(none)"))
-		} else {
-			for _, entry := range members {
+		for _, room := range rooms {
+			lines = append(lines, subtitleStyle.Render(m.channelDisplayName(room.ChannelID)))
+			for _, entry := range room.Members {
 				style := sidebarOfflineStyle
 				if entry.ID == m.auth.UserID || (entry.Known && entry.Online) {
 					style = sidebarOnlineStyle
@@ -1583,7 +1584,7 @@ func (m *chatModel) renderSidebar() string {
 				if entry.ID == m.auth.UserID {
 					name = fmt.Sprintf("%s (you)", name)
 				}
-				if entry.Speak {
+				if room.ChannelID == voiceChannelID && entry.Speak {
 					name = fmt.Sprintf("+ %s", name)
 				}
 				if entry.Admin {

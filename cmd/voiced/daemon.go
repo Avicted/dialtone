@@ -124,6 +124,9 @@ func (d *voiceDaemon) Run(ctx context.Context, ipcAddr string) error {
 		case err := <-pttErrCh:
 			if err != nil {
 				log.Printf("ptt unavailable; falling back to VAD: %v", err)
+				if d.ipc != nil {
+					d.ipc.Broadcast(ipc.Message{Event: ipc.EventError, Error: fmt.Sprintf("ptt unavailable; falling back to VAD: %v", err)})
+				}
 				d.disablePTT()
 				continue
 			}

@@ -858,8 +858,45 @@ func TestChatModelRenderSidebarServerVoicePresence(t *testing.T) {
 
 	m.handleServerMessage(ServerMessage{Type: "voice.presence", ChannelID: "ch-1", Sender: "user-2", Active: false})
 	out = m.renderSidebar()
-	if strings.Contains(out, "<bobross>") {
-		t.Fatalf("expected bobross removed after inactive update")
+	if strings.Contains(out, "general") {
+		t.Fatalf("expected room removed after inactive update")
+	}
+	if !strings.Contains(out, "(not connected)") {
+		t.Fatalf("expected disconnected placeholder when no server presence remains")
+	}
+}
+
+func TestChatModelRenderSidebarShowsAllVoiceRoomsWhileJoined(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+	m.channels["ch-2"] = channelInfo{ID: "ch-2", Name: "support"}
+	m.userNames["user-2"] = "bobross"
+	m.userNames["user-3"] = "alice"
+	m.userPresence["user-2"] = true
+	m.userPresence["user-3"] = true
+
+	m.voiceRoom = "ch-1"
+	m.resetVoiceMembersForRoom("ch-1")
+	m.voiceMembers["user-2"] = true
+	m.voiceSpeaking["user-2"] = true
+
+	m.handleServerMessage(ServerMessage{
+		Type: "voice.presence.snapshot",
+		VoiceRooms: map[string][]string{
+			"ch-1": {"user-2"},
+			"ch-2": {"user-3"},
+		},
+	})
+
+	out := m.renderSidebar()
+	if !strings.Contains(out, "general") || !strings.Contains(out, "support") {
+		t.Fatalf("expected all voice rooms rendered while joined")
+	}
+	if !strings.Contains(out, "+ <bobross>") {
+		t.Fatalf("expected speaking marker in joined room")
+	}
+	if strings.Contains(out, "+ <alice>") {
+		t.Fatalf("expected no speaking marker in non-joined room")
 	}
 }
 

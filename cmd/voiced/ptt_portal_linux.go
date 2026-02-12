@@ -200,10 +200,20 @@ func portalSessionPath(raw dbus.Variant) (dbus.ObjectPath, error) {
 }
 
 func bindPortalShortcut(ctx context.Context, conn *dbus.Conn, sessionPath dbus.ObjectPath, binding string) error {
+	trigger := portalPreferredTrigger(binding)
+	if trigger != "" {
+		if err := bindPortalShortcutWithTrigger(ctx, conn, sessionPath, trigger); err == nil {
+			return nil
+		}
+	}
+	return bindPortalShortcutWithTrigger(ctx, conn, sessionPath, "")
+}
+
+func bindPortalShortcutWithTrigger(ctx context.Context, conn *dbus.Conn, sessionPath dbus.ObjectPath, trigger string) error {
 	details := map[string]dbus.Variant{
 		"description": dbus.MakeVariant("Dialtone push-to-talk"),
 	}
-	if trigger := portalPreferredTrigger(binding); trigger != "" {
+	if trigger != "" {
 		details["preferred_trigger"] = dbus.MakeVariant(trigger)
 	}
 
@@ -234,6 +244,9 @@ func bindPortalShortcut(ctx context.Context, conn *dbus.Conn, sessionPath dbus.O
 		return err
 	}
 	if responseCode != 0 {
+		if trigger != "" {
+			return fmt.Errorf("portal BindShortcuts denied for preferred trigger %q: response=%d", trigger, responseCode)
+		}
 		return fmt.Errorf("portal BindShortcuts denied: response=%d", responseCode)
 	}
 	return nil
@@ -314,7 +327,7 @@ func portalPreferredTrigger(binding string) string {
 		case "v":
 			key = "v"
 		case "caps", "capslock", "caps_lock":
-			key = "Caps_Lock"
+			return ""
 		default:
 			return ""
 		}
