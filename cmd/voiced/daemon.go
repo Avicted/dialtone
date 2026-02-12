@@ -15,6 +15,8 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
+var errWebsocketUnavailable = errors.New("websocket unavailable")
+
 type voiceDaemon struct {
 	serverURL    string
 	token        string
@@ -141,6 +143,10 @@ func (d *voiceDaemon) handleIPCCommand(ctx context.Context, msg ipc.Message) (ip
 		d.room = room
 		d.mu.Unlock()
 		if err := d.sendSignal(VoiceSignal{Type: "voice_join", ChannelID: room}); err != nil {
+			if errors.Is(err, errWebsocketUnavailable) {
+				log.Printf("voice join deferred until websocket connected: room=%s", room)
+				return ipc.Message{Event: ipc.EventVoiceConnected, Room: room}, nil
+			}
 			d.mu.Lock()
 			if d.room == room {
 				d.room = ""
@@ -259,7 +265,7 @@ func (d *voiceDaemon) handleWSMessage(msg VoiceSignal) {
 func (d *voiceDaemon) sendSignal(msg VoiceSignal) error {
 	ws := d.currentWS()
 	if ws == nil {
-		return fmt.Errorf("websocket unavailable")
+		return errWebsocketUnavailable
 	}
 	return ws.Send(msg)
 }
