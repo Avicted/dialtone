@@ -1,6 +1,6 @@
 SHELL := /bin/sh
 
-.PHONY: fmt vet test coverage build build-client build-all
+.PHONY: fmt vet test coverage build build-client build-dialtone-voiced build-voiced build-all
 
 fmt:
 	go fmt ./...
@@ -21,4 +21,11 @@ build:
 build-client:
 	go build -o ./bin/client ./cmd/client
 
-build-all: build build-client
+build-dialtone-voiced:
+	go build -o ./bin/dialtone-voiced ./cmd/voiced
+
+build-voiced:
+	@echo "build-voiced is deprecated; use build-dialtone-voiced"
+	@$(MAKE) build-dialtone-voiced
+
+build-all: build build-client build-dialtone-voiced

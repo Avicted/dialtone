@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Avicted/dialtone/internal/crypto"
+	"github.com/Avicted/dialtone/internal/ipc"
 )
 
 const (
@@ -47,14 +48,8 @@ type userEntry struct {
 	Online bool
 	Known  bool
 	Admin  bool
+	Speak  bool
 }
-
-type sidebarMode int
-
-const (
-	sidebarChannels sidebarMode = iota
-	sidebarUsers
-)
 
 type chatModel struct {
 	api                   *APIClient
@@ -64,6 +59,24 @@ type chatModel struct {
 	wsConnect             func(serverURL, token string) (*WSClient, error)
 	ws                    *WSClient
 	wsCh                  chan ServerMessage
+	voiceIPCAddr          string
+	voiceIPC              *voiceIPC
+	voiceRoom             string
+	voiceCh               chan ipc.Message
+	voiceMembers          map[string]bool
+	serverVoiceRooms      map[string]map[string]bool
+	voiceSpeaking         map[string]bool
+	voiceAutoStart        bool
+	voicedPath            string
+	voiceArgs             []string
+	voiceDebug            bool
+	voiceLogPath          string
+	voiceLogNotified      bool
+	voiceAutoStarting     bool
+	voicePendingCmd       *ipc.Message
+	voicePendingRoom      string
+	voicePendingNotice    string
+	voiceProc             *voiceAutoProcess
 	messages              []chatMessage
 	channels              map[string]channelInfo
 	channelMsgs           map[string][]chatMessage
@@ -77,7 +90,6 @@ type chatModel struct {
 	activeChannel         string
 	channelUnread         map[string]int
 	sidebarVisible        bool
-	sidebarMode           sidebarMode
 	sidebarIndex          int
 	selectActive          bool
 	selectOptions         []channelInfo
@@ -90,6 +102,7 @@ type chatModel struct {
 	height                int
 	channelRefreshNeeded  bool
 	channelRefreshRetries int
+	voiceReconnectAttempt int
 }
 
 type wsConnectedMsg struct {
@@ -101,9 +114,18 @@ type wsMessageMsg ServerMessage
 
 type wsErrorMsg struct{ err error }
 
+type voiceIPCConnectedMsg struct{ ch chan ipc.Message }
+type voiceReconnectTick struct{}
+
+type voiceIPCMsg ipc.Message
+
+type voiceIPCErrorMsg struct{ err error }
+
 type presenceTick struct{}
 
 type shareTick struct{}
+
+type voicePingTick struct{}
 
 type shareKeysMsg struct{ err error }
 
@@ -121,7 +143,7 @@ type channelRefreshTick struct{}
 
 var errDirectoryKeyPending = fmt.Errorf("directory key pending")
 
-func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, keystorePassphrase string, width, height int) chatModel {
+func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, keystorePassphrase string, width, height int, voiceIPCAddr string) chatModel {
 	input := textinput.New()
 	input.Placeholder = "type a message..."
 	input.CharLimit = 16384
@@ -141,6 +163,11 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, keysto
 		kp:                   kp,
 		keystorePassphrase:   keystorePassphrase,
 		wsConnect:            ConnectWS,
+		voiceIPCAddr:         voiceIPCAddr,
+		voiceIPC:             newVoiceIPC(voiceIPCAddr),
+		voiceMembers:         make(map[string]bool),
+		serverVoiceRooms:     make(map[string]map[string]bool),
+		voiceSpeaking:        make(map[string]bool),
 		viewport:             vp,
 		input:                input,
 		width:                width,
@@ -155,7 +182,6 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, keysto
 		directoryKey:         dirKey,
 		channelUnread:        make(map[string]int),
 		sidebarVisible:       true,
-		sidebarMode:          sidebarChannels,
 		sidebarIndex:         0,
 	}
 	if auth != nil && auth.IsTrusted {
@@ -211,6 +237,30 @@ func waitForWSMsg(ch <-chan ServerMessage) tea.Cmd {
 	}
 }
 
+func waitForVoiceMsg(ch <-chan ipc.Message) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return voiceIPCErrorMsg{err: fmt.Errorf("voice daemon disconnected")}
+		}
+		return voiceIPCMsg(msg)
+	}
+}
+
+func (m chatModel) connectVoiceIPC() tea.Cmd {
+	if m.voiceIPC == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		if err := m.voiceIPC.ensureConn(); err != nil {
+			return voiceIPCErrorMsg{err: err}
+		}
+		ch := make(chan ipc.Message, 16)
+		go m.voiceIPC.readLoop(ch)
+		return voiceIPCConnectedMsg{ch: ch}
+	}
+}
+
 func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -225,7 +275,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 			m.handleChannelSelectKey(msg)
 			return m, nil
 		}
-		if m.sidebarVisible && m.sidebarMode == sidebarChannels && m.input.Value() == "" {
+		if m.sidebarVisible && m.input.Value() == "" {
 			switch msg.String() {
 			case "up", "k":
 				m.moveSidebarSelection(-1)
@@ -242,23 +292,15 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		switch msg.String() {
 		case "enter":
 			if m.connected {
-				m.sendCurrentMessage()
+				cmd := m.sendCurrentMessage()
+				return m, cmd
 			}
 			return m, nil
-		case "ctrl+h":
+		case "ctrl+h", "ctrl+u":
 			m.sidebarVisible = !m.sidebarVisible
 			m.updateLayout()
 			m.refreshViewport()
-			return m, nil
-		case "ctrl+u":
-			if m.sidebarMode == sidebarUsers {
-				m.sidebarMode = sidebarChannels
-			} else {
-				m.sidebarMode = sidebarUsers
-			}
-			m.sidebarVisible = true
-			m.updateLayout()
-			if m.sidebarMode == sidebarUsers {
+			if m.sidebarVisible {
 				m.refreshPresence()
 				return m, m.schedulePresenceTick()
 			}
@@ -281,6 +323,10 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 			m.appendSystemMessage("no global chat; select a channel with the sidebar or /channel list")
 		}
 		cmds := []tea.Cmd{waitForWSMsg(m.wsCh), m.shareKnownChannelKeysCmd(), m.scheduleShareTick()}
+		if m.sidebarVisible {
+			m.refreshPresence()
+			cmds = append(cmds, m.schedulePresenceTick())
+		}
 		if m.channelRefreshNeeded {
 			cmds = append(cmds, m.scheduleChannelRefresh())
 		}
@@ -315,6 +361,66 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		m.errMsg = msg.err.Error()
 		return m, nil
 
+	case voiceIPCConnectedMsg:
+		m.voiceReconnectAttempt = 0
+		m.voiceCh = msg.ch
+		m.voiceAutoStarting = false
+		if m.auth != nil && m.auth.UserID != "" && m.voiceIPC != nil {
+			if err := m.voiceIPC.send(ipc.Message{Cmd: ipc.CommandIdentify, User: m.auth.UserID}); err != nil {
+				m.appendSystemMessage(fmt.Sprintf("voice identity send failed: %v", err))
+			}
+		}
+		if m.voicePendingCmd != nil && m.voiceIPC != nil {
+			if err := m.voiceIPC.send(*m.voicePendingCmd); err != nil {
+				m.appendSystemMessage(fmt.Sprintf("voice command pending (retrying): %v", err))
+				m.voiceIPC.reset()
+				m.voiceCh = nil
+				m.voiceReconnectAttempt++
+				return m, m.scheduleVoiceReconnect(m.voiceReconnectAttempt)
+			}
+			if m.voicePendingCmd.Cmd == ipc.CommandVoiceJoin && m.voicePendingRoom != "" {
+				m.voiceRoom = m.voicePendingRoom
+			}
+			if m.voicePendingNotice != "" {
+				m.appendSystemMessage(m.voicePendingNotice)
+			}
+			m.clearPendingVoiceCommand()
+		}
+		return m, tea.Batch(waitForVoiceMsg(m.voiceCh), m.scheduleVoicePing())
+
+	case voiceIPCMsg:
+		m.handleVoiceEvent(ipc.Message(msg))
+		return m, waitForVoiceMsg(m.voiceCh)
+
+	case voiceIPCErrorMsg:
+		if !m.voiceAutoStarting {
+			m.appendSystemMessage("voice daemon disconnected")
+		}
+		m.clearVoiceMembers()
+		m.voiceCh = nil
+		if m.voiceIPC == nil {
+			return m, nil
+		}
+		m.voiceIPC.reset()
+		m.voiceReconnectAttempt++
+		return m, m.scheduleVoiceReconnect(m.voiceReconnectAttempt)
+
+	case voiceReconnectTick:
+		return m, m.connectVoiceIPC()
+
+	case voicePingTick:
+		if m.voiceIPC == nil {
+			m.voiceReconnectAttempt++
+			return m, m.scheduleVoiceReconnect(m.voiceReconnectAttempt)
+		}
+		if err := m.voiceIPC.send(ipc.Message{Cmd: ipc.CommandPing}); err != nil {
+			m.errMsg = fmt.Sprintf("voice ping failed: %v", err)
+			m.voiceIPC.reset()
+			m.voiceReconnectAttempt++
+			return m, m.scheduleVoiceReconnect(m.voiceReconnectAttempt)
+		}
+		return m, m.scheduleVoicePing()
+
 	case directorySyncMsg:
 		if msg.err != nil {
 			if !errors.Is(msg.err, errDirectoryKeyPending) {
@@ -331,7 +437,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 				m.userNames[profile.UserID] = name
 			}
 		}
-		if m.sidebarVisible && m.sidebarMode == sidebarUsers {
+		if m.sidebarVisible {
 			m.refreshPresence()
 		}
 		return m, nil
@@ -373,7 +479,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		return m, nil
 
 	case presenceTick:
-		if m.sidebarVisible && m.sidebarMode == sidebarUsers {
+		if m.sidebarVisible {
 			m.refreshPresence()
 			return m, m.schedulePresenceTick()
 		}
@@ -386,32 +492,32 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 	return m, cmd
 }
 
-func (m *chatModel) sendCurrentMessage() {
+func (m *chatModel) sendCurrentMessage() tea.Cmd {
 	body := strings.TrimSpace(m.input.Value())
 	if body == "" || m.ws == nil {
-		return
+		return nil
 	}
 	if strings.HasPrefix(body, "/") {
-		m.handleCommand(body)
+		cmd := m.handleCommand(body)
 		m.input.Reset()
-		return
+		return cmd
 	}
 
 	if m.activeChannel != "" {
 		key, err := m.ensureChannelKey(m.activeChannel)
 		if err != nil {
 			m.errMsg = fmt.Sprintf("channel key: %v", err)
-			return
+			return nil
 		}
 		encryptedBody, err := encryptChannelField(key, body)
 		if err != nil {
 			m.errMsg = fmt.Sprintf("encrypt channel message: %v", err)
-			return
+			return nil
 		}
 		senderNameEnc, err := encryptChannelField(key, m.auth.Username)
 		if err != nil {
 			m.errMsg = fmt.Sprintf("encrypt sender name: %v", err)
-			return
+			return nil
 		}
 		_ = m.ws.Send(SendMessage{
 			Type:          "channel.message.send",
@@ -420,29 +526,33 @@ func (m *chatModel) sendCurrentMessage() {
 			SenderNameEnc: senderNameEnc,
 		})
 		m.input.Reset()
-		return
+		return nil
 	}
 	m.appendSystemMessage("no global chat; select a channel with the sidebar or /channel list")
+	return nil
 }
 
-func (m *chatModel) handleCommand(raw string) {
+func (m *chatModel) handleCommand(raw string) tea.Cmd {
 	parts := strings.Fields(raw)
 	if len(parts) == 0 {
-		return
+		return nil
 	}
 	cmd := strings.ToLower(parts[0])
+	if cmd == "/voice" {
+		return m.handleVoiceCommand(raw, parts)
+	}
 	if cmd == "/help" {
 		m.appendSystemMessage(m.helpText())
-		return
+		return nil
 	}
 	if cmd == "/server" {
 		if len(parts) < 2 {
 			m.appendSystemMessage(m.serverHelpText())
-			return
+			return nil
 		}
 		if !m.auth.IsAdmin {
 			m.appendSystemMessage("admin only: server invites")
-			return
+			return nil
 		}
 		action := strings.ToLower(parts[1])
 		switch action {
@@ -451,15 +561,15 @@ func (m *chatModel) handleCommand(raw string) {
 		default:
 			m.appendSystemMessage("unknown server command")
 		}
-		return
+		return nil
 	}
 	if cmd != "/channel" {
 		m.appendSystemMessage("unknown command")
-		return
+		return nil
 	}
 	if len(parts) < 2 {
 		m.appendSystemMessage(m.channelHelpText())
-		return
+		return nil
 	}
 	action := strings.ToLower(parts[1])
 
@@ -471,51 +581,208 @@ func (m *chatModel) handleCommand(raw string) {
 	case "create":
 		if !m.auth.IsAdmin {
 			m.appendSystemMessage("admin only")
-			return
+			return nil
 		}
 		if len(parts) < 3 {
 			m.appendSystemMessage("usage: /channel create <name>")
-			return
+			return nil
 		}
 		name := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
 		m.createChannel(name)
 	case "delete":
 		if !m.auth.IsAdmin {
 			m.appendSystemMessage("admin only")
-			return
+			return nil
 		}
 		if len(parts) < 3 {
 			m.appendSystemMessage("usage: /channel delete <channel_id|name>")
-			return
+			return nil
 		}
 		nameOrID := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
 		m.deleteChannel(nameOrID)
 	case "rename":
 		if !m.auth.IsAdmin {
 			m.appendSystemMessage("admin only")
-			return
+			return nil
 		}
 		remaining := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
 		if remaining == "" {
 			m.appendSystemMessage("usage: /channel rename <channel_id|name> <new name>")
-			return
+			return nil
 		}
 		bits := strings.SplitN(remaining, " ", 2)
 		if len(bits) < 2 || strings.TrimSpace(bits[1]) == "" {
 			m.appendSystemMessage("usage: /channel rename <channel_id|name> <new name>")
-			return
+			return nil
 		}
 		m.renameChannel(strings.TrimSpace(bits[0]), strings.TrimSpace(bits[1]))
 	default:
 		m.appendSystemMessage("unknown channel command")
 	}
+	return nil
 }
 
 func (m *chatModel) helpText() string {
 	if m.auth.IsAdmin {
-		return "commands: /help | /channel list | /channel create <name> | /channel rename <channel_id|name> <new name> | /channel delete <channel_id|name> | /server invite"
+		return "commands: /help | /voice join [channel] | /voice leave | /voice mute | /voice unmute | /channel list | /channel create <name> | /channel rename <channel_id|name> <new name> | /channel delete <channel_id|name> | /server invite"
 	}
-	return "commands: /help | /channel list"
+	return "commands: /help | /voice join [channel] | /voice leave | /voice mute | /voice unmute | /channel list"
+}
+
+func (m *chatModel) handleVoiceEvent(msg ipc.Message) {
+	switch msg.Event {
+	case ipc.EventVoiceReady:
+		m.appendSystemMessage("voice daemon ready")
+		if msg.Room != "" && m.voiceRoom == msg.Room {
+			m.voiceRoom = ""
+		}
+		m.clearVoiceMembers()
+	case ipc.EventVoiceConnected:
+		if msg.Room != "" {
+			m.voiceRoom = msg.Room
+		}
+		m.resetVoiceMembersForRoom(m.voiceRoom)
+		m.appendSystemMessage("voice connected")
+	case ipc.EventVoiceMembers:
+		indicatorRoom := m.voiceChannelIndicatorID()
+		if indicatorRoom == "" {
+			indicatorRoom = m.voiceRoom
+		}
+		if msg.Room != "" && indicatorRoom != "" && msg.Room != indicatorRoom {
+			return
+		}
+		m.setVoiceMembers(msg.Users)
+	case ipc.EventUserSpeaking:
+		if msg.User == "" {
+			return
+		}
+		if m.voiceSpeaking == nil {
+			m.voiceSpeaking = make(map[string]bool)
+		}
+		m.voiceSpeaking[msg.User] = msg.Active
+	case ipc.EventError:
+		if msg.Error != "" {
+			if m.voiceAutoStarting && isVoiceIPCNotRunning(errors.New(msg.Error)) {
+				return
+			}
+			m.appendSystemMessage(fmt.Sprintf("voice error: %s", msg.Error))
+		}
+	case ipc.EventInfo:
+		if msg.Error != "" {
+			m.appendSystemMessage(fmt.Sprintf("voice info: %s", msg.Error))
+		}
+	case ipc.EventPong:
+		return
+	}
+}
+
+func (m *chatModel) handleVoiceCommand(raw string, parts []string) tea.Cmd {
+	if len(parts) < 2 {
+		m.appendSystemMessage("voice commands: /voice join [channel] | /voice leave | /voice mute | /voice unmute")
+		return nil
+	}
+	if m.voiceIPC == nil {
+		m.appendSystemMessage("voice daemon not configured")
+		return nil
+	}
+	action := strings.ToLower(parts[1])
+	switch action {
+	case "join":
+		room := ""
+		if len(parts) > 2 {
+			room = strings.TrimSpace(strings.TrimPrefix(raw, parts[0]+" "+parts[1]))
+		} else {
+			room = m.activeChannel
+		}
+		if room == "" {
+			m.appendSystemMessage("usage: /voice join [channel] (or select a channel)")
+			return nil
+		}
+		resolvedID, _, ok := m.resolveChannel(room, false)
+		if !ok {
+			return nil
+		}
+		return m.dispatchVoiceCommand(
+			ipc.Message{Cmd: ipc.CommandVoiceJoin, Room: resolvedID},
+			resolvedID,
+			"voice join requested",
+			"voice join",
+		)
+	case "leave":
+		return m.dispatchVoiceCommand(
+			ipc.Message{Cmd: ipc.CommandVoiceLeave, Room: m.voiceRoom},
+			"",
+			"voice leave requested",
+			"voice leave",
+		)
+	case "mute":
+		return m.dispatchVoiceCommand(
+			ipc.Message{Cmd: ipc.CommandMute},
+			"",
+			"voice mute requested",
+			"voice mute",
+		)
+	case "unmute":
+		return m.dispatchVoiceCommand(
+			ipc.Message{Cmd: ipc.CommandUnmute},
+			"",
+			"voice unmute requested",
+			"voice unmute",
+		)
+	default:
+		m.appendSystemMessage("voice commands: /voice join [channel] | /voice leave | /voice mute | /voice unmute")
+		return nil
+	}
+}
+
+func (m *chatModel) dispatchVoiceCommand(cmd ipc.Message, pendingRoom, notice, label string) tea.Cmd {
+	if m.voiceIPC == nil {
+		m.appendSystemMessage("voice daemon not configured")
+		return nil
+	}
+	if err := m.voiceIPC.send(cmd); err != nil {
+		m.voiceIPC.reset()
+		m.voiceCh = nil
+		if m.voiceAutoStart && isVoiceIPCNotRunning(err) {
+			if startErr := m.startVoiceDaemon(); startErr != nil {
+				m.appendSystemMessage(fmt.Sprintf("voice auto-start failed: %v", startErr))
+				return nil
+			}
+			if m.voiceLogPath != "" && !m.voiceLogNotified {
+				m.appendSystemMessage(fmt.Sprintf("voice log: %s", m.voiceLogPath))
+				m.voiceLogNotified = true
+			}
+			m.queueVoiceCommand(cmd, pendingRoom, notice)
+			m.appendSystemMessage("starting voice daemon...")
+			m.voiceReconnectAttempt = 0
+			return m.connectVoiceIPC()
+		}
+		m.appendSystemMessage(fmt.Sprintf("%s failed: %v", label, err))
+		return nil
+	}
+	if cmd.Cmd == ipc.CommandVoiceJoin && pendingRoom != "" {
+		m.voiceRoom = pendingRoom
+		m.resetVoiceMembersForRoom(pendingRoom)
+	}
+	if notice != "" {
+		m.appendSystemMessage(notice)
+	}
+	if m.voiceCh == nil {
+		return m.connectVoiceIPC()
+	}
+	return nil
+}
+
+func (m *chatModel) queueVoiceCommand(cmd ipc.Message, pendingRoom, notice string) {
+	m.voicePendingCmd = &cmd
+	m.voicePendingRoom = pendingRoom
+	m.voicePendingNotice = notice
+}
+
+func (m *chatModel) clearPendingVoiceCommand() {
+	m.voicePendingCmd = nil
+	m.voicePendingRoom = ""
+	m.voicePendingNotice = ""
 }
 
 func (m *chatModel) channelHelpText() string {
@@ -1123,7 +1390,7 @@ func (m *chatModel) handleServerMessage(msg ServerMessage) {
 		} else {
 			m.channelUnread[channelID] = 0
 		}
-		if m.sidebarVisible && m.sidebarMode == sidebarUsers {
+		if m.sidebarVisible {
 			m.refreshPresence()
 		}
 
@@ -1150,6 +1417,7 @@ func (m *chatModel) handleServerMessage(msg ServerMessage) {
 		delete(m.channelMsgs, msg.ChannelID)
 		delete(m.channelHistoryLoaded, msg.ChannelID)
 		delete(m.channelUnread, msg.ChannelID)
+		delete(m.serverVoiceRooms, msg.ChannelID)
 		delete(m.channelKeys, msg.ChannelID)
 		_ = m.persistChannelKeys()
 		if m.activeChannel == msg.ChannelID {
@@ -1162,6 +1430,12 @@ func (m *chatModel) handleServerMessage(msg ServerMessage) {
 		}
 		m.ensureSidebarIndex()
 		m.refreshViewport()
+
+	case "voice.presence.snapshot":
+		m.applyServerVoicePresenceSnapshot(msg.VoiceRooms)
+
+	case "voice.presence":
+		m.applyServerVoicePresence(msg.ChannelID, msg.Sender, msg.Active)
 
 	case "error":
 		m.errMsg = fmt.Sprintf("[%s] %s", msg.Code, msg.Message)
@@ -1240,84 +1514,113 @@ func (m *chatModel) renderMessages() string {
 }
 
 func (m *chatModel) renderSidebar() string {
-	lines := make([]string, 0, 12)
-	if m.sidebarMode == sidebarUsers {
-		lines = append(lines, sidebarTitleStyle.Render("Users"), "")
-		if m.isTrusted() {
-			users := m.allUserEntries()
-			if len(users) == 0 {
-				lines = append(lines, labelStyle.Render("(none)"))
-			} else {
-				for _, entry := range users {
-					prefix := "?"
-					style := labelStyle
-					if entry.Known {
-						if entry.Online {
-							prefix = "+"
-							style = sidebarOnlineStyle
-						} else {
-							prefix = "-"
-							style = sidebarOfflineStyle
-						}
-					}
-					name := formatUsername(entry.Name)
-					if entry.Admin {
-						name = fmt.Sprintf("%s (admin)", name)
-					}
-					lines = append(lines, style.Render(fmt.Sprintf("%s %s", prefix, name)))
+	lines := make([]string, 0, 20)
+	lines = append(lines, sidebarTitleStyle.Render("Channels"), "")
+	channels := m.channelList()
+	voiceChannelID := m.voiceChannelIndicatorID()
+	if len(channels) == 0 {
+		lines = append(lines, labelStyle.Render("(none)"))
+	} else {
+		for i, ch := range channels {
+			prefix := "  "
+			if i == m.sidebarIndex {
+				prefix = "> "
+			}
+			name := ch.Name
+			if name == "" {
+				name = shortID(ch.ID)
+			}
+			markers := ""
+			if ch.ID == m.activeChannel {
+				markers += "* "
+			}
+			if ch.ID == voiceChannelID {
+				markers += "♪ "
+			}
+			if markers != "" {
+				name = markers + name
+			}
+			unread := m.channelUnread[ch.ID]
+			if unread > 0 && ch.ID != m.activeChannel {
+				name = fmt.Sprintf("%s (%d)", name, unread)
+			}
+			lines = append(lines, fmt.Sprintf("%s%s", prefix, name))
+		}
+	}
+
+	lines = append(lines, "", sidebarTitleStyle.Render("In Voice"), "")
+	rooms := m.serverVoiceRoomEntries()
+	if voiceChannelID != "" {
+		joinedMembers := m.voiceMemberEntries()
+		if len(joinedMembers) > 0 {
+			replaced := false
+			for i := range rooms {
+				if rooms[i].ChannelID == voiceChannelID {
+					rooms[i].Members = joinedMembers
+					replaced = true
+					break
 				}
 			}
-		} else if m.activeChannel == "" {
-			lines = append(lines, labelStyle.Render("(no channel)"))
-		} else {
-			users := m.channelUserEntries(m.activeChannel)
-			if len(users) == 0 {
-				lines = append(lines, labelStyle.Render("(none)"))
-			} else {
-				for _, entry := range users {
-					prefix := "?"
-					style := labelStyle
-					if entry.Known {
-						if entry.Online {
-							prefix = "+"
-							style = sidebarOnlineStyle
-						} else {
-							prefix = "-"
-							style = sidebarOfflineStyle
-						}
-					}
-					name := formatUsername(entry.Name)
-					if entry.Admin {
-						name = fmt.Sprintf("%s (admin)", name)
-					}
-					lines = append(lines, style.Render(fmt.Sprintf("%s %s", prefix, name)))
+			if !replaced {
+				rooms = append(rooms, voiceRoomEntry{ChannelID: voiceChannelID, Members: joinedMembers})
+			}
+			sort.Slice(rooms, func(i, j int) bool {
+				leftName := m.channelDisplayName(rooms[i].ChannelID)
+				rightName := m.channelDisplayName(rooms[j].ChannelID)
+				if leftName == rightName {
+					return rooms[i].ChannelID < rooms[j].ChannelID
 				}
+				return leftName < rightName
+			})
+		}
+	}
+	if len(rooms) == 0 {
+		lines = append(lines, labelStyle.Render("(not connected)"))
+	} else {
+		for _, room := range rooms {
+			lines = append(lines, subtitleStyle.Render(m.channelDisplayName(room.ChannelID)))
+			for _, entry := range room.Members {
+				style := sidebarOfflineStyle
+				if entry.ID == m.auth.UserID || (entry.Known && entry.Online) {
+					style = sidebarOnlineStyle
+				}
+				name := formatUsername(entry.Name)
+				if entry.ID == m.auth.UserID {
+					name = fmt.Sprintf("%s (you)", name)
+				}
+				if room.ChannelID == voiceChannelID && entry.Speak {
+					name = fmt.Sprintf("+ %s", name)
+				}
+				if entry.Admin {
+					name = fmt.Sprintf("%s (admin)", name)
+				}
+				lines = append(lines, style.Render(name))
 			}
 		}
+	}
+
+	lines = append(lines, "", sidebarTitleStyle.Render("Users"), "")
+	var users []userEntry
+	if m.isTrusted() {
+		users = m.allUserEntries()
+	} else if m.activeChannel != "" {
+		users = m.channelUserEntries(m.activeChannel)
+	}
+	if !m.isTrusted() && m.activeChannel == "" {
+		lines = append(lines, labelStyle.Render("(no channel)"))
+	} else if len(users) == 0 {
+		lines = append(lines, labelStyle.Render("(none)"))
 	} else {
-		lines = append(lines, sidebarTitleStyle.Render("Channels"), "")
-		channels := m.channelList()
-		if len(channels) == 0 {
-			lines = append(lines, labelStyle.Render("(none)"))
-		} else {
-			for i, ch := range channels {
-				prefix := "  "
-				if i == m.sidebarIndex {
-					prefix = "> "
-				}
-				name := ch.Name
-				if name == "" {
-					name = shortID(ch.ID)
-				}
-				if ch.ID == m.activeChannel {
-					name = "* " + name
-				}
-				unread := m.channelUnread[ch.ID]
-				if unread > 0 && ch.ID != m.activeChannel {
-					name = fmt.Sprintf("%s (%d)", name, unread)
-				}
-				lines = append(lines, fmt.Sprintf("%s%s", prefix, name))
+		for _, entry := range users {
+			style := sidebarOfflineStyle
+			if entry.Known && entry.Online {
+				style = sidebarOnlineStyle
 			}
+			name := formatUsername(entry.Name)
+			if entry.Admin {
+				name = fmt.Sprintf("%s (admin)", name)
+			}
+			lines = append(lines, style.Render(name))
 		}
 	}
 
@@ -1337,6 +1640,83 @@ func (m *chatModel) channelList() []channelInfo {
 		return list[i].Name < list[j].Name
 	})
 	return list
+}
+
+func (m *chatModel) voiceMemberEntries() []userEntry {
+	if len(m.voiceMembers) == 0 {
+		return nil
+	}
+	entries := make([]userEntry, 0, len(m.voiceMembers))
+	for id := range m.voiceMembers {
+		status, ok := m.userPresence[id]
+		if m.auth != nil && id == m.auth.UserID {
+			status = true
+			ok = true
+		}
+		entries = append(entries, userEntry{
+			ID:     id,
+			Name:   m.userDisplayName(id),
+			Online: status,
+			Known:  ok,
+			Admin:  m.userAdmins[id],
+			Speak:  m.voiceSpeaking[id],
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Name == entries[j].Name {
+			return entries[i].ID < entries[j].ID
+		}
+		return entries[i].Name < entries[j].Name
+	})
+	return entries
+}
+
+type voiceRoomEntry struct {
+	ChannelID string
+	Members   []userEntry
+}
+
+func (m *chatModel) serverVoiceRoomEntries() []voiceRoomEntry {
+	if len(m.serverVoiceRooms) == 0 {
+		return nil
+	}
+	rooms := make([]voiceRoomEntry, 0, len(m.serverVoiceRooms))
+	for channelID, roomMembers := range m.serverVoiceRooms {
+		if len(roomMembers) == 0 {
+			continue
+		}
+		members := make([]userEntry, 0, len(roomMembers))
+		for userID := range roomMembers {
+			status, ok := m.userPresence[userID]
+			if m.auth != nil && userID == m.auth.UserID {
+				status = true
+				ok = true
+			}
+			members = append(members, userEntry{
+				ID:     userID,
+				Name:   m.userDisplayName(userID),
+				Online: status,
+				Known:  ok,
+				Admin:  m.userAdmins[userID],
+			})
+		}
+		sort.Slice(members, func(i, j int) bool {
+			if members[i].Name == members[j].Name {
+				return members[i].ID < members[j].ID
+			}
+			return members[i].Name < members[j].Name
+		})
+		rooms = append(rooms, voiceRoomEntry{ChannelID: channelID, Members: members})
+	}
+	sort.Slice(rooms, func(i, j int) bool {
+		leftName := m.channelDisplayName(rooms[i].ChannelID)
+		rightName := m.channelDisplayName(rooms[j].ChannelID)
+		if leftName == rightName {
+			return rooms[i].ChannelID < rooms[j].ChannelID
+		}
+		return leftName < rightName
+	})
+	return rooms
 }
 
 func (m *chatModel) channelUserEntries(channelID string) []userEntry {
@@ -1362,7 +1742,7 @@ func (m *chatModel) channelUserEntries(channelID string) []userEntry {
 	for id, name := range seen {
 		status, ok := m.userPresence[id]
 		admin := m.userAdmins[id]
-		entries = append(entries, userEntry{ID: id, Name: name, Online: status, Known: ok, Admin: admin})
+		entries = append(entries, userEntry{ID: id, Name: name, Online: status, Known: ok, Admin: admin, Speak: m.voiceSpeaking[id]})
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Name == entries[j].Name {
@@ -1437,7 +1817,7 @@ func (m *chatModel) allUserEntries() []userEntry {
 	for id, name := range seen {
 		status, ok := m.userPresence[id]
 		admin := m.userAdmins[id]
-		entries = append(entries, userEntry{ID: id, Name: name, Online: status, Known: ok, Admin: admin})
+		entries = append(entries, userEntry{ID: id, Name: name, Online: status, Known: ok, Admin: admin, Speak: m.voiceSpeaking[id]})
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Name == entries[j].Name {
@@ -1512,6 +1892,25 @@ func (m *chatModel) refreshPresence() {
 func (m *chatModel) schedulePresenceTick() tea.Cmd {
 	return tea.Tick(5*time.Second, func(time.Time) tea.Msg {
 		return presenceTick{}
+	})
+}
+
+func (m *chatModel) scheduleVoicePing() tea.Cmd {
+	return tea.Tick(15*time.Second, func(time.Time) tea.Msg {
+		return voicePingTick{}
+	})
+}
+
+func (m *chatModel) scheduleVoiceReconnect(attempt int) tea.Cmd {
+	if attempt < 1 {
+		attempt = 1
+	}
+	if attempt > 5 {
+		attempt = 5
+	}
+	delay := time.Duration(1<<attempt) * time.Second
+	return tea.Tick(delay, func(time.Time) tea.Msg {
+		return voiceReconnectTick{}
 	})
 }
 
@@ -1643,11 +2042,12 @@ func (m chatModel) View() string {
 	var b strings.Builder
 
 	header := fmt.Sprintf(
-		"  %s  %s  %s  %s",
+		"  %s  %s  %s  %s  %s",
 		appNameStyle.Render("* dialtone"),
 		headerStyle.Render(formatUsername(m.auth.Username)),
 		labelStyle.Render(shortID(m.auth.UserID)),
 		labelStyle.Render(m.activeChannelLabel()),
+		labelStyle.Render(m.voiceStatusLabel()),
 	)
 	connStatus := connectedStyle.Render("online")
 	if !m.connected {
@@ -1679,7 +2079,7 @@ func (m chatModel) View() string {
 	if m.errMsg != "" {
 		b.WriteString(errorStyle.Render("  x " + m.errMsg))
 	} else {
-		b.WriteString(helpStyle.Render("  enter: send - /help for commands - up/down+enter (empty): switch channel - ctrl+u: users list - pgup/pgdn: scroll - ctrl+q: quit"))
+		b.WriteString(helpStyle.Render("  enter: send - /help for commands - up/down+enter (empty): switch channel - ctrl+u: focus users/channels - pgup/pgdn: scroll - ctrl+h: toggle sidebar - ctrl+q: quit"))
 	}
 
 	return b.String()
@@ -1689,10 +2089,176 @@ func (m *chatModel) activeChannelLabel() string {
 	if m.activeChannel == "" {
 		return "no channel"
 	}
-	if info, ok := m.channels[m.activeChannel]; ok && info.Name != "" {
-		return "channel: " + info.Name
+	return "channel: " + m.channelDisplayName(m.activeChannel)
+}
+
+func (m *chatModel) voiceStatusLabel() string {
+	if m.voicePendingCmd != nil {
+		switch m.voicePendingCmd.Cmd {
+		case ipc.CommandVoiceJoin:
+			if channelID := m.voiceChannelIndicatorID(); channelID != "" {
+				return "voice: connecting " + m.channelDisplayName(channelID)
+			}
+			return "voice: connecting"
+		case ipc.CommandVoiceLeave:
+			if m.voiceRoom != "" {
+				return "voice: leaving " + m.channelDisplayName(m.voiceRoom)
+			}
+			return "voice: leaving"
+		default:
+			if m.voiceRoom != "" {
+				return "voice: " + m.channelDisplayName(m.voiceRoom)
+			}
+			return "voice: updating"
+		}
 	}
-	return "channel: " + shortID(m.activeChannel)
+	if m.voiceAutoStarting {
+		if channelID := m.voiceChannelIndicatorID(); channelID != "" {
+			return "voice: starting " + m.channelDisplayName(channelID)
+		}
+		return "voice: starting"
+	}
+	if m.voiceRoom != "" {
+		return "voice: " + m.channelDisplayName(m.voiceRoom)
+	}
+	if m.voiceCh == nil && m.voiceReconnectAttempt > 0 {
+		return "voice: reconnecting"
+	}
+	return "voice: off"
+}
+
+func (m *chatModel) voiceChannelIndicatorID() string {
+	if m.voiceRoom != "" {
+		return m.voiceRoom
+	}
+	if m.voicePendingCmd != nil && m.voicePendingCmd.Cmd == ipc.CommandVoiceJoin {
+		if m.voicePendingRoom != "" {
+			return m.voicePendingRoom
+		}
+		if m.voicePendingCmd.Room != "" {
+			return m.voicePendingCmd.Room
+		}
+	}
+	return ""
+}
+
+func (m *chatModel) channelDisplayName(channelID string) string {
+	if channelID == "" {
+		return ""
+	}
+	if info, ok := m.channels[channelID]; ok {
+		name := strings.TrimSpace(info.Name)
+		if name != "" {
+			return name
+		}
+	}
+	return shortID(channelID)
+}
+
+func (m *chatModel) applyServerVoicePresenceSnapshot(rooms map[string][]string) {
+	if m.serverVoiceRooms == nil {
+		m.serverVoiceRooms = make(map[string]map[string]bool)
+	}
+	clear(m.serverVoiceRooms)
+	for channelID, users := range rooms {
+		roomID := strings.TrimSpace(channelID)
+		if roomID == "" {
+			continue
+		}
+		members := make(map[string]bool)
+		for _, userID := range users {
+			id := strings.TrimSpace(userID)
+			if id == "" {
+				continue
+			}
+			members[id] = true
+		}
+		if len(members) > 0 {
+			m.serverVoiceRooms[roomID] = members
+		}
+	}
+}
+
+func (m *chatModel) applyServerVoicePresence(channelID, userID string, active bool) {
+	roomID := strings.TrimSpace(channelID)
+	id := strings.TrimSpace(userID)
+	if roomID == "" || id == "" {
+		return
+	}
+	if m.serverVoiceRooms == nil {
+		m.serverVoiceRooms = make(map[string]map[string]bool)
+	}
+	if active {
+		members := m.serverVoiceRooms[roomID]
+		if members == nil {
+			members = make(map[string]bool)
+			m.serverVoiceRooms[roomID] = members
+		}
+		members[id] = true
+		return
+	}
+	members := m.serverVoiceRooms[roomID]
+	if members == nil {
+		return
+	}
+	delete(members, id)
+	if len(members) == 0 {
+		delete(m.serverVoiceRooms, roomID)
+	}
+}
+
+func (m *chatModel) setVoiceMembers(users []string) {
+	if m.voiceMembers == nil {
+		m.voiceMembers = make(map[string]bool)
+	}
+	clear(m.voiceMembers)
+	for _, userID := range users {
+		id := strings.TrimSpace(userID)
+		if id == "" {
+			continue
+		}
+		m.voiceMembers[id] = true
+	}
+	if m.auth != nil && m.auth.UserID != "" && m.voiceRoom != "" {
+		m.voiceMembers[m.auth.UserID] = true
+	}
+}
+
+func (m *chatModel) resetVoiceMembersForRoom(room string) {
+	if room == "" {
+		m.clearVoiceMembers()
+		return
+	}
+	if m.voiceMembers == nil {
+		m.voiceMembers = make(map[string]bool)
+	}
+	clear(m.voiceMembers)
+	if m.auth != nil && m.auth.UserID != "" {
+		m.voiceMembers[m.auth.UserID] = true
+	}
+}
+
+func (m *chatModel) clearVoiceMembers() {
+	if m.voiceMembers == nil {
+		m.voiceMembers = make(map[string]bool)
+		return
+	}
+	clear(m.voiceMembers)
+}
+
+func (m *chatModel) userDisplayName(userID string) string {
+	if userID == "" {
+		return ""
+	}
+	if m.auth != nil && userID == m.auth.UserID {
+		if name := strings.TrimSpace(m.auth.Username); name != "" {
+			return name
+		}
+	}
+	if name := strings.TrimSpace(m.userNames[userID]); name != "" {
+		return name
+	}
+	return shortID(userID)
 }
 
 func formatTime(ts string) string {

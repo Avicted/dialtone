@@ -71,7 +71,7 @@ func TestChatInitConnectsWebsocket(t *testing.T) {
 	auth := newTestAuth()
 	auth.IsTrusted = false
 	api := &APIClient{serverURL: server.URL, httpClient: server.Client()}
-	m := newChatModel(api, auth, newTestKeyPair(t), "passphrase123", 80, 24)
+	m := newChatModel(api, auth, newTestKeyPair(t), "passphrase123", 80, 24, "")
 	cmd := m.Init()
 	msg := cmd()
 

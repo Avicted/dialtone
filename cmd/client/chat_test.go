@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"nhooyr.io/websocket"
 
 	"github.com/Avicted/dialtone/internal/crypto"
+	"github.com/Avicted/dialtone/internal/ipc"
 )
 
 func newChatForTest(t *testing.T, api *APIClient) chatModel {
@@ -22,7 +24,7 @@ func newChatForTest(t *testing.T, api *APIClient) chatModel {
 	setTestConfigDir(t)
 	auth := newTestAuth()
 	kp := newTestKeyPair(t)
-	return newChatModel(api, auth, kp, "passphrase123", 80, 24)
+	return newChatModel(api, auth, kp, "passphrase123", 80, 24, "")
 }
 
 func TestChatModelHandleCommandNonAdmin(t *testing.T) {
@@ -234,7 +236,7 @@ func TestChatModelEnsureChannelKey(t *testing.T) {
 
 	api := &APIClient{serverURL: server.URL, httpClient: server.Client()}
 	setTestConfigDir(t)
-	m := newChatModel(api, newTestAuth(), recipientKP, "passphrase123", 80, 24)
+	m := newChatModel(api, newTestAuth(), recipientKP, "passphrase123", 80, 24, "")
 	got, err := m.ensureChannelKey("ch-1")
 	if err != nil {
 		t.Fatalf("ensureChannelKey: %v", err)
@@ -310,20 +312,45 @@ func TestChatModelRenderSidebarAndSelection(t *testing.T) {
 	m.channels["a"] = channelInfo{ID: "a", Name: "alpha"}
 	m.channels["b"] = channelInfo{ID: "b", Name: "beta"}
 	m.activeChannel = "a"
+	m.voiceRoom = "b"
+	m.resetVoiceMembersForRoom("b")
+	m.voiceSpeaking[m.auth.UserID] = true
 	m.channelUnread["b"] = 2
 	out := m.renderSidebar()
+	if !strings.Contains(out, "Channels") || !strings.Contains(out, "Users") {
+		t.Fatalf("expected channels and users sections")
+	}
+	if !strings.Contains(out, "In Voice") {
+		t.Fatalf("expected in-voice section")
+	}
+	if strings.Index(out, "Channels") > strings.Index(out, "Users") {
+		t.Fatalf("expected channels above users")
+	}
 	if !strings.Contains(out, "alpha") || !strings.Contains(out, "(2)") {
 		t.Fatalf("unexpected sidebar output")
 	}
+	if !strings.Contains(out, "♪ beta") {
+		t.Fatalf("expected voice marker on joined channel")
+	}
+	if !strings.Contains(out, "+ <"+m.auth.Username+">") {
+		t.Fatalf("expected speaking marker in in-voice section")
+	}
 
-	m.sidebarMode = sidebarUsers
 	m.userNames["user-1"] = "alice"
 	m.userAdmins["user-1"] = true
 	m.userPresence["user-1"] = true
+	m.voiceSpeaking["user-1"] = true
 	m.channelMsgs["a"] = []chatMessage{{sender: "user-1", senderName: "alice"}}
 	out = m.renderSidebar()
-	if !strings.Contains(out, "admin") {
+	if !strings.Contains(out, "admin") || !strings.Contains(out, "alpha") {
 		t.Fatalf("expected admin label")
+	}
+	usersIdx := strings.Index(out, "Users")
+	if usersIdx == -1 {
+		t.Fatalf("expected users section")
+	}
+	if strings.Contains(out[usersIdx:], "+ <alice>") {
+		t.Fatalf("did not expect speaking marker in users section")
 	}
 }
 
@@ -571,7 +598,7 @@ func TestChatModelEnsureDirectoryKeyFromEnvelope(t *testing.T) {
 	defer server.Close()
 
 	api := &APIClient{serverURL: server.URL, httpClient: server.Client()}
-	m := newChatModel(api, newTestAuth(), recipientKP, "passphrase123", 80, 24)
+	m := newChatModel(api, newTestAuth(), recipientKP, "passphrase123", 80, 24, "")
 	got, err := m.ensureDirectoryKey()
 	if err != nil {
 		t.Fatalf("ensureDirectoryKey: %v", err)
@@ -589,7 +616,7 @@ func TestChatModelEnsureDirectoryKeyInvalidSenderKey(t *testing.T) {
 	defer server.Close()
 
 	api := &APIClient{serverURL: server.URL, httpClient: server.Client()}
-	m := newChatModel(api, newTestAuth(), newTestKeyPair(t), "passphrase123", 80, 24)
+	m := newChatModel(api, newTestAuth(), newTestKeyPair(t), "passphrase123", 80, 24, "")
 	if _, err := m.ensureDirectoryKey(); err == nil {
 		t.Fatalf("expected error")
 	}
@@ -660,7 +687,7 @@ func TestChatModelSyncDirectoryPushProfile(t *testing.T) {
 	}
 }
 
-func TestChatModelUpdateSidebarToggle(t *testing.T) {
+func TestChatModelUpdateCtrlHTogglesSidebar(t *testing.T) {
 	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
 	m.sidebarVisible = true
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlH})
@@ -744,12 +771,162 @@ func TestChatModelActiveChannelLabel(t *testing.T) {
 	}
 }
 
+func TestChatModelVoiceStatusLabel(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	if got := m.voiceStatusLabel(); got != "voice: off" {
+		t.Fatalf("unexpected status: %s", got)
+	}
+
+	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+	m.voiceRoom = "ch-1"
+	if got := m.voiceStatusLabel(); got != "voice: general" {
+		t.Fatalf("unexpected connected status: %s", got)
+	}
+
+	joinCmd := ipc.Message{Cmd: ipc.CommandVoiceJoin, Room: "ch-2"}
+	m.channels["ch-2"] = channelInfo{ID: "ch-2", Name: "voice-lobby"}
+	m.voicePendingCmd = &joinCmd
+	m.voicePendingRoom = "ch-2"
+	m.voiceRoom = ""
+	if got := m.voiceStatusLabel(); got != "voice: connecting voice-lobby" {
+		t.Fatalf("unexpected connecting status: %s", got)
+	}
+
+	m.voicePendingCmd = nil
+	m.voicePendingRoom = ""
+	m.voiceReconnectAttempt = 1
+	m.voiceCh = nil
+	if got := m.voiceStatusLabel(); got != "voice: reconnecting" {
+		t.Fatalf("unexpected reconnect status: %s", got)
+	}
+}
+
+func TestChatModelViewIncludesVoiceStatus(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	if out := m.View(); !strings.Contains(out, "voice: off") {
+		t.Fatalf("expected default voice status in header")
+	}
+
+	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+	m.voiceRoom = "ch-1"
+	if out := m.View(); !strings.Contains(out, "voice: general") {
+		t.Fatalf("expected connected voice status in header")
+	}
+}
+
+func TestChatModelHandleVoiceMembersEvent(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+	m.voiceRoom = "ch-1"
+	m.handleVoiceEvent(ipc.Message{Event: ipc.EventVoiceMembers, Room: "ch-1", Users: []string{"user-2"}})
+
+	if !m.voiceMembers["user-2"] {
+		t.Fatalf("expected remote voice member")
+	}
+	if !m.voiceMembers[m.auth.UserID] {
+		t.Fatalf("expected local user included in voice members")
+	}
+
+	m.handleVoiceEvent(ipc.Message{Event: ipc.EventVoiceMembers, Room: "other-room", Users: []string{"user-3"}})
+	if m.voiceMembers["user-3"] {
+		t.Fatalf("expected stale room roster ignored")
+	}
+
+	out := m.renderSidebar()
+	if !strings.Contains(out, "In Voice") || !strings.Contains(out, "(you)") {
+		t.Fatalf("expected in-voice roster rendering")
+	}
+}
+
+func TestChatModelRenderSidebarServerVoicePresence(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+	m.userNames["user-2"] = "bobross"
+	m.userPresence["user-2"] = true
+	inVoiceSection := func(sidebar string) string {
+		start := strings.Index(sidebar, "In Voice")
+		if start == -1 {
+			return ""
+		}
+		section := sidebar[start:]
+		if end := strings.Index(section, "Users"); end != -1 {
+			section = section[:end]
+		}
+		return section
+	}
+
+	m.handleServerMessage(ServerMessage{
+		Type:       "voice.presence.snapshot",
+		VoiceRooms: map[string][]string{"ch-1": {"user-2"}},
+	})
+	out := m.renderSidebar()
+	inVoice := inVoiceSection(out)
+	if !strings.Contains(inVoice, "In Voice") || !strings.Contains(inVoice, "general") || !strings.Contains(inVoice, "<bobross>") {
+		t.Fatalf("expected server voice presence in sidebar")
+	}
+	if strings.Contains(inVoice, "(not connected)") {
+		t.Fatalf("unexpected disconnected placeholder when server presence exists")
+	}
+
+	m.handleServerMessage(ServerMessage{Type: "voice.presence", ChannelID: "ch-1", Sender: "user-2", Active: false})
+	out = m.renderSidebar()
+	inVoice = inVoiceSection(out)
+	if strings.Contains(inVoice, "<bobross>") {
+		t.Fatalf("expected member removed after inactive update")
+	}
+	if !strings.Contains(inVoice, "(not connected)") {
+		t.Fatalf("expected disconnected placeholder when no server presence remains")
+	}
+}
+
+func TestChatModelRenderSidebarShowsAllVoiceRoomsWhileJoined(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+	m.channels["ch-2"] = channelInfo{ID: "ch-2", Name: "support"}
+	m.userNames["user-2"] = "bobross"
+	m.userNames["user-3"] = "alice"
+	m.userPresence["user-2"] = true
+	m.userPresence["user-3"] = true
+
+	m.voiceRoom = "ch-1"
+	m.resetVoiceMembersForRoom("ch-1")
+	m.voiceMembers["user-2"] = true
+	m.voiceSpeaking["user-2"] = true
+
+	m.handleServerMessage(ServerMessage{
+		Type: "voice.presence.snapshot",
+		VoiceRooms: map[string][]string{
+			"ch-1": {"user-2"},
+			"ch-2": {"user-3"},
+		},
+	})
+
+	out := m.renderSidebar()
+	if !strings.Contains(out, "general") || !strings.Contains(out, "support") {
+		t.Fatalf("expected all voice rooms rendered while joined")
+	}
+	if !strings.Contains(out, "+ <bobross>") {
+		t.Fatalf("expected speaking marker in joined room")
+	}
+	if strings.Contains(out, "+ <alice>") {
+		t.Fatalf("expected no speaking marker in non-joined room")
+	}
+}
+
 func TestChatModelRenderMessagesStyled(t *testing.T) {
 	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
 	msg := chatMessage{sender: "u1", senderName: "bob", body: "hello", sentAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	m.messages = append(m.messages, msg)
 	if out := m.renderMessages(); out == "" {
 		t.Fatalf("expected rendered output")
+	}
+}
+
+func TestChatModelHandleVoiceInfoEvent(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.handleVoiceEvent(ipc.Message{Event: ipc.EventInfo, Error: "ptt startup mode=auto wayland=true portal=available selected=portal"})
+	if !strings.Contains(lastSystemMessage(m), "voice info: ptt startup mode=auto") {
+		t.Fatalf("expected voice info message shown to user")
 	}
 }
 
@@ -828,7 +1005,6 @@ func TestChatModelPresenceTickTrusted(t *testing.T) {
 	api := &APIClient{serverURL: server.URL, httpClient: server.Client()}
 	m := newChatForTest(t, api)
 	m.userNames["u1"] = "alice"
-	m.sidebarMode = sidebarUsers
 	m.sidebarVisible = true
 	updated, cmd := m.Update(presenceTick{})
 	if cmd == nil {
@@ -839,11 +1015,10 @@ func TestChatModelPresenceTickTrusted(t *testing.T) {
 	}
 }
 
-func TestChatModelRenderSidebarUsersNotTrusted(t *testing.T) {
+func TestChatModelRenderSidebarNotTrustedNoChannel(t *testing.T) {
 	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
 	m.auth.IsTrusted = false
-	m.sidebarMode = sidebarUsers
-	if out := m.renderSidebar(); !strings.Contains(out, "(no channel)") {
+	if out := m.renderSidebar(); !strings.Contains(out, "(no channel)") || !strings.Contains(out, "Channels") {
 		t.Fatalf("unexpected sidebar output")
 	}
 }
@@ -863,7 +1038,7 @@ func TestChatModelEnsureChannelKeyFromEnvelope(t *testing.T) {
 	defer server.Close()
 
 	api := &APIClient{serverURL: server.URL, httpClient: server.Client()}
-	m := newChatModel(api, newTestAuth(), recipientKP, "passphrase123", 80, 24)
+	m := newChatModel(api, newTestAuth(), recipientKP, "passphrase123", 80, 24, "")
 	if _, err := m.ensureChannelKey("ch-1"); err != nil {
 		t.Fatalf("ensureChannelKey: %v", err)
 	}
@@ -903,7 +1078,7 @@ func TestChatModelConnectWS(t *testing.T) {
 	defer server.Close()
 
 	api := &APIClient{serverURL: server.URL, httpClient: server.Client()}
-	m := newChatModel(api, newTestAuth(), newTestKeyPair(t), "passphrase123", 80, 24)
+	m := newChatModel(api, newTestAuth(), newTestKeyPair(t), "passphrase123", 80, 24, "")
 	cmd := m.connectWS()
 	msg := cmd()
 	connected, ok := msg.(wsConnectedMsg)
@@ -922,7 +1097,7 @@ func TestChatModelUpdateWindowAndPaging(t *testing.T) {
 	_, _ = updated.Update(tea.KeyMsg{Type: tea.KeyPgUp})
 }
 
-func TestChatModelUpdateCtrlU(t *testing.T) {
+func TestChatModelUpdateCtrlUTogglesSidebar(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/presence" {
 			w.WriteHeader(http.StatusNotFound)
@@ -936,8 +1111,11 @@ func TestChatModelUpdateCtrlU(t *testing.T) {
 	m := newChatForTest(t, api)
 	m.userNames["u1"] = "alice"
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
-	if updated.sidebarMode != sidebarUsers || cmd == nil {
-		t.Fatalf("expected users mode and command")
+	if updated.sidebarVisible {
+		t.Fatalf("expected sidebar hidden")
+	}
+	if cmd != nil {
+		t.Fatalf("expected no command when hiding sidebar")
 	}
 }
 
@@ -1100,5 +1278,83 @@ func TestChatModelDirectoryKeyHelpers(t *testing.T) {
 	}
 	if got := m.decryptDirectoryName("abc"); got != "" {
 		t.Fatalf("expected empty directory name")
+	}
+}
+
+func TestChatModelVoicePendingCommandRetainedOnSendFailure(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.voiceIPC = &voiceIPC{addr: ""}
+	m.voiceRoom = "room-1"
+	leaveCmd := ipc.Message{Cmd: ipc.CommandVoiceLeave, Room: "room-1"}
+	m.queueVoiceCommand(leaveCmd, "", "voice leave requested")
+
+	updated, cmd := m.Update(voiceIPCConnectedMsg{ch: make(chan ipc.Message, 1)})
+	if cmd == nil {
+		t.Fatalf("expected reconnect command")
+	}
+	if updated.voicePendingCmd == nil {
+		t.Fatalf("expected pending voice command to remain queued")
+	}
+	if updated.voicePendingCmd.Cmd != ipc.CommandVoiceLeave {
+		t.Fatalf("expected leave command to remain queued")
+	}
+	if updated.voiceReconnectAttempt != 1 {
+		t.Fatalf("expected reconnect attempt incremented, got %d", updated.voiceReconnectAttempt)
+	}
+	if updated.voiceRoom != "room-1" {
+		t.Fatalf("expected voice room unchanged before leave ack")
+	}
+	if !strings.Contains(lastSystemMessage(updated), "voice command pending (retrying)") {
+		t.Fatalf("expected retry notice message")
+	}
+}
+
+func TestChatModelDispatchVoiceLeaveDoesNotClearRoomBeforeAck(t *testing.T) {
+	addr := filepath.Join(t.TempDir(), "voice.sock")
+	listener, err := ipc.Listen(addr)
+	if err != nil {
+		t.Fatalf("listen voice ipc: %v", err)
+	}
+	defer listener.Close()
+
+	recv := make(chan ipc.Message, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		dec := ipc.NewDecoder(conn)
+		var msg ipc.Message
+		if err := dec.Decode(&msg); err == nil {
+			recv <- msg
+		}
+	}()
+
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.voiceIPC = newVoiceIPC(addr)
+	m.voiceCh = make(chan ipc.Message, 1)
+	m.voiceRoom = "room-1"
+
+	cmd := m.dispatchVoiceCommand(
+		ipc.Message{Cmd: ipc.CommandVoiceLeave, Room: m.voiceRoom},
+		"",
+		"voice leave requested",
+		"voice leave",
+	)
+	if cmd != nil {
+		t.Fatalf("expected no reconnect command on successful send")
+	}
+	if m.voiceRoom != "room-1" {
+		t.Fatalf("expected voice room unchanged until daemon ready event")
+	}
+
+	select {
+	case msg := <-recv:
+		if msg.Cmd != ipc.CommandVoiceLeave || msg.Room != "room-1" {
+			t.Fatalf("unexpected ipc message: %+v", msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for leave command on ipc")
 	}
 }

@@ -17,12 +17,18 @@ const (
 )
 
 type rootModel struct {
-	api    *APIClient
-	state  appState
-	login  loginModel
-	chat   chatModel
-	width  int
-	height int
+	api            *APIClient
+	state          appState
+	login          loginModel
+	chat           chatModel
+	width          int
+	height         int
+	voice          string
+	voiceAutoStart bool
+	voicedPath     string
+	voiceArgs      []string
+	voiceDebug     bool
+	voiceLogPath   string
 }
 
 type authSuccessMsg struct {
@@ -34,11 +40,12 @@ type authErrorMsg struct {
 	err error
 }
 
-func newRootModel(api *APIClient) rootModel {
+func newRootModel(api *APIClient, voiceIPCAddr string) rootModel {
 	return rootModel{
 		api:   api,
 		state: stateLogin,
 		login: newLoginModel(api.serverURL),
+		voice: voiceIPCAddr,
 	}
 }
 
@@ -56,6 +63,9 @@ func (m rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.state == stateChat && m.chat.ws != nil {
 			m.chat.ws.Close()
 		}
+		if m.state == stateChat {
+			m.chat.stopVoiceDaemon()
+		}
 		return m, tea.Quit
 	}
 
@@ -66,7 +76,12 @@ func (m rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = saveServerHistory(m.login.serverHistory)
 		}
 		m.state = stateChat
-		m.chat = newChatModel(m.api, auth.auth, auth.kp, m.login.passphrase(), m.width, m.height)
+		m.chat = newChatModel(m.api, auth.auth, auth.kp, m.login.passphrase(), m.width, m.height, m.voice)
+		m.chat.voiceAutoStart = m.voiceAutoStart
+		m.chat.voicedPath = m.voicedPath
+		m.chat.voiceArgs = m.voiceArgs
+		m.chat.voiceDebug = m.voiceDebug
+		m.chat.voiceLogPath = m.voiceLogPath
 		return m, m.chat.Init()
 	}
 

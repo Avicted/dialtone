@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -19,22 +21,103 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, newProgram pr
 	fs := flag.NewFlagSet("dialtone", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	serverAddr := fs.String("server", "", "dialtone server address")
+	voiceIPCAddr := fs.String("voice-ipc", defaultVoiceIPCAddr(), "voice daemon ipc socket/pipe")
+	voiceAuto := fs.Bool("voice-auto", true, "auto-start voice daemon when needed")
+	voicedPath := fs.String("voiced", "", "path to dialtone-voiced binary")
+	voiceDebug := fs.Bool("voice-debug", false, "write dialtone-voiced logs to a file")
+	voiceLogPath := fs.String("voice-log", "", "path to dialtone-voiced log file")
+	voicePTT := fs.String("voice-ptt", "", "override dialtone-voiced PTT binding (empty to disable)")
+	voicePTTBackend := fs.String("voice-ptt-backend", "", "override dialtone-voiced PTT backend: auto|portal|hotkey")
+	voiceVAD := fs.Int("voice-vad", 0, "override dialtone-voiced VAD threshold (lower = more sensitive)")
+	voiceMeter := fs.Bool("voice-meter", false, "enable dialtone-voiced mic level logging")
+	voiceSTUN := fs.String("voice-stun", "", "comma-separated STUN servers for dialtone-voiced")
+	voiceTURN := fs.String("voice-turn", "", "comma-separated TURN servers for dialtone-voiced")
+	voiceTURNUser := fs.String("voice-turn-user", "", "TURN username for dialtone-voiced")
+	voiceTURNPass := fs.String("voice-turn-pass", "", "TURN password for dialtone-voiced")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	serverSet := false
+	voicePTTSet := false
+	voicePTTBackendSet := false
+	voiceVADSet := false
+	voiceMeterSet := false
+	voiceSTUNSet := false
+	voiceTURNSet := false
+	voiceTURNUserSet := false
+	voiceTURNPassSet := false
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "server" {
 			serverSet = true
+		}
+		switch f.Name {
+		case "voice-ptt":
+			voicePTTSet = true
+		case "voice-ptt-backend":
+			voicePTTBackendSet = true
+		case "voice-vad":
+			voiceVADSet = true
+		case "voice-meter":
+			voiceMeterSet = true
+		case "voice-stun":
+			voiceSTUNSet = true
+		case "voice-turn":
+			voiceTURNSet = true
+		case "voice-turn-user":
+			voiceTURNUserSet = true
+		case "voice-turn-pass":
+			voiceTURNPassSet = true
 		}
 	})
 	if !serverSet {
 		*serverAddr = ""
 	}
+	if voiceVADSet && *voiceVAD <= 0 {
+		return fmt.Errorf("voice-vad must be > 0")
+	}
+	if voicePTTBackendSet {
+		mode := strings.ToLower(strings.TrimSpace(*voicePTTBackend))
+		switch mode {
+		case "auto", "portal", "hotkey":
+		default:
+			return fmt.Errorf("voice-ptt-backend must be one of: auto, portal, hotkey")
+		}
+	}
+
+	voiceArgs := make([]string, 0, 14)
+	if voicePTTSet {
+		voiceArgs = append(voiceArgs, "-ptt", *voicePTT)
+	}
+	if voicePTTBackendSet {
+		voiceArgs = append(voiceArgs, "-ptt-backend", strings.ToLower(strings.TrimSpace(*voicePTTBackend)))
+	}
+	if voiceVADSet {
+		voiceArgs = append(voiceArgs, "-vad-threshold", strconv.Itoa(*voiceVAD))
+	}
+	if voiceMeterSet && *voiceMeter {
+		voiceArgs = append(voiceArgs, "-meter")
+	}
+	if voiceSTUNSet {
+		voiceArgs = append(voiceArgs, "-stun", *voiceSTUN)
+	}
+	if voiceTURNSet {
+		voiceArgs = append(voiceArgs, "-turn", *voiceTURN)
+	}
+	if voiceTURNUserSet {
+		voiceArgs = append(voiceArgs, "-turn-user", *voiceTURNUser)
+	}
+	if voiceTURNPassSet {
+		voiceArgs = append(voiceArgs, "-turn-pass", *voiceTURNPass)
+	}
 
 	api := NewAPIClient(*serverAddr)
-	m := newRootModel(api)
+	m := newRootModel(api, *voiceIPCAddr)
+	m.voiceAutoStart = *voiceAuto
+	m.voicedPath = *voicedPath
+	m.voiceArgs = voiceArgs
+	m.voiceDebug = *voiceDebug
+	m.voiceLogPath = *voiceLogPath
 
 	if newProgram == nil {
 		newProgram = func(model tea.Model, options ...tea.ProgramOption) programRunner {

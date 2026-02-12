@@ -1603,3 +1603,124 @@ func TestClient_ReadLoop_UnexpectedError(t *testing.T) {
 		t.Fatal("timeout waiting for readLoop to exit after protocol error")
 	}
 }
+
+func TestHub_HandleVoiceJoin_SendsRosterSnapshot(t *testing.T) {
+	repo := &fakeChannelRepo{ch: channel.Channel{ID: "ch-1"}}
+	hub := NewHub(nil, nil, repo)
+
+	joiner := &Client{send: make(chan []byte, 8), userID: "user-1"}
+	peer := &Client{send: make(chan []byte, 8), userID: "user-2"}
+
+	hub.mu.Lock()
+	hub.voiceRooms["ch-1"] = map[*Client]struct{}{peer: {}}
+	hub.voiceRoom[peer] = "ch-1"
+	hub.mu.Unlock()
+
+	hub.handleVoiceJoin(context.Background(), joiner, inboundMessage{Type: "voice_join", ChannelID: "ch-1"})
+
+	roster := readEvent[voiceSignalEvent](t, joiner.send)
+	if roster.Type != "voice_roster" {
+		t.Fatalf("type = %q, want %q", roster.Type, "voice_roster")
+	}
+	if roster.ChannelID != "ch-1" {
+		t.Fatalf("channel = %q, want %q", roster.ChannelID, "ch-1")
+	}
+	if len(roster.Users) != 2 || roster.Users[0] != "user-1" || roster.Users[1] != "user-2" {
+		t.Fatalf("unexpected roster users: %+v", roster.Users)
+	}
+
+	selfJoin := readEvent[voiceSignalEvent](t, joiner.send)
+	if selfJoin.Type != "voice_join" || selfJoin.Sender != "user-1" {
+		t.Fatalf("unexpected self join event: %+v", selfJoin)
+	}
+
+	peerJoin := readEvent[voiceSignalEvent](t, peer.send)
+	if peerJoin.Type != "voice_join" || peerJoin.Sender != "user-1" {
+		t.Fatalf("unexpected peer join event: %+v", peerJoin)
+	}
+
+	hub.mu.RLock()
+	room := hub.voiceRoom[joiner]
+	hub.mu.RUnlock()
+	if room != "ch-1" {
+		t.Fatalf("joiner room = %q, want %q", room, "ch-1")
+	}
+}
+
+func TestHub_SendVoicePresenceSnapshot(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	observer := &Client{send: make(chan []byte, 4), userID: "observer"}
+	user1 := &Client{userID: "user-1"}
+	user2 := &Client{userID: "user-2"}
+
+	hub.mu.Lock()
+	hub.voiceRooms["ch-1"] = map[*Client]struct{}{user1: {}, user2: {}}
+	hub.voiceRoom[user1] = "ch-1"
+	hub.voiceRoom[user2] = "ch-1"
+	hub.mu.Unlock()
+
+	hub.sendVoicePresenceSnapshot(observer)
+
+	event := readEvent[voiceSignalEvent](t, observer.send)
+	if event.Type != "voice.presence.snapshot" {
+		t.Fatalf("type = %q, want %q", event.Type, "voice.presence.snapshot")
+	}
+	users, ok := event.VoiceRooms["ch-1"]
+	if !ok {
+		t.Fatalf("expected snapshot to include ch-1")
+	}
+	if len(users) != 2 || users[0] != "user-1" || users[1] != "user-2" {
+		t.Fatalf("unexpected snapshot users: %+v", users)
+	}
+}
+
+func TestHub_HandleVoiceJoin_BroadcastsPresenceToAllClients(t *testing.T) {
+	repo := &fakeChannelRepo{ch: channel.Channel{ID: "ch-1"}}
+	hub := NewHub(nil, nil, repo)
+
+	joiner := &Client{send: make(chan []byte, 8), userID: "user-1"}
+	peer := &Client{send: make(chan []byte, 8), userID: "user-2"}
+	watcher := &Client{send: make(chan []byte, 8), userID: "watcher"}
+
+	hub.mu.Lock()
+	hub.clients[joiner] = struct{}{}
+	hub.clients[peer] = struct{}{}
+	hub.clients[watcher] = struct{}{}
+	hub.voiceRooms["ch-1"] = map[*Client]struct{}{peer: {}}
+	hub.voiceRoom[peer] = "ch-1"
+	hub.mu.Unlock()
+
+	hub.handleVoiceJoin(context.Background(), joiner, inboundMessage{Type: "voice_join", ChannelID: "ch-1"})
+
+	event := readEvent[voiceSignalEvent](t, watcher.send)
+	if event.Type != "voice.presence" {
+		t.Fatalf("type = %q, want %q", event.Type, "voice.presence")
+	}
+	if event.ChannelID != "ch-1" || event.Sender != "user-1" || !event.Active {
+		t.Fatalf("unexpected presence event: %+v", event)
+	}
+}
+
+func TestHub_HandleVoiceLeave_BroadcastsPresenceToAllClients(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+
+	leaver := &Client{send: make(chan []byte, 8), userID: "user-1"}
+	watcher := &Client{send: make(chan []byte, 8), userID: "watcher"}
+
+	hub.mu.Lock()
+	hub.clients[leaver] = struct{}{}
+	hub.clients[watcher] = struct{}{}
+	hub.voiceRooms["ch-1"] = map[*Client]struct{}{leaver: {}}
+	hub.voiceRoom[leaver] = "ch-1"
+	hub.mu.Unlock()
+
+	hub.handleVoiceLeave(leaver, inboundMessage{Type: "voice_leave", ChannelID: "ch-1"})
+
+	event := readEvent[voiceSignalEvent](t, watcher.send)
+	if event.Type != "voice.presence" {
+		t.Fatalf("type = %q, want %q", event.Type, "voice.presence")
+	}
+	if event.ChannelID != "ch-1" || event.Sender != "user-1" || event.Active {
+		t.Fatalf("unexpected presence event: %+v", event)
+	}
+}
