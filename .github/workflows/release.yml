@@ -27,11 +27,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        goos: [linux, windows]
+        goos: [linux]
         goarch: [amd64]
         include:
-          - goos: windows
-            ext: .exe
           - goos: linux
             ext: ""
     steps:
@@ -43,6 +41,18 @@ jobs:
         with:
           go-version: "1.22"
           cache: true
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libopus-dev \
+            libopusfile-dev \
+            libx11-dev \
+            libxtst-dev \
+            xvfb \
+            xauth
 
       - name: Build
         env:
