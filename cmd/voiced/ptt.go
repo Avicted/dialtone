@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"runtime"
 	"strings"
 )
@@ -22,43 +23,92 @@ type pttController struct {
 	backend pttBackend
 }
 
+var (
+	newPortalBackend = newPortalPTTBackend
+	newHotkeyBackend = newHotkeyPTTBackend
+)
+
 func newPTTController(binding, mode string) (*pttController, error) {
 	resolvedMode, err := normalizePTTBackendMode(mode)
 	if err != nil {
 		return nil, err
 	}
+	wayland := isWaylandSession()
 
 	switch resolvedMode {
 	case pttBackendPortal:
-		backend, portalErr := newPortalPTTBackend(binding)
+		backend, portalErr := newPortalBackend(binding)
 		if portalErr != nil {
+			log.Printf("%s", pttStartupDiagnostic(resolvedMode, wayland, "unavailable", "none", portalErr))
 			return nil, fmt.Errorf("ptt portal backend unavailable: %w", portalErr)
 		}
-		log.Printf("ptt backend: xdg portal global shortcuts")
+		log.Printf("%s", pttStartupDiagnostic(resolvedMode, wayland, "available", pttBackendPortal, nil))
 		return &pttController{backend: backend}, nil
 	case pttBackendHotkey:
-		hotkeyBackend, hotkeyErr := newHotkeyPTTBackend(binding)
+		hotkeyBackend, hotkeyErr := newHotkeyBackend(binding)
 		if hotkeyErr != nil {
+			log.Printf("%s", pttStartupDiagnostic(resolvedMode, wayland, "skipped", "none", hotkeyErr))
 			return nil, hotkeyErr
 		}
-		log.Printf("ptt backend: direct hotkey")
+		log.Printf("%s", pttStartupDiagnostic(resolvedMode, wayland, "skipped", pttBackendHotkey, nil))
 		return &pttController{backend: hotkeyBackend}, nil
 	default:
 		if runtime.GOOS == "linux" {
-			backend, portalErr := newPortalPTTBackend(binding)
+			backend, portalErr := newPortalBackend(binding)
 			if portalErr == nil {
-				log.Printf("ptt backend: xdg portal global shortcuts")
+				log.Printf("%s", pttStartupDiagnostic(resolvedMode, wayland, "available", pttBackendPortal, nil))
 				return &pttController{backend: backend}, nil
 			}
-			log.Printf("ptt portal unavailable, falling back to direct hotkey: %v", portalErr)
+			if isWaylandSession() && !allowWaylandHotkeyFallback() {
+				log.Printf("%s", pttStartupDiagnostic(resolvedMode, wayland, "unavailable", "none", portalErr))
+				return nil, fmt.Errorf("ptt portal backend unavailable on wayland: %w", portalErr)
+			}
+			log.Printf("%s", pttStartupDiagnostic(resolvedMode, wayland, "unavailable", pttBackendHotkey, portalErr))
 		}
 
-		hotkeyBackend, hotkeyErr := newHotkeyPTTBackend(binding)
+		hotkeyBackend, hotkeyErr := newHotkeyBackend(binding)
 		if hotkeyErr != nil {
+			portalStatus := "unsupported"
+			if runtime.GOOS == "linux" {
+				portalStatus = "unavailable"
+			}
+			log.Printf("%s", pttStartupDiagnostic(resolvedMode, wayland, portalStatus, "none", hotkeyErr))
 			return nil, hotkeyErr
 		}
-		log.Printf("ptt backend: direct hotkey")
+		portalStatus := "unsupported"
+		if runtime.GOOS == "linux" {
+			portalStatus = "unavailable"
+		}
+		log.Printf("%s", pttStartupDiagnostic(resolvedMode, wayland, portalStatus, pttBackendHotkey, nil))
 		return &pttController{backend: hotkeyBackend}, nil
+	}
+}
+
+func pttStartupDiagnostic(mode string, wayland bool, portalStatus, selected string, reason error) string {
+	message := fmt.Sprintf("ptt startup mode=%s wayland=%t portal=%s selected=%s", mode, wayland, portalStatus, selected)
+	if reason != nil {
+		message += fmt.Sprintf(" reason=%v", reason)
+	}
+	return message
+}
+
+func isWaylandSession() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	if strings.TrimSpace(os.Getenv("WAYLAND_DISPLAY")) != "" {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("XDG_SESSION_TYPE")), "wayland")
+}
+
+func allowWaylandHotkeyFallback() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("DIALTONE_PTT_WAYLAND_HOTKEY_FALLBACK")))
+	switch value {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 

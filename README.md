@@ -110,7 +110,8 @@ Client auto-start (recommended for debugging):
 - `--voice-vad <n>` lowers or raises the VAD threshold (lower = more sensitive).
 - `--voice-meter` logs mic levels to the `dialtone-voiced` log file once per second.
 - `--voice-stun/--voice-turn/--voice-turn-user/--voice-turn-pass` are passed to the auto-started `dialtone-voiced` daemon.
-- If portal registration is unavailable, Dialtone falls back to direct hotkey registration.
+- On Wayland (`auto` backend), Dialtone requires portal global shortcuts by default. To force direct hotkey fallback anyway, set `DIALTONE_PTT_WAYLAND_HOTKEY_FALLBACK=1`.
+- On non-Wayland Linux, if portal registration is unavailable, Dialtone falls back to direct hotkey registration.
 
 ### Create initial invite
 
