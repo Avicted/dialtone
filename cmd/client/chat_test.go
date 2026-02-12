@@ -909,6 +909,14 @@ func TestChatModelRenderMessagesStyled(t *testing.T) {
 	}
 }
 
+func TestChatModelHandleVoiceInfoEvent(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.handleVoiceEvent(ipc.Message{Event: ipc.EventInfo, Error: "ptt startup mode=auto wayland=true portal=available selected=portal"})
+	if !strings.Contains(lastSystemMessage(m), "voice info: ptt startup mode=auto") {
+		t.Fatalf("expected voice info message shown to user")
+	}
+}
+
 func TestChatModelWaitForWSMsg(t *testing.T) {
 	ch := make(chan ServerMessage, 1)
 	ch <- ServerMessage{Type: "ping"}

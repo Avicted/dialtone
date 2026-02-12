@@ -482,6 +482,9 @@ func (d *voiceDaemon) runPTT(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if strings.TrimSpace(controller.startupInfo) != "" && d.ipc != nil {
+		d.ipc.Broadcast(ipc.Message{Event: ipc.EventInfo, Error: controller.startupInfo})
+	}
 	return controller.Run(ctx, func() {
 		d.setSpeaking(true)
 	}, func() {

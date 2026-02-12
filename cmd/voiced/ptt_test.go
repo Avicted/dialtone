@@ -95,6 +95,27 @@ func TestAllowWaylandHotkeyFallback(t *testing.T) {
 	}
 }
 
+func TestNewPTTControllerIncludesStartupInfo(t *testing.T) {
+	prevHotkey := newHotkeyBackend
+	newHotkeyBackend = func(string) (pttBackend, error) {
+		return testPTTBackend{}, nil
+	}
+	t.Cleanup(func() {
+		newHotkeyBackend = prevHotkey
+	})
+
+	controller, err := newPTTController("caps", pttBackendHotkey)
+	if err != nil {
+		t.Fatalf("expected hotkey controller created: %v", err)
+	}
+	if controller == nil {
+		t.Fatalf("expected controller")
+	}
+	if !strings.Contains(controller.startupInfo, "selected=hotkey") {
+		t.Fatalf("expected startup diagnostic to include selected backend, got %q", controller.startupInfo)
+	}
+}
+
 func TestPTTStartupDiagnostic(t *testing.T) {
 	msg := pttStartupDiagnostic(pttBackendAuto, true, "unavailable", "none", errors.New("portal unavailable"))
 	if !strings.Contains(msg, "mode=auto") {

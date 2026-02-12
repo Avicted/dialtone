@@ -667,6 +667,10 @@ func (m *chatModel) handleVoiceEvent(msg ipc.Message) {
 			}
 			m.appendSystemMessage(fmt.Sprintf("voice error: %s", msg.Error))
 		}
+	case ipc.EventInfo:
+		if msg.Error != "" {
+			m.appendSystemMessage(fmt.Sprintf("voice info: %s", msg.Error))
+		}
 	case ipc.EventPong:
 		return
 	}

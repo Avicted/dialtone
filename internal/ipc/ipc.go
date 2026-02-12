@@ -14,6 +14,7 @@ const (
 	EventVoiceConnected = "voice_connected"
 	EventVoiceMembers   = "voice_members"
 	EventUserSpeaking   = "user_speaking"
+	EventInfo           = "info"
 	EventError          = "error"
 	EventPong           = "pong"
 )

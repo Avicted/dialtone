@@ -20,7 +20,8 @@ const (
 )
 
 type pttController struct {
-	backend pttBackend
+	backend     pttBackend
+	startupInfo string
 }
 
 var (
@@ -42,22 +43,25 @@ func newPTTController(binding, mode string) (*pttController, error) {
 			log.Printf("%s", pttStartupDiagnostic(resolvedMode, wayland, "unavailable", "none", portalErr))
 			return nil, fmt.Errorf("ptt portal backend unavailable: %w", portalErr)
 		}
-		log.Printf("%s", pttStartupDiagnostic(resolvedMode, wayland, "available", pttBackendPortal, nil))
-		return &pttController{backend: backend}, nil
+		diagnostic := pttStartupDiagnostic(resolvedMode, wayland, "available", pttBackendPortal, nil)
+		log.Printf("%s", diagnostic)
+		return &pttController{backend: backend, startupInfo: diagnostic}, nil
 	case pttBackendHotkey:
 		hotkeyBackend, hotkeyErr := newHotkeyBackend(binding)
 		if hotkeyErr != nil {
 			log.Printf("%s", pttStartupDiagnostic(resolvedMode, wayland, "skipped", "none", hotkeyErr))
 			return nil, hotkeyErr
 		}
-		log.Printf("%s", pttStartupDiagnostic(resolvedMode, wayland, "skipped", pttBackendHotkey, nil))
-		return &pttController{backend: hotkeyBackend}, nil
+		diagnostic := pttStartupDiagnostic(resolvedMode, wayland, "skipped", pttBackendHotkey, nil)
+		log.Printf("%s", diagnostic)
+		return &pttController{backend: hotkeyBackend, startupInfo: diagnostic}, nil
 	default:
 		if runtime.GOOS == "linux" {
 			backend, portalErr := newPortalBackend(binding)
 			if portalErr == nil {
-				log.Printf("%s", pttStartupDiagnostic(resolvedMode, wayland, "available", pttBackendPortal, nil))
-				return &pttController{backend: backend}, nil
+				diagnostic := pttStartupDiagnostic(resolvedMode, wayland, "available", pttBackendPortal, nil)
+				log.Printf("%s", diagnostic)
+				return &pttController{backend: backend, startupInfo: diagnostic}, nil
 			}
 			if isWaylandSession() && !allowWaylandHotkeyFallback() {
 				log.Printf("%s", pttStartupDiagnostic(resolvedMode, wayland, "unavailable", "none", portalErr))
@@ -79,8 +83,9 @@ func newPTTController(binding, mode string) (*pttController, error) {
 		if runtime.GOOS == "linux" {
 			portalStatus = "unavailable"
 		}
-		log.Printf("%s", pttStartupDiagnostic(resolvedMode, wayland, portalStatus, pttBackendHotkey, nil))
-		return &pttController{backend: hotkeyBackend}, nil
+		diagnostic := pttStartupDiagnostic(resolvedMode, wayland, portalStatus, pttBackendHotkey, nil)
+		log.Printf("%s", diagnostic)
+		return &pttController{backend: hotkeyBackend, startupInfo: diagnostic}, nil
 	}
 }
 
