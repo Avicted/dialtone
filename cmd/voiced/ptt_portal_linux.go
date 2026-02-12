@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -346,25 +345,7 @@ func portalToken(prefix string) string {
 }
 
 func portalParentWindow() string {
-	if explicit := strings.TrimSpace(os.Getenv("DIALTONE_PORTAL_PARENT_WINDOW")); explicit != "" {
-		return explicit
-	}
-
-	windowID := strings.TrimSpace(os.Getenv("WINDOWID"))
-	if windowID == "" {
-		return ""
-	}
-	if strings.Contains(windowID, ":") {
-		return windowID
-	}
-	if strings.HasPrefix(windowID, "0x") || strings.HasPrefix(windowID, "0X") {
-		return "x11:" + strings.ToLower(windowID)
-	}
-	decimalID, err := strconv.ParseUint(windowID, 10, 64)
-	if err != nil {
-		return ""
-	}
-	return fmt.Sprintf("x11:0x%x", decimalID)
+	return strings.TrimSpace(os.Getenv("DIALTONE_PORTAL_PARENT_WINDOW"))
 }
 
 type portalShortcutSpec struct {

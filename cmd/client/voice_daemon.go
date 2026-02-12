@@ -80,6 +80,18 @@ func voiceDaemonEnv() []string {
 		if strings.HasPrefix(entry, "DESKTOP_STARTUP_ID=") {
 			continue
 		}
+		if strings.HasPrefix(entry, "GIO_LAUNCHED_DESKTOP_FILE=") {
+			continue
+		}
+		if strings.HasPrefix(entry, "GIO_LAUNCHED_DESKTOP_FILE_PID=") {
+			continue
+		}
+		if strings.HasPrefix(entry, "BAMF_DESKTOP_FILE_HINT=") {
+			continue
+		}
+		if strings.HasPrefix(entry, "BAMF_DESKTOP_FILE=") {
+			continue
+		}
 		filtered = append(filtered, entry)
 	}
 	return filtered
