@@ -324,7 +324,6 @@ func TestChatModelRenderSidebarAndSelection(t *testing.T) {
 		t.Fatalf("unexpected sidebar output")
 	}
 
-	m.sidebarMode = sidebarUsers
 	m.userNames["user-1"] = "alice"
 	m.userAdmins["user-1"] = true
 	m.userPresence["user-1"] = true
@@ -668,7 +667,7 @@ func TestChatModelSyncDirectoryPushProfile(t *testing.T) {
 	}
 }
 
-func TestChatModelUpdateSidebarToggle(t *testing.T) {
+func TestChatModelUpdateCtrlHTogglesSidebar(t *testing.T) {
 	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
 	m.sidebarVisible = true
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlH})
@@ -836,7 +835,6 @@ func TestChatModelPresenceTickTrusted(t *testing.T) {
 	api := &APIClient{serverURL: server.URL, httpClient: server.Client()}
 	m := newChatForTest(t, api)
 	m.userNames["u1"] = "alice"
-	m.sidebarMode = sidebarUsers
 	m.sidebarVisible = true
 	updated, cmd := m.Update(presenceTick{})
 	if cmd == nil {
@@ -847,10 +845,9 @@ func TestChatModelPresenceTickTrusted(t *testing.T) {
 	}
 }
 
-func TestChatModelRenderSidebarUsersNotTrusted(t *testing.T) {
+func TestChatModelRenderSidebarNotTrustedNoChannel(t *testing.T) {
 	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
 	m.auth.IsTrusted = false
-	m.sidebarMode = sidebarUsers
 	if out := m.renderSidebar(); !strings.Contains(out, "(no channel)") || !strings.Contains(out, "Channels") {
 		t.Fatalf("unexpected sidebar output")
 	}
@@ -930,7 +927,7 @@ func TestChatModelUpdateWindowAndPaging(t *testing.T) {
 	_, _ = updated.Update(tea.KeyMsg{Type: tea.KeyPgUp})
 }
 
-func TestChatModelUpdateCtrlU(t *testing.T) {
+func TestChatModelUpdateCtrlUTogglesSidebar(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/presence" {
 			w.WriteHeader(http.StatusNotFound)
@@ -944,8 +941,11 @@ func TestChatModelUpdateCtrlU(t *testing.T) {
 	m := newChatForTest(t, api)
 	m.userNames["u1"] = "alice"
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
-	if updated.sidebarMode != sidebarUsers || cmd == nil {
-		t.Fatalf("expected users mode and command")
+	if updated.sidebarVisible {
+		t.Fatalf("expected sidebar hidden")
+	}
+	if cmd != nil {
+		t.Fatalf("expected no command when hiding sidebar")
 	}
 }
 

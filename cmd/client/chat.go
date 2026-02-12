@@ -51,13 +51,6 @@ type userEntry struct {
 	Speak  bool
 }
 
-type sidebarMode int
-
-const (
-	sidebarChannels sidebarMode = iota
-	sidebarUsers
-)
-
 type chatModel struct {
 	api                   *APIClient
 	auth                  *AuthResponse
@@ -95,7 +88,6 @@ type chatModel struct {
 	activeChannel         string
 	channelUnread         map[string]int
 	sidebarVisible        bool
-	sidebarMode           sidebarMode
 	sidebarIndex          int
 	selectActive          bool
 	selectOptions         []channelInfo
@@ -186,7 +178,6 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, keysto
 		directoryKey:         dirKey,
 		channelUnread:        make(map[string]int),
 		sidebarVisible:       true,
-		sidebarMode:          sidebarChannels,
 		sidebarIndex:         0,
 	}
 	if auth != nil && auth.IsTrusted {
@@ -280,7 +271,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 			m.handleChannelSelectKey(msg)
 			return m, nil
 		}
-		if m.sidebarVisible && m.sidebarMode == sidebarChannels && m.input.Value() == "" {
+		if m.sidebarVisible && m.input.Value() == "" {
 			switch msg.String() {
 			case "up", "k":
 				m.moveSidebarSelection(-1)
@@ -301,7 +292,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 				return m, cmd
 			}
 			return m, nil
-		case "ctrl+h":
+		case "ctrl+h", "ctrl+u":
 			m.sidebarVisible = !m.sidebarVisible
 			m.updateLayout()
 			m.refreshViewport()
@@ -310,16 +301,6 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 				return m, m.schedulePresenceTick()
 			}
 			return m, nil
-		case "ctrl+u":
-			if m.sidebarMode == sidebarUsers {
-				m.sidebarMode = sidebarChannels
-			} else {
-				m.sidebarMode = sidebarUsers
-			}
-			m.sidebarVisible = true
-			m.updateLayout()
-			m.refreshPresence()
-			return m, m.schedulePresenceTick()
 
 		case "pgup", "pgdown":
 			var cmd tea.Cmd
