@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -26,6 +27,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, newProgram pr
 	voiceDebug := fs.Bool("voice-debug", false, "write dialtone-voiced logs to a file")
 	voiceLogPath := fs.String("voice-log", "", "path to dialtone-voiced log file")
 	voicePTT := fs.String("voice-ptt", "", "override dialtone-voiced PTT binding (empty to disable)")
+	voicePTTBackend := fs.String("voice-ptt-backend", "", "override dialtone-voiced PTT backend: auto|portal|hotkey")
 	voiceVAD := fs.Int("voice-vad", 0, "override dialtone-voiced VAD threshold (lower = more sensitive)")
 	voiceMeter := fs.Bool("voice-meter", false, "enable dialtone-voiced mic level logging")
 	voiceSTUN := fs.String("voice-stun", "", "comma-separated STUN servers for dialtone-voiced")
@@ -38,6 +40,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, newProgram pr
 
 	serverSet := false
 	voicePTTSet := false
+	voicePTTBackendSet := false
 	voiceVADSet := false
 	voiceMeterSet := false
 	voiceSTUNSet := false
@@ -51,6 +54,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, newProgram pr
 		switch f.Name {
 		case "voice-ptt":
 			voicePTTSet = true
+		case "voice-ptt-backend":
+			voicePTTBackendSet = true
 		case "voice-vad":
 			voiceVADSet = true
 		case "voice-meter":
@@ -71,10 +76,21 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, newProgram pr
 	if voiceVADSet && *voiceVAD <= 0 {
 		return fmt.Errorf("voice-vad must be > 0")
 	}
+	if voicePTTBackendSet {
+		mode := strings.ToLower(strings.TrimSpace(*voicePTTBackend))
+		switch mode {
+		case "auto", "portal", "hotkey":
+		default:
+			return fmt.Errorf("voice-ptt-backend must be one of: auto, portal, hotkey")
+		}
+	}
 
-	voiceArgs := make([]string, 0, 12)
+	voiceArgs := make([]string, 0, 14)
 	if voicePTTSet {
 		voiceArgs = append(voiceArgs, "-ptt", *voicePTT)
+	}
+	if voicePTTBackendSet {
+		voiceArgs = append(voiceArgs, "-ptt-backend", strings.ToLower(strings.TrimSpace(*voicePTTBackend)))
 	}
 	if voiceVADSet {
 		voiceArgs = append(voiceArgs, "-vad-threshold", strconv.Itoa(*voiceVAD))

@@ -21,6 +21,7 @@ type voiceDaemon struct {
 	serverURL    string
 	token        string
 	pttBind      string
+	pttBackend   string
 	iceConfig    webrtc.Configuration
 	vadThreshold int64
 	meter        bool
@@ -40,7 +41,7 @@ type voiceDaemon struct {
 	playback *audio.Playback
 }
 
-func newVoiceDaemon(serverURL, token, pttBind string, iceConfig webrtc.Configuration, vadThreshold int64, meter bool) *voiceDaemon {
+func newVoiceDaemon(serverURL, token, pttBind, pttBackend string, iceConfig webrtc.Configuration, vadThreshold int64, meter bool) *voiceDaemon {
 	if vadThreshold <= 0 {
 		vadThreshold = defaultVADThreshold
 	}
@@ -48,6 +49,7 @@ func newVoiceDaemon(serverURL, token, pttBind string, iceConfig webrtc.Configura
 		serverURL:    serverURL,
 		token:        token,
 		pttBind:      pttBind,
+		pttBackend:   pttBackend,
 		iceConfig:    iceConfig,
 		vadThreshold: vadThreshold,
 		meter:        meter,
@@ -444,7 +446,7 @@ func (d *voiceDaemon) writePlayback(samples []int16) {
 }
 
 func (d *voiceDaemon) runPTT(ctx context.Context) error {
-	controller, err := newPTTController(d.pttBind)
+	controller, err := newPTTController(d.pttBind, d.pttBackend)
 	if err != nil {
 		return err
 	}

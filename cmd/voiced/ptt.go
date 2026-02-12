@@ -3,69 +3,81 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
+	"runtime"
 	"strings"
+)
 
-	"golang.design/x/hotkey"
+type pttBackend interface {
+	Run(ctx context.Context, onDown, onUp func()) error
+}
+
+const (
+	pttBackendAuto   = "auto"
+	pttBackendPortal = "portal"
+	pttBackendHotkey = "hotkey"
 )
 
 type pttController struct {
-	hk *hotkey.Hotkey
+	backend pttBackend
 }
 
-func newPTTController(binding string) (*pttController, error) {
-	mods, key, err := parseHotkey(binding)
+func newPTTController(binding, mode string) (*pttController, error) {
+	resolvedMode, err := normalizePTTBackendMode(mode)
 	if err != nil {
 		return nil, err
 	}
-	return &pttController{hk: hotkey.New(mods, key)}, nil
+
+	switch resolvedMode {
+	case pttBackendPortal:
+		backend, portalErr := newPortalPTTBackend(binding)
+		if portalErr != nil {
+			return nil, fmt.Errorf("ptt portal backend unavailable: %w", portalErr)
+		}
+		log.Printf("ptt backend: xdg portal global shortcuts")
+		return &pttController{backend: backend}, nil
+	case pttBackendHotkey:
+		hotkeyBackend, hotkeyErr := newHotkeyPTTBackend(binding)
+		if hotkeyErr != nil {
+			return nil, hotkeyErr
+		}
+		log.Printf("ptt backend: direct hotkey")
+		return &pttController{backend: hotkeyBackend}, nil
+	default:
+		if runtime.GOOS == "linux" {
+			backend, portalErr := newPortalPTTBackend(binding)
+			if portalErr == nil {
+				log.Printf("ptt backend: xdg portal global shortcuts")
+				return &pttController{backend: backend}, nil
+			}
+			log.Printf("ptt portal unavailable, falling back to direct hotkey: %v", portalErr)
+		}
+
+		hotkeyBackend, hotkeyErr := newHotkeyPTTBackend(binding)
+		if hotkeyErr != nil {
+			return nil, hotkeyErr
+		}
+		log.Printf("ptt backend: direct hotkey")
+		return &pttController{backend: hotkeyBackend}, nil
+	}
+}
+
+func normalizePTTBackendMode(mode string) (string, error) {
+	mode = strings.TrimSpace(strings.ToLower(mode))
+	if mode == "" {
+		mode = pttBackendAuto
+	}
+	switch mode {
+	case pttBackendAuto, pttBackendPortal, pttBackendHotkey:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("invalid ptt-backend %q (expected: auto, portal, hotkey)", mode)
+	}
 }
 
 func (p *pttController) Run(ctx context.Context, onDown, onUp func()) error {
-	if err := p.hk.Register(); err != nil {
-		return err
+	if p == nil || p.backend == nil {
+		return fmt.Errorf("ptt backend is not configured")
 	}
-	defer p.hk.Unregister()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-p.hk.Keydown():
-			if onDown != nil {
-				onDown()
-			}
-		case <-p.hk.Keyup():
-			if onUp != nil {
-				onUp()
-			}
-		}
-	}
-}
-
-func parseHotkey(binding string) ([]hotkey.Modifier, hotkey.Key, error) {
-	binding = strings.TrimSpace(strings.ToLower(binding))
-	if binding == "" {
-		return nil, 0, fmt.Errorf("hotkey binding is required")
-	}
-	parts := strings.Split(binding, "+")
-	mods := make([]hotkey.Modifier, 0, len(parts))
-	var key hotkey.Key
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		switch part {
-		case "ctrl", "control":
-			mods = append(mods, hotkey.ModCtrl)
-		case "shift":
-			mods = append(mods, hotkey.ModShift)
-		case "space":
-			key = hotkey.KeySpace
-		case "v":
-			key = hotkey.KeyV
-		default:
-			return nil, 0, fmt.Errorf("unsupported key: %s", part)
-		}
-	}
-	if key == 0 {
-		return nil, 0, fmt.Errorf("missing key")
-	}
-	return mods, key, nil
+	return p.backend.Run(ctx, onDown, onUp)
 }

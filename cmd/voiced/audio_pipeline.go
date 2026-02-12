@@ -1,3 +1,5 @@
+//go:build linux
+
 package main
 
 import (
@@ -10,10 +12,9 @@ import (
 )
 
 const (
-	opusFrameSize       = 960
-	opusMaxBytes        = 4000
-	defaultVADThreshold = 500
-	meterInterval       = time.Second
+	opusFrameSize = 960
+	opusMaxBytes  = 4000
+	meterInterval = time.Second
 )
 
 func (d *voiceDaemon) runAudio(ctx context.Context) error {

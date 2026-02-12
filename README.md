@@ -80,6 +80,7 @@ go build -o ./bin/dialtone-voiced ./cmd/voiced
 ./bin/dialtone-voiced \
   --server http://localhost:8080 \
   --token <dialtone-token> \
+  --ptt-backend auto \
   --turn localhost:3478 \
   --turn-user $TURN_USER \
   --turn-pass $TURN_PASS
@@ -94,10 +95,14 @@ Client auto-start (recommended for debugging):
 ```
 
 - `--voice-debug` writes `dialtone-voiced` logs to a file (see the client UI for the log path).
-- `--voice-ptt ""` disables push-to-talk and uses VAD (useful on Wayland).
+- On Linux, global PTT uses the XDG Desktop Portal (`org.freedesktop.portal.GlobalShortcuts`) over D-Bus (your desktop may prompt for permission).
+- `--voice-ptt ""` disables push-to-talk and uses VAD.
+- `--ptt-backend` (`auto|portal|hotkey`) controls daemon PTT backend selection.
+- `--voice-ptt-backend` (`auto|portal|hotkey`) passes backend selection to auto-started `dialtone-voiced`.
 - `--voice-vad <n>` lowers or raises the VAD threshold (lower = more sensitive).
 - `--voice-meter` logs mic levels to the `dialtone-voiced` log file once per second.
 - `--voice-stun/--voice-turn/--voice-turn-user/--voice-turn-pass` are passed to the auto-started `dialtone-voiced` daemon.
+- If portal registration is unavailable, Dialtone falls back to direct hotkey registration.
 
 ### Create initial invite
 

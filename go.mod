@@ -7,6 +7,7 @@ require (
 	github.com/charmbracelet/bubbles v0.21.1
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/gen2brain/malgo v0.11.24
+	github.com/godbus/dbus/v5 v5.1.0
 	github.com/google/uuid v1.6.0
 	github.com/hraban/opus v0.0.0-20251117090126-c76ea7e21bf3
 	github.com/jackc/pgx/v5 v5.5.5

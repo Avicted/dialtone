@@ -27,6 +27,7 @@ func run() error {
 	token := fs.String("token", "", "dialtone auth token")
 	ipcAddr := fs.String("ipc", defaultIPCAddr(), "ipc socket/pipe address")
 	pttBind := fs.String("ptt", "ctrl+v", "push-to-talk hotkey")
+	pttBackend := fs.String("ptt-backend", pttBackendAuto, "PTT backend: auto|portal|hotkey")
 	stunServers := fs.String("stun", "", "comma-separated STUN servers")
 	turnServers := fs.String("turn", "", "comma-separated TURN servers")
 	turnUser := fs.String("turn-user", "", "TURN username")
@@ -49,14 +50,18 @@ func run() error {
 	if *vadThreshold <= 0 {
 		return fmt.Errorf("vad-threshold must be > 0")
 	}
+	resolvedPTTBackend, err := normalizePTTBackendMode(*pttBackend)
+	if err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	log.Printf("starting voice daemon server=%s ipc=%s", *serverAddr, *ipcAddr)
-	log.Printf("voice config ptt=%q vad_threshold=%d meter=%v", *pttBind, *vadThreshold, *meter)
+	log.Printf("voice config ptt=%q ptt_backend=%s vad_threshold=%d meter=%v", *pttBind, resolvedPTTBackend, *vadThreshold, *meter)
 	iceConfig := buildICEConfig(*stunServers, *turnServers, *turnUser, *turnPass)
-	daemon := newVoiceDaemon(*serverAddr, *token, *pttBind, iceConfig, *vadThreshold, *meter)
+	daemon := newVoiceDaemon(*serverAddr, *token, *pttBind, resolvedPTTBackend, iceConfig, *vadThreshold, *meter)
 	if err := daemon.Run(ctx, *ipcAddr); err != nil {
 		return err
 	}
