@@ -22,6 +22,7 @@ const (
 	portalDeactivationSignalSuffix = ".Deactivated"
 	portalResponseSignal           = "org.freedesktop.portal.Request.Response"
 	portalRequestTimeout           = 45 * time.Second
+	portalSessionHandleToken       = "dialtone_session"
 )
 
 type portalPTTBackend struct {
@@ -142,10 +143,9 @@ func (p *portalPTTBackend) Run(ctx context.Context, onDown, onUp func()) error {
 
 func createPortalSession(ctx context.Context, conn *dbus.Conn) (dbus.ObjectPath, error) {
 	handleToken := portalToken("request")
-	sessionToken := portalToken("session")
 	options := map[string]dbus.Variant{
 		"handle_token":         dbus.MakeVariant(handleToken),
-		"session_handle_token": dbus.MakeVariant(sessionToken),
+		"session_handle_token": dbus.MakeVariant(portalSessionHandleToken),
 	}
 
 	var requestPath dbus.ObjectPath

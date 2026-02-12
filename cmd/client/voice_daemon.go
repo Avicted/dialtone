@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type voiceAutoProcess struct {
@@ -72,18 +73,60 @@ func (m *chatModel) stopVoiceDaemon() {
 	if m.voiceProc == nil {
 		return
 	}
+	if m.voiceProc.cmd != nil {
+		stopCommandGracefully(m.voiceProc.cmd, 2*time.Second)
+	}
 	if m.voiceProc.cancel != nil {
 		m.voiceProc.cancel()
-	}
-	if m.voiceProc.cmd != nil && m.voiceProc.cmd.Process != nil {
-		_ = m.voiceProc.cmd.Process.Kill()
-		_, _ = m.voiceProc.cmd.Process.Wait()
 	}
 	if m.voiceProc.logFile != nil {
 		_ = m.voiceProc.logFile.Close()
 	}
 	m.voiceAutoStarting = false
 	m.voiceProc = nil
+}
+
+func stopCommandGracefully(cmd *exec.Cmd, timeout time.Duration) {
+	if cmd == nil {
+		return
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
+
+	if !signalCommandShutdown(cmd) {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		<-done
+		return
+	}
+
+	select {
+	case <-done:
+		return
+	case <-time.After(timeout):
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		<-done
+	}
+}
+
+func signalCommandShutdown(cmd *exec.Cmd) bool {
+	if cmd == nil || cmd.Process == nil {
+		return false
+	}
+	if err := cmd.Process.Signal(os.Interrupt); err == nil {
+		return true
+	}
+	if runtime.GOOS == "windows" {
+		return false
+	}
+	return cmd.Process.Signal(syscall.SIGTERM) == nil
 }
 
 func (m *chatModel) openVoiceLogFile() (*os.File, error) {

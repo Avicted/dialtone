@@ -4,6 +4,12 @@ package main
 
 import "testing"
 
+func TestPortalSessionHandleTokenStable(t *testing.T) {
+	if portalSessionHandleToken != "dialtone_session" {
+		t.Fatalf("unexpected portal session token: %q", portalSessionHandleToken)
+	}
+}
+
 func TestPortalPreferredTrigger(t *testing.T) {
 	tests := []struct {
 		name    string
