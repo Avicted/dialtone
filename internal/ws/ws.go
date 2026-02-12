@@ -82,6 +82,8 @@ func (h *Hub) Run(ctx context.Context) {
 			h.mu.Unlock()
 			h.count.Add(1)
 		case c := <-h.unregister:
+			var leftRoom channel.ID
+			var leftPeers []*Client
 			h.mu.Lock()
 			if _, ok := h.clients[c]; !ok {
 				h.mu.Unlock()
@@ -89,7 +91,8 @@ func (h *Hub) Run(ctx context.Context) {
 			}
 			delete(h.clients, c)
 			delete(h.byDevice, c.deviceKey())
-			h.removeFromVoiceRoomLocked(c)
+			leftRoom = h.voiceRoom[c]
+			leftPeers = h.removeFromVoiceRoomLocked(c)
 			if clients := h.byUser[c.userID]; clients != nil {
 				delete(clients, c)
 				if len(clients) == 0 {
@@ -98,6 +101,12 @@ func (h *Hub) Run(ctx context.Context) {
 			}
 			h.mu.Unlock()
 			h.count.Add(-1)
+			if leftRoom != "" && len(leftPeers) > 0 {
+				event := voiceSignalEvent{Type: "voice_leave", ChannelID: leftRoom, Sender: c.userID}
+				for _, peer := range leftPeers {
+					peer.sendEvent(event)
+				}
+			}
 			c.close(websocket.StatusNormalClosure, "bye")
 		case msg := <-h.incoming:
 			h.handleIncoming(ctx, msg)

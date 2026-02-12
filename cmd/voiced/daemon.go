@@ -224,6 +224,7 @@ func (d *voiceDaemon) handleWSMessage(msg VoiceSignal) {
 		if msg.ChannelID != d.currentRoom() {
 			return
 		}
+		d.pc.ClosePeer(msg.Sender)
 		offer, err := d.pc.CreateOffer(msg.Sender)
 		if err != nil {
 			log.Printf("webrtc offer failed: %v", err)
