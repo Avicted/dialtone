@@ -22,7 +22,7 @@ func newChatForTest(t *testing.T, api *APIClient) chatModel {
 	setTestConfigDir(t)
 	auth := newTestAuth()
 	kp := newTestKeyPair(t)
-	return newChatModel(api, auth, kp, "passphrase123", 80, 24)
+	return newChatModel(api, auth, kp, "passphrase123", 80, 24, "")
 }
 
 func TestChatModelHandleCommandNonAdmin(t *testing.T) {
@@ -234,7 +234,7 @@ func TestChatModelEnsureChannelKey(t *testing.T) {
 
 	api := &APIClient{serverURL: server.URL, httpClient: server.Client()}
 	setTestConfigDir(t)
-	m := newChatModel(api, newTestAuth(), recipientKP, "passphrase123", 80, 24)
+	m := newChatModel(api, newTestAuth(), recipientKP, "passphrase123", 80, 24, "")
 	got, err := m.ensureChannelKey("ch-1")
 	if err != nil {
 		t.Fatalf("ensureChannelKey: %v", err)
@@ -571,7 +571,7 @@ func TestChatModelEnsureDirectoryKeyFromEnvelope(t *testing.T) {
 	defer server.Close()
 
 	api := &APIClient{serverURL: server.URL, httpClient: server.Client()}
-	m := newChatModel(api, newTestAuth(), recipientKP, "passphrase123", 80, 24)
+	m := newChatModel(api, newTestAuth(), recipientKP, "passphrase123", 80, 24, "")
 	got, err := m.ensureDirectoryKey()
 	if err != nil {
 		t.Fatalf("ensureDirectoryKey: %v", err)
@@ -589,7 +589,7 @@ func TestChatModelEnsureDirectoryKeyInvalidSenderKey(t *testing.T) {
 	defer server.Close()
 
 	api := &APIClient{serverURL: server.URL, httpClient: server.Client()}
-	m := newChatModel(api, newTestAuth(), newTestKeyPair(t), "passphrase123", 80, 24)
+	m := newChatModel(api, newTestAuth(), newTestKeyPair(t), "passphrase123", 80, 24, "")
 	if _, err := m.ensureDirectoryKey(); err == nil {
 		t.Fatalf("expected error")
 	}
@@ -863,7 +863,7 @@ func TestChatModelEnsureChannelKeyFromEnvelope(t *testing.T) {
 	defer server.Close()
 
 	api := &APIClient{serverURL: server.URL, httpClient: server.Client()}
-	m := newChatModel(api, newTestAuth(), recipientKP, "passphrase123", 80, 24)
+	m := newChatModel(api, newTestAuth(), recipientKP, "passphrase123", 80, 24, "")
 	if _, err := m.ensureChannelKey("ch-1"); err != nil {
 		t.Fatalf("ensureChannelKey: %v", err)
 	}
@@ -903,7 +903,7 @@ func TestChatModelConnectWS(t *testing.T) {
 	defer server.Close()
 
 	api := &APIClient{serverURL: server.URL, httpClient: server.Client()}
-	m := newChatModel(api, newTestAuth(), newTestKeyPair(t), "passphrase123", 80, 24)
+	m := newChatModel(api, newTestAuth(), newTestKeyPair(t), "passphrase123", 80, 24, "")
 	cmd := m.connectWS()
 	msg := cmd()
 	connected, ok := msg.(wsConnectedMsg)
