@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"nhooyr.io/websocket"
 
 	"github.com/Avicted/dialtone/internal/crypto"
+	"github.com/Avicted/dialtone/internal/ipc"
 )
 
 func newChatForTest(t *testing.T, api *APIClient) chatModel {
@@ -1106,5 +1108,82 @@ func TestChatModelDirectoryKeyHelpers(t *testing.T) {
 	}
 	if got := m.decryptDirectoryName("abc"); got != "" {
 		t.Fatalf("expected empty directory name")
+	}
+}
+
+func TestChatModelVoicePendingCommandRetainedOnSendFailure(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.voiceIPC = &voiceIPC{addr: ""}
+	m.voiceRoom = "room-1"
+	leaveCmd := ipc.Message{Cmd: ipc.CommandVoiceLeave, Room: "room-1"}
+	m.queueVoiceCommand(leaveCmd, "", "voice leave requested")
+
+	updated, cmd := m.Update(voiceIPCConnectedMsg{ch: make(chan ipc.Message, 1)})
+	if cmd == nil {
+		t.Fatalf("expected reconnect command")
+	}
+	if updated.voicePendingCmd == nil {
+		t.Fatalf("expected pending voice command to remain queued")
+	}
+	if updated.voicePendingCmd.Cmd != ipc.CommandVoiceLeave {
+		t.Fatalf("expected leave command to remain queued")
+	}
+	if updated.voiceReconnectAttempt != 1 {
+		t.Fatalf("expected reconnect attempt incremented, got %d", updated.voiceReconnectAttempt)
+	}
+	if updated.voiceRoom != "room-1" {
+		t.Fatalf("expected voice room unchanged before leave ack")
+	}
+	if !strings.Contains(lastSystemMessage(updated), "voice command pending (retrying)") {
+		t.Fatalf("expected retry notice message")
+	}
+}
+
+func TestChatModelDispatchVoiceLeaveDoesNotClearRoomBeforeAck(t *testing.T) {
+	addr := filepath.Join(t.TempDir(), "voice.sock")
+	listener, err := ipc.Listen(addr)
+	if err != nil {
+		t.Fatalf("listen voice ipc: %v", err)
+	}
+	defer listener.Close()
+
+	recv := make(chan ipc.Message, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		dec := ipc.NewDecoder(conn)
+		var msg ipc.Message
+		if err := dec.Decode(&msg); err == nil {
+			recv <- msg
+		}
+	}()
+
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.voiceIPC = newVoiceIPC(addr)
+	m.voiceRoom = "room-1"
+
+	cmd := m.dispatchVoiceCommand(
+		ipc.Message{Cmd: ipc.CommandVoiceLeave, Room: m.voiceRoom},
+		"",
+		"voice leave requested",
+		"voice leave",
+	)
+	if cmd != nil {
+		t.Fatalf("expected no reconnect command on successful send")
+	}
+	if m.voiceRoom != "room-1" {
+		t.Fatalf("expected voice room unchanged until daemon ready event")
+	}
+
+	select {
+	case msg := <-recv:
+		if msg.Cmd != ipc.CommandVoiceLeave || msg.Room != "room-1" {
+			t.Fatalf("unexpected ipc message: %+v", msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for leave command on ipc")
 	}
 }

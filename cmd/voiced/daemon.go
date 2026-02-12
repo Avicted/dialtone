@@ -160,6 +160,9 @@ func (d *voiceDaemon) handleIPCCommand(ctx context.Context, msg ipc.Message) (ip
 	case ipc.CommandVoiceLeave:
 		room := strings.TrimSpace(msg.Room)
 		if room == "" {
+			room = d.currentRoom()
+		}
+		if room == "" {
 			return ipc.Message{}, fmt.Errorf("room is required")
 		}
 		if err := d.sendSignal(VoiceSignal{Type: "voice_leave", ChannelID: room}); err != nil {

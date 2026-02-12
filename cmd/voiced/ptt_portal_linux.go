@@ -170,11 +170,29 @@ func createPortalSession(ctx context.Context, conn *dbus.Conn) (dbus.ObjectPath,
 	if !ok {
 		return "", fmt.Errorf("portal CreateSession response missing session_handle")
 	}
-	sessionPath, ok := rawSession.Value().(dbus.ObjectPath)
-	if !ok {
-		return "", fmt.Errorf("portal session_handle has unexpected type %T", rawSession.Value())
+	sessionPath, err := portalSessionPath(rawSession)
+	if err != nil {
+		return "", err
 	}
 	return sessionPath, nil
+}
+
+func portalSessionPath(raw dbus.Variant) (dbus.ObjectPath, error) {
+	switch value := raw.Value().(type) {
+	case dbus.ObjectPath:
+		if !value.IsValid() {
+			return "", fmt.Errorf("portal session_handle is not a valid object path: %q", string(value))
+		}
+		return value, nil
+	case string:
+		path := dbus.ObjectPath(value)
+		if !path.IsValid() {
+			return "", fmt.Errorf("portal session_handle string is not a valid object path: %q", value)
+		}
+		return path, nil
+	default:
+		return "", fmt.Errorf("portal session_handle has unexpected type %T", raw.Value())
+	}
 }
 
 func bindPortalShortcut(ctx context.Context, conn *dbus.Conn, sessionPath dbus.ObjectPath, binding string) error {

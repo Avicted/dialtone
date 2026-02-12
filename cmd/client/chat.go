@@ -257,6 +257,9 @@ func (m chatModel) connectVoiceIPC() tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
+		if err := m.voiceIPC.ensureConn(); err != nil {
+			return voiceIPCErrorMsg{err: err}
+		}
 		ch := make(chan ipc.Message, 16)
 		go m.voiceIPC.readLoop(ch)
 		return voiceIPCConnectedMsg{ch: ch}
@@ -384,18 +387,14 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		}
 		if m.voicePendingCmd != nil && m.voiceIPC != nil {
 			if err := m.voiceIPC.send(*m.voicePendingCmd); err != nil {
-				m.appendSystemMessage(fmt.Sprintf("voice command failed: %v", err))
+				m.appendSystemMessage(fmt.Sprintf("voice command pending (retrying): %v", err))
 				m.voiceIPC.reset()
 				m.voiceCh = nil
-				m.clearPendingVoiceCommand()
 				m.voiceReconnectAttempt++
 				return m, m.scheduleVoiceReconnect(m.voiceReconnectAttempt)
 			}
 			if m.voicePendingCmd.Cmd == ipc.CommandVoiceJoin && m.voicePendingRoom != "" {
 				m.voiceRoom = m.voicePendingRoom
-			}
-			if m.voicePendingCmd.Cmd == ipc.CommandVoiceLeave {
-				m.voiceRoom = ""
 			}
 			if m.voicePendingNotice != "" {
 				m.appendSystemMessage(m.voicePendingNotice)
@@ -709,16 +708,8 @@ func (m *chatModel) handleVoiceCommand(raw string, parts []string) tea.Cmd {
 			"voice join",
 		)
 	case "leave":
-		room := m.voiceRoom
-		if room == "" {
-			room = m.activeChannel
-		}
-		if room == "" {
-			m.appendSystemMessage("usage: /voice leave (no active voice room)")
-			return nil
-		}
 		return m.dispatchVoiceCommand(
-			ipc.Message{Cmd: ipc.CommandVoiceLeave, Room: room},
+			ipc.Message{Cmd: ipc.CommandVoiceLeave, Room: m.voiceRoom},
 			"",
 			"voice leave requested",
 			"voice leave",
@@ -770,9 +761,6 @@ func (m *chatModel) dispatchVoiceCommand(cmd ipc.Message, pendingRoom, notice, l
 	}
 	if cmd.Cmd == ipc.CommandVoiceJoin && pendingRoom != "" {
 		m.voiceRoom = pendingRoom
-	}
-	if cmd.Cmd == ipc.CommandVoiceLeave {
-		m.voiceRoom = ""
 	}
 	if notice != "" {
 		m.appendSystemMessage(notice)
