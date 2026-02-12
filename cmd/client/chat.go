@@ -302,6 +302,10 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 			m.sidebarVisible = !m.sidebarVisible
 			m.updateLayout()
 			m.refreshViewport()
+			if m.sidebarVisible {
+				m.refreshPresence()
+				return m, m.schedulePresenceTick()
+			}
 			return m, nil
 		case "ctrl+u":
 			if m.sidebarMode == sidebarUsers {
@@ -311,11 +315,8 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 			}
 			m.sidebarVisible = true
 			m.updateLayout()
-			if m.sidebarMode == sidebarUsers {
-				m.refreshPresence()
-				return m, m.schedulePresenceTick()
-			}
-			return m, nil
+			m.refreshPresence()
+			return m, m.schedulePresenceTick()
 
 		case "pgup", "pgdown":
 			var cmd tea.Cmd
@@ -334,6 +335,10 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 			m.appendSystemMessage("no global chat; select a channel with the sidebar or /channel list")
 		}
 		cmds := []tea.Cmd{waitForWSMsg(m.wsCh), m.shareKnownChannelKeysCmd(), m.scheduleShareTick()}
+		if m.sidebarVisible {
+			m.refreshPresence()
+			cmds = append(cmds, m.schedulePresenceTick())
+		}
 		if m.channelRefreshNeeded {
 			cmds = append(cmds, m.scheduleChannelRefresh())
 		}
@@ -447,7 +452,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 				m.userNames[profile.UserID] = name
 			}
 		}
-		if m.sidebarVisible && m.sidebarMode == sidebarUsers {
+		if m.sidebarVisible {
 			m.refreshPresence()
 		}
 		return m, nil
@@ -489,7 +494,7 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		return m, nil
 
 	case presenceTick:
-		if m.sidebarVisible && m.sidebarMode == sidebarUsers {
+		if m.sidebarVisible {
 			m.refreshPresence()
 			return m, m.schedulePresenceTick()
 		}
@@ -1395,7 +1400,7 @@ func (m *chatModel) handleServerMessage(msg ServerMessage) {
 		} else {
 			m.channelUnread[channelID] = 0
 		}
-		if m.sidebarVisible && m.sidebarMode == sidebarUsers {
+		if m.sidebarVisible {
 			m.refreshPresence()
 		}
 
@@ -1512,90 +1517,64 @@ func (m *chatModel) renderMessages() string {
 }
 
 func (m *chatModel) renderSidebar() string {
-	lines := make([]string, 0, 12)
-	if m.sidebarMode == sidebarUsers {
-		lines = append(lines, sidebarTitleStyle.Render("Users"), "")
-		if m.isTrusted() {
-			users := m.allUserEntries()
-			if len(users) == 0 {
-				lines = append(lines, labelStyle.Render("(none)"))
-			} else {
-				for _, entry := range users {
-					prefix := "?"
-					style := labelStyle
-					if entry.Known {
-						if entry.Online {
-							prefix = "+"
-							style = sidebarOnlineStyle
-						} else {
-							prefix = "-"
-							style = sidebarOfflineStyle
-						}
-					}
-					name := formatUsername(entry.Name)
-					if entry.Admin {
-						name = fmt.Sprintf("%s (admin)", name)
-					}
-					if entry.Speak {
-						name = fmt.Sprintf("%s *", name)
-					}
-					lines = append(lines, style.Render(fmt.Sprintf("%s %s", prefix, name)))
-				}
-			}
-		} else if m.activeChannel == "" {
-			lines = append(lines, labelStyle.Render("(no channel)"))
-		} else {
-			users := m.channelUserEntries(m.activeChannel)
-			if len(users) == 0 {
-				lines = append(lines, labelStyle.Render("(none)"))
-			} else {
-				for _, entry := range users {
-					prefix := "?"
-					style := labelStyle
-					if entry.Known {
-						if entry.Online {
-							prefix = "+"
-							style = sidebarOnlineStyle
-						} else {
-							prefix = "-"
-							style = sidebarOfflineStyle
-						}
-					}
-					name := formatUsername(entry.Name)
-					if entry.Admin {
-						name = fmt.Sprintf("%s (admin)", name)
-					}
-					if entry.Speak {
-						name = fmt.Sprintf("%s *", name)
-					}
-					lines = append(lines, style.Render(fmt.Sprintf("%s %s", prefix, name)))
-				}
-			}
-		}
+	lines := make([]string, 0, 20)
+	lines = append(lines, sidebarTitleStyle.Render("Channels"), "")
+	channels := m.channelList()
+	if len(channels) == 0 {
+		lines = append(lines, labelStyle.Render("(none)"))
 	} else {
-		lines = append(lines, sidebarTitleStyle.Render("Channels"), "")
-		channels := m.channelList()
-		if len(channels) == 0 {
-			lines = append(lines, labelStyle.Render("(none)"))
-		} else {
-			for i, ch := range channels {
-				prefix := "  "
-				if i == m.sidebarIndex {
-					prefix = "> "
-				}
-				name := ch.Name
-				if name == "" {
-					name = shortID(ch.ID)
-				}
-				if ch.ID == m.activeChannel {
-					name = "* " + name
-				}
-				unread := m.channelUnread[ch.ID]
-				if unread > 0 && ch.ID != m.activeChannel {
-					name = fmt.Sprintf("%s (%d)", name, unread)
-				}
-				lines = append(lines, fmt.Sprintf("%s%s", prefix, name))
+		for i, ch := range channels {
+			prefix := "  "
+			if i == m.sidebarIndex {
+				prefix = "> "
 			}
+			name := ch.Name
+			if name == "" {
+				name = shortID(ch.ID)
+			}
+			if ch.ID == m.activeChannel {
+				name = "* " + name
+			}
+			unread := m.channelUnread[ch.ID]
+			if unread > 0 && ch.ID != m.activeChannel {
+				name = fmt.Sprintf("%s (%d)", name, unread)
+			}
+			lines = append(lines, fmt.Sprintf("%s%s", prefix, name))
+		}
+	}
+
+	lines = append(lines, "", sidebarTitleStyle.Render("Users"), "")
+	var users []userEntry
+	if m.isTrusted() {
+		users = m.allUserEntries()
+	} else if m.activeChannel != "" {
+		users = m.channelUserEntries(m.activeChannel)
+	}
+	if !m.isTrusted() && m.activeChannel == "" {
+		lines = append(lines, labelStyle.Render("(no channel)"))
+	} else if len(users) == 0 {
+		lines = append(lines, labelStyle.Render("(none)"))
+	} else {
+		for _, entry := range users {
+			prefix := "?"
+			style := labelStyle
+			if entry.Known {
+				if entry.Online {
+					prefix = "+"
+					style = sidebarOnlineStyle
+				} else {
+					prefix = "-"
+					style = sidebarOfflineStyle
+				}
+			}
+			name := formatUsername(entry.Name)
+			if entry.Admin {
+				name = fmt.Sprintf("%s (admin)", name)
+			}
+			if entry.Speak {
+				name = fmt.Sprintf("%s *", name)
+			}
+			lines = append(lines, style.Render(fmt.Sprintf("%s %s", prefix, name)))
 		}
 	}
 
@@ -1976,7 +1955,7 @@ func (m chatModel) View() string {
 	if m.errMsg != "" {
 		b.WriteString(errorStyle.Render("  x " + m.errMsg))
 	} else {
-		b.WriteString(helpStyle.Render("  enter: send - /help for commands - up/down+enter (empty): switch channel - ctrl+u: users list - pgup/pgdn: scroll - ctrl+q: quit"))
+		b.WriteString(helpStyle.Render("  enter: send - /help for commands - up/down+enter (empty): switch channel - ctrl+u: focus users/channels - pgup/pgdn: scroll - ctrl+h: toggle sidebar - ctrl+q: quit"))
 	}
 
 	return b.String()

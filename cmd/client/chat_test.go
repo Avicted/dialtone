@@ -312,6 +312,12 @@ func TestChatModelRenderSidebarAndSelection(t *testing.T) {
 	m.activeChannel = "a"
 	m.channelUnread["b"] = 2
 	out := m.renderSidebar()
+	if !strings.Contains(out, "Channels") || !strings.Contains(out, "Users") {
+		t.Fatalf("expected channels and users sections")
+	}
+	if strings.Index(out, "Channels") > strings.Index(out, "Users") {
+		t.Fatalf("expected channels above users")
+	}
 	if !strings.Contains(out, "alpha") || !strings.Contains(out, "(2)") {
 		t.Fatalf("unexpected sidebar output")
 	}
@@ -322,7 +328,7 @@ func TestChatModelRenderSidebarAndSelection(t *testing.T) {
 	m.userPresence["user-1"] = true
 	m.channelMsgs["a"] = []chatMessage{{sender: "user-1", senderName: "alice"}}
 	out = m.renderSidebar()
-	if !strings.Contains(out, "admin") {
+	if !strings.Contains(out, "admin") || !strings.Contains(out, "alpha") {
 		t.Fatalf("expected admin label")
 	}
 }
@@ -843,7 +849,7 @@ func TestChatModelRenderSidebarUsersNotTrusted(t *testing.T) {
 	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
 	m.auth.IsTrusted = false
 	m.sidebarMode = sidebarUsers
-	if out := m.renderSidebar(); !strings.Contains(out, "(no channel)") {
+	if out := m.renderSidebar(); !strings.Contains(out, "(no channel)") || !strings.Contains(out, "Channels") {
 		t.Fatalf("unexpected sidebar output")
 	}
 }

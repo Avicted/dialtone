@@ -72,10 +72,12 @@ Start coturn:
 docker compose up -d coturn
 ```
 
-Run the voice daemon with TURN (and optional STUN) settings:
+Build and run the voice daemon with TURN (and optional STUN) settings:
 
 ```bash
-go run ./cmd/voiced \
+go build -o ./bin/dialtone-voiced ./cmd/voiced
+
+./bin/dialtone-voiced \
   --server http://localhost:8080 \
   --token <dialtone-token> \
   --turn localhost:3478 \
@@ -91,11 +93,11 @@ Client auto-start (recommended for debugging):
 ./bin/client --voice-debug --voice-ptt "" --voice-meter --voice-vad 20
 ```
 
-- `--voice-debug` writes voiced logs to a file (see the client UI for the log path).
+- `--voice-debug` writes `dialtone-voiced` logs to a file (see the client UI for the log path).
 - `--voice-ptt ""` disables push-to-talk and uses VAD (useful on Wayland).
 - `--voice-vad <n>` lowers or raises the VAD threshold (lower = more sensitive).
-- `--voice-meter` logs mic levels to the voiced log file once per second.
-- `--voice-stun/--voice-turn/--voice-turn-user/--voice-turn-pass` are passed to the auto-started voice daemon.
+- `--voice-meter` logs mic levels to the `dialtone-voiced` log file once per second.
+- `--voice-stun/--voice-turn/--voice-turn-user/--voice-turn-pass` are passed to the auto-started `dialtone-voiced` daemon.
 
 ### Create initial invite
 

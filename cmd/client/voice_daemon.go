@@ -117,28 +117,40 @@ func resolveVoiceLogPath(explicit string) (string, error) {
 }
 
 func resolveVoicedPath(hint string) (string, error) {
-	candidates := make([]string, 0, 6)
+	candidates := make([]string, 0, 10)
 	if strings.TrimSpace(hint) != "" {
 		candidates = append(candidates, hint)
+	}
+	if env := strings.TrimSpace(os.Getenv("DIALTONE_VOICE_DAEMON")); env != "" {
+		candidates = append(candidates, env)
 	}
 	if env := strings.TrimSpace(os.Getenv("DIALTONE_VOICED")); env != "" {
 		candidates = append(candidates, env)
 	}
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		dir := filepath.Dir(exe)
-		candidates = append(candidates, filepath.Join(dir, "voiced"))
+		candidates = append(candidates, filepath.Join(dir, "dialtone-voiced"), filepath.Join(dir, "voiced"))
 	}
-	candidates = append(candidates, filepath.Join(".", "bin", "voiced"), filepath.Join(".", "voiced"))
+	candidates = append(
+		candidates,
+		filepath.Join(".", "bin", "dialtone-voiced"),
+		filepath.Join(".", "dialtone-voiced"),
+		filepath.Join(".", "bin", "voiced"),
+		filepath.Join(".", "voiced"),
+	)
 
 	for _, candidate := range candidates {
 		if path := resolveExecutableCandidate(candidate); path != "" {
 			return path, nil
 		}
 	}
+	if path, err := exec.LookPath("dialtone-voiced"); err == nil {
+		return path, nil
+	}
 	if path, err := exec.LookPath("voiced"); err == nil {
 		return path, nil
 	}
-	return "", fmt.Errorf("voiced binary not found; set --voiced or DIALTONE_VOICED")
+	return "", fmt.Errorf("dialtone-voiced binary not found; set --voiced, DIALTONE_VOICE_DAEMON, or DIALTONE_VOICED")
 }
 
 func resolveExecutableCandidate(path string) string {
