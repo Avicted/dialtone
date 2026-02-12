@@ -17,16 +17,19 @@ services:
     volumes:
       - dialtone_pg:/var/lib/postgresql/data
 
-  coturn:
+  dialtone-coturn:
     image: coturn/coturn:4.8.0-alpine
     restart: unless-stopped
     env_file:
       - my_applications/dialtone/.env
+    user: "0:0"
     read_only: true
     tmpfs:
       - /tmp
     cap_drop:
       - ALL
+    cap_add:
+      - NET_BIND_SERVICE
     security_opt:
       - no-new-privileges:true
     volumes:
@@ -37,19 +40,18 @@ services:
       - --fingerprint
       - --lt-cred-mech
       - --stale-nonce
-      - --user=${TURN_USER:?set TURN_USER}:${TURN_PASS:?set TURN_PASS}
-      - --realm=${TURN_REALM:?set TURN_REALM}
-      - --external-ip=${TURN_EXTERNAL_IP:?set TURN_EXTERNAL_IP}
+      - --user=$${TURN_USER:?set TURN_USER}:$${TURN_PASS:?set TURN_PASS}
+      - --realm=$${TURN_REALM:?set TURN_REALM}
+      - --external-ip=$${TURN_EXTERNAL_IP:?set TURN_EXTERNAL_IP}
       - --no-cli
-      - --cert=${TURN_CERT_FILE:-/etc/coturn/certs/fullchain.pem}
-      - --pkey=${TURN_KEY_FILE:-/etc/coturn/certs/privkey.pem}
+      - --cert=$${TURN_CERT_FILE:-/etc/coturn/certs/fullchain.pem}
+      - --pkey=$${TURN_KEY_FILE:-/etc/coturn/certs/privkey.pem}
       - --no-dtls
       - --no-multicast-peers
-      - --no-loopback-peers
-      - --listening-port=${TURN_PORT:-3478}
-      - --tls-listening-port=${TURN_TLS_PORT:-5349}
-      - --min-port=${TURN_MIN_PORT:-49152}
-      - --max-port=${TURN_MAX_PORT:-49252}
+      - --listening-port=$${TURN_PORT:-3478}
+      - --tls-listening-port=$${TURN_TLS_PORT:-5349}
+      - --min-port=$${TURN_MIN_PORT:-49152}
+      - --max-port=$${TURN_MAX_PORT:-49252}
     ports:
       - "${TURN_PORT:-3478}:${TURN_PORT:-3478}/udp"
       - "${TURN_PORT:-3478}:${TURN_PORT:-3478}/tcp"

@@ -64,7 +64,7 @@ Update `.env` with TURN settings:
 TURN_USER=turn
 TURN_PASS=replace-with-strong-random-password
 TURN_REALM=turn.example.com
-TURN_EXTERNAL_IP=203.0.113.10
+TURN_EXTERNAL_IP=<public_server_ip>
 TURN_PORT=3478
 TURN_TLS_PORT=5349
 TURN_CERT_FILE=/etc/coturn/certs/fullchain.pem
@@ -89,18 +89,21 @@ Start coturn:
 docker compose up -d coturn
 ```
 
-Build and run the voice daemon with TURN (and optional STUN) settings:
+Build and run the client with TURN (and optional STUN) settings:
 
 ```bash
-go build -o ./bin/dialtone-voiced ./cmd/voiced
+go build -o ./bin/client ./cmd/client
 
-./bin/dialtone-voiced \
-  --server http://localhost:8080 \
-  --token <dialtone-token> \
-  --ptt-backend auto \
-  --turn turn:turn.example.com:3478?transport=udp,turn:turn.example.com:3478?transport=tcp,turns:turn.example.com:5349?transport=tcp \
-  --turn-user $TURN_USER \
-  --turn-pass $TURN_PASS
+./bin/client \
+  --server https://dialtone.domain.com \
+  --voice-debug \
+  --voice-ptt caps \
+  --voice-meter \
+  --voice-ptt-backend portal \
+  --voice-turn "turn:turn.dialtone.domain.com:3478?transport=udp,turn:turn.dialtone.domain.com:3478?transport=tcp,turns:turn.dialtone.domain.com:5349?transport=tcp" \
+  --voice-turn-user "<TURN_USER>" \
+  --voice-turn-pass "<TURN_PASS>"
+  
 ```
 
 You can also provide STUN servers with `--stun`
