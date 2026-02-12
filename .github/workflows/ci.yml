@@ -30,7 +30,9 @@ jobs:
             libopus-dev \
             libopusfile-dev \
             libx11-dev \
-            libxtst-dev
+            libxtst-dev \
+            xvfb \
+            xauth
 
       - name: Go fmt
         run: go fmt ./...
@@ -39,10 +41,10 @@ jobs:
         run: go vet ./...
 
       - name: Go test
-        run: go test ./...
+        run: xvfb-run -a go test ./...
 
       - name: Coverage
-        run: ./scripts/coverage.sh | tee coverage-report.txt
+        run: xvfb-run -a ./scripts/coverage.sh | tee coverage-report.txt
 
       - name: Upload coverage profile
         uses: actions/upload-artifact@v4
