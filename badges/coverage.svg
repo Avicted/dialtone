@@ -1,14 +1,19 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="130" height="20" role="img" aria-label="coverage: 80.0%">
-  <linearGradient id="s" x2="0" y2="100%">
-    <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
-    <stop offset="1" stop-opacity=".1"/>
-  </linearGradient>
-  <rect rx="3" width="130" height="20" fill="#555"/>
-  <rect rx="3" x="62" width="68" height="20" fill="green"/>
-  <path fill="green" d="M62 0h4v20h-4z"/>
-  <rect rx="3" width="130" height="20" fill="url(#s)"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="130" height="20" role="img" aria-label="coverage: 79.0%">
+  <defs>
+    <linearGradient id="workflow-fill" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop stop-color="#444D56" offset="0%"/>
+      <stop stop-color="#24292E" offset="100%"/>
+    </linearGradient>
+    <linearGradient id="state-fill" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop stop-color="#DBAB09" offset="0%"/>
+      <stop stop-color="#B08800" offset="100%"/>
+    </linearGradient>
+  </defs>
+  <rect rx="3" width="130" height="20" fill="url(#workflow-fill)"/>
+  <rect rx="3" x="62" width="68" height="20" fill="url(#state-fill)"/>
+  <path fill="url(#state-fill)" d="M62 0h4v20h-4z"/>
   <g fill="#fff" text-anchor="middle" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11">
     <text x="31" y="14">coverage</text>
-    <text x="96" y="14">80.0%</text>
+    <text x="96" y="14">79.0%</text>
   </g>
 </svg>
