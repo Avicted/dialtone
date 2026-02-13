@@ -25,12 +25,12 @@ type Capture struct {
 
 func StartCapture(ctx context.Context) (*Capture, <-chan []int16, error) {
 	config := malgo.ContextConfig{}
-	malgoCtx, err := malgo.InitContext(nil, config, nil)
+	malgoCtx, err := malgoInitContext(nil, config, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("init malgo context: %w", err)
 	}
 
-	deviceConfig := malgo.DefaultDeviceConfig(malgo.Capture)
+	deviceConfig := malgoDefaultDeviceConfig(malgo.Capture)
 	deviceConfig.Capture.Format = malgo.FormatS16
 	deviceConfig.Capture.Channels = Channels
 	deviceConfig.SampleRate = SampleRate
@@ -52,14 +52,14 @@ func StartCapture(ctx context.Context) (*Capture, <-chan []int16, error) {
 		},
 	}
 
-	device, err := malgo.InitDevice(malgoCtx.Context, deviceConfig, callback)
+	device, err := malgoInitDevice(malgoCtx.Context, deviceConfig, callback)
 	if err != nil {
-		malgoCtx.Uninit()
+		malgoContextUninit(malgoCtx)
 		return nil, nil, fmt.Errorf("init capture device: %w", err)
 	}
-	if err := device.Start(); err != nil {
-		device.Uninit()
-		malgoCtx.Uninit()
+	if err := malgoDeviceStart(device); err != nil {
+		malgoDeviceUninit(device)
+		malgoContextUninit(malgoCtx)
 		return nil, nil, fmt.Errorf("start capture: %w", err)
 	}
 
@@ -78,11 +78,11 @@ func (c *Capture) Close() error {
 	}
 	c.closeOnce.Do(func() {
 		if c.device != nil {
-			c.device.Uninit()
+			malgoDeviceUninit(c.device)
 			c.device = nil
 		}
 		if c.ctx != nil {
-			c.ctx.Uninit()
+			malgoContextUninit(c.ctx)
 			c.ctx = nil
 		}
 	})

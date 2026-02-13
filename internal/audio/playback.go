@@ -25,12 +25,12 @@ type Playback struct {
 
 func StartPlayback(ctx context.Context) (*Playback, error) {
 	config := malgo.ContextConfig{}
-	malgoCtx, err := malgo.InitContext(nil, config, nil)
+	malgoCtx, err := malgoInitContext(nil, config, nil)
 	if err != nil {
 		return nil, fmt.Errorf("init malgo context: %w", err)
 	}
 
-	deviceConfig := malgo.DefaultDeviceConfig(malgo.Playback)
+	deviceConfig := malgoDefaultDeviceConfig(malgo.Playback)
 	deviceConfig.Playback.Format = malgo.FormatS16
 	deviceConfig.Playback.Channels = Channels
 	deviceConfig.SampleRate = SampleRate
@@ -46,14 +46,14 @@ func StartPlayback(ctx context.Context) (*Playback, error) {
 		},
 	}
 
-	device, err := malgo.InitDevice(malgoCtx.Context, deviceConfig, callback)
+	device, err := malgoInitDevice(malgoCtx.Context, deviceConfig, callback)
 	if err != nil {
-		malgoCtx.Uninit()
+		malgoContextUninit(malgoCtx)
 		return nil, fmt.Errorf("init playback device: %w", err)
 	}
-	if err := device.Start(); err != nil {
-		device.Uninit()
-		malgoCtx.Uninit()
+	if err := malgoDeviceStart(device); err != nil {
+		malgoDeviceUninit(device)
+		malgoContextUninit(malgoCtx)
 		return nil, fmt.Errorf("start playback: %w", err)
 	}
 
@@ -118,11 +118,11 @@ func (p *Playback) Close() error {
 	}
 	p.closeOnce.Do(func() {
 		if p.device != nil {
-			p.device.Uninit()
+			malgoDeviceUninit(p.device)
 			p.device = nil
 		}
 		if p.ctx != nil {
-			p.ctx.Uninit()
+			malgoContextUninit(p.ctx)
 			p.ctx = nil
 		}
 	})

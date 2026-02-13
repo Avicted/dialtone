@@ -143,6 +143,8 @@ type channelRefreshTick struct{}
 
 var errDirectoryKeyPending = fmt.Errorf("directory key pending")
 
+var teaTick = tea.Tick
+
 func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, keystorePassphrase string, width, height int, voiceIPCAddr string) chatModel {
 	input := textinput.New()
 	input.Placeholder = "type a message..."
@@ -1110,7 +1112,7 @@ func (m *chatModel) persistDirectoryKey() error {
 }
 
 func (m *chatModel) scheduleDirectoryTick() tea.Cmd {
-	return tea.Tick(10*time.Second, func(time.Time) tea.Msg {
+	return teaTick(10*time.Second, func(time.Time) tea.Msg {
 		return directoryTick{}
 	})
 }
@@ -1890,13 +1892,13 @@ func (m *chatModel) refreshPresence() {
 }
 
 func (m *chatModel) schedulePresenceTick() tea.Cmd {
-	return tea.Tick(5*time.Second, func(time.Time) tea.Msg {
+	return teaTick(5*time.Second, func(time.Time) tea.Msg {
 		return presenceTick{}
 	})
 }
 
 func (m *chatModel) scheduleVoicePing() tea.Cmd {
-	return tea.Tick(15*time.Second, func(time.Time) tea.Msg {
+	return teaTick(15*time.Second, func(time.Time) tea.Msg {
 		return voicePingTick{}
 	})
 }
@@ -1915,13 +1917,13 @@ func (m *chatModel) scheduleVoiceReconnect(attempt int) tea.Cmd {
 }
 
 func (m *chatModel) scheduleShareTick() tea.Cmd {
-	return tea.Tick(shareKeysInterval, func(time.Time) tea.Msg {
+	return teaTick(shareKeysInterval, func(time.Time) tea.Msg {
 		return shareTick{}
 	})
 }
 
 func (m *chatModel) scheduleChannelRefresh() tea.Cmd {
-	return tea.Tick(channelRefreshDelay, func(time.Time) tea.Msg {
+	return teaTick(channelRefreshDelay, func(time.Time) tea.Msg {
 		return channelRefreshTick{}
 	})
 }
