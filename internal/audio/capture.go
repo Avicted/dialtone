@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"sync"
 
 	"github.com/gen2brain/malgo"
 )
@@ -18,6 +19,8 @@ const (
 type Capture struct {
 	ctx    *malgo.AllocatedContext
 	device *malgo.Device
+
+	closeOnce sync.Once
 }
 
 func StartCapture(ctx context.Context) (*Capture, <-chan []int16, error) {
@@ -73,13 +76,15 @@ func (c *Capture) Close() error {
 	if c == nil {
 		return nil
 	}
-	if c.device != nil {
-		c.device.Uninit()
-		c.device = nil
-	}
-	if c.ctx != nil {
-		c.ctx.Uninit()
-		c.ctx = nil
-	}
+	c.closeOnce.Do(func() {
+		if c.device != nil {
+			c.device.Uninit()
+			c.device = nil
+		}
+		if c.ctx != nil {
+			c.ctx.Uninit()
+			c.ctx = nil
+		}
+	})
 	return nil
 }

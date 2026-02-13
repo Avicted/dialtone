@@ -144,6 +144,10 @@ func (p *portalPTTBackend) Run(ctx context.Context, onDown, onUp func()) error {
 }
 
 func createPortalSession(ctx context.Context, conn *dbus.Conn) (dbus.ObjectPath, error) {
+	if conn == nil {
+		return "", fmt.Errorf("portal dbus connection is required")
+	}
+
 	handleToken := portalToken("request")
 	options := map[string]dbus.Variant{
 		"handle_token":         dbus.MakeVariant(handleToken),
@@ -202,6 +206,13 @@ func portalSessionPath(raw dbus.Variant) (dbus.ObjectPath, error) {
 }
 
 func bindPortalShortcut(ctx context.Context, conn *dbus.Conn, sessionPath dbus.ObjectPath, binding string) error {
+	if !sessionPath.IsValid() {
+		return fmt.Errorf("portal session path is required")
+	}
+	if conn == nil {
+		return fmt.Errorf("portal dbus connection is required")
+	}
+
 	trigger := portalPreferredTrigger(binding)
 	if trigger != "" {
 		if err := bindPortalShortcutWithTrigger(ctx, conn, sessionPath, trigger); err == nil {
@@ -212,6 +223,13 @@ func bindPortalShortcut(ctx context.Context, conn *dbus.Conn, sessionPath dbus.O
 }
 
 func bindPortalShortcutWithTrigger(ctx context.Context, conn *dbus.Conn, sessionPath dbus.ObjectPath, trigger string) error {
+	if !sessionPath.IsValid() {
+		return fmt.Errorf("portal session path is required")
+	}
+	if conn == nil {
+		return fmt.Errorf("portal dbus connection is required")
+	}
+
 	details := map[string]dbus.Variant{
 		"description": dbus.MakeVariant("Dialtone push-to-talk"),
 	}
@@ -256,6 +274,13 @@ func bindPortalShortcutWithTrigger(ctx context.Context, conn *dbus.Conn, session
 }
 
 func waitPortalResponse(ctx context.Context, conn *dbus.Conn, requestPath dbus.ObjectPath) (uint32, map[string]dbus.Variant, error) {
+	if !requestPath.IsValid() {
+		return 0, nil, fmt.Errorf("portal request path is required")
+	}
+	if conn == nil {
+		return 0, nil, fmt.Errorf("portal dbus connection is required")
+	}
+
 	signals := make(chan *dbus.Signal, 8)
 	conn.Signal(signals)
 	defer conn.RemoveSignal(signals)

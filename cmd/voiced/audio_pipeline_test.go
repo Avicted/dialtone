@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -84,5 +85,22 @@ func TestUpdateVADFromFrameAndMeterBehavior(t *testing.T) {
 	d.updateVADFromFrame([]int16{100, 100, 100, 100})
 	if d.isSpeaking() {
 		t.Fatalf("expected VAD updates ignored while PTT binding is active")
+	}
+}
+
+func TestRunAudioSessionCanceledContextReturns(t *testing.T) {
+	d := newVoiceDaemon("http://server", "token", "", pttBackendAuto, webrtc.Configuration{}, 20, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- d.runAudioSession(ctx)
+	}()
+
+	select {
+	case <-time.After(3 * time.Second):
+		t.Fatal("runAudioSession did not return promptly for canceled context")
+	case <-done:
 	}
 }

@@ -3,8 +3,10 @@
 package audio
 
 import (
+	"context"
 	"encoding/binary"
 	"testing"
+	"time"
 )
 
 func decodeSample(t *testing.T, out []byte, idx int) int16 {
@@ -63,5 +65,26 @@ func TestPlaybackNilAndCloseSafety(t *testing.T) {
 	instance.fillOutput(nil)
 	if err := instance.Close(); err != nil {
 		t.Fatalf("zero playback close: %v", err)
+	}
+}
+
+func TestStartPlaybackSmoke(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	playback, err := StartPlayback(ctx)
+	if err != nil {
+		return
+	}
+	if playback == nil {
+		t.Fatal("StartPlayback() returned nil playback without error")
+	}
+
+	playback.Write([]int16{1, 2, 3})
+	cancel()
+	time.Sleep(20 * time.Millisecond)
+
+	if err := playback.Close(); err != nil {
+		t.Fatalf("playback.Close() error: %v", err)
 	}
 }
