@@ -49,7 +49,7 @@ jobs:
           fi
           state_top="#E05D44"
           state_bottom="#CB2431"
-          if awk "BEGIN {exit !($total >= 85)}"; then
+          if awk "BEGIN {exit !($total >= 80)}"; then
             state_top="#34D058"
             state_bottom="#28A745"
           elif awk "BEGIN {exit !($total >= 60)}"; then

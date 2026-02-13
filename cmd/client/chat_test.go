@@ -1742,3 +1742,903 @@ func TestChatModelShareDirectoryKeyCmdGuards(t *testing.T) {
 		t.Fatalf("expected nil error when shareDirectoryKey short-circuits missing deps, got %v", result.err)
 	}
 }
+
+func TestChatModelResolveChannelAdditionalPaths(t *testing.T) {
+	key := bytes.Repeat([]byte{6}, crypto.KeySize)
+	nameEnc, err := encryptChannelField(key, "general")
+	if err != nil {
+		t.Fatalf("encryptChannelField: %v", err)
+	}
+
+	t.Run("direct-map-hit", func(t *testing.T) {
+		m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+		m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+		id, info, ok := m.resolveChannel("ch-1", false)
+		if !ok || id != "ch-1" || info.Name != "general" {
+			t.Fatalf("unexpected resolve result: id=%q info=%+v ok=%v", id, info, ok)
+		}
+	})
+
+	t.Run("empty-name", func(t *testing.T) {
+		m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+		_, _, ok := m.resolveChannel("", false)
+		if ok {
+			t.Fatalf("expected empty name to fail")
+		}
+		if !strings.Contains(lastSystemMessage(m), "required") {
+			t.Fatalf("expected required message")
+		}
+	})
+
+	t.Run("list-error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(apiError{Error: "boom"})
+		}))
+		defer server.Close()
+
+		m := newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+		_, _, ok := m.resolveChannel("general", false)
+		if ok {
+			t.Fatalf("expected resolve failure")
+		}
+		if !strings.Contains(m.errMsg, "list channels") {
+			t.Fatalf("expected list channels error, got %q", m.errMsg)
+		}
+	})
+
+	t.Run("no-channels", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/channels" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(ListChannelsResponse{Channels: nil})
+		}))
+		defer server.Close()
+
+		m := newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+		_, _, ok := m.resolveChannel("general", false)
+		if ok {
+			t.Fatalf("expected resolve failure")
+		}
+		if lastSystemMessage(m) != "no channels available" {
+			t.Fatalf("unexpected message: %q", lastSystemMessage(m))
+		}
+	})
+
+	t.Run("unknown-channel-name", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/channels" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(ListChannelsResponse{Channels: []ChannelResponse{{ID: "ch-1", NameEnc: nameEnc}}})
+		}))
+		defer server.Close()
+
+		m := newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+		m.channelKeys["ch-1"] = key
+		_, _, ok := m.resolveChannel("random", false)
+		if ok {
+			t.Fatalf("expected unknown channel")
+		}
+		if lastSystemMessage(m) != "unknown channel name" {
+			t.Fatalf("unexpected message: %q", lastSystemMessage(m))
+		}
+	})
+
+	t.Run("multiple-matches-without-selector", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/channels" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(ListChannelsResponse{Channels: []ChannelResponse{{ID: "ch-1", NameEnc: nameEnc}, {ID: "ch-2", NameEnc: nameEnc}}})
+		}))
+		defer server.Close()
+
+		m := newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+		m.channelKeys["ch-1"] = key
+		m.channelKeys["ch-2"] = key
+		_, _, ok := m.resolveChannel("general", false)
+		if ok {
+			t.Fatalf("expected ambiguous match")
+		}
+		if !strings.Contains(lastSystemMessage(m), "multiple channels match") {
+			t.Fatalf("unexpected message: %q", lastSystemMessage(m))
+		}
+	})
+
+	t.Run("prefix-id-match", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/channels" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(ListChannelsResponse{Channels: []ChannelResponse{{ID: "abcdef12", NameEnc: ""}}})
+		}))
+		defer server.Close()
+
+		m := newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+		id, _, ok := m.resolveChannel("abc", false)
+		if !ok || id != "abcdef12" {
+			t.Fatalf("expected prefix match, got id=%q ok=%v", id, ok)
+		}
+	})
+}
+
+func TestChatModelHandleCommandAdditionalBranches(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/channels" {
+			_ = json.NewEncoder(w).Encode(ListChannelsResponse{Channels: nil})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	m := newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+	m.auth.IsAdmin = true
+
+	m.handleCommand("/channel help")
+	if !strings.Contains(lastSystemMessage(m), "channel commands") {
+		t.Fatalf("expected channel help")
+	}
+
+	m.handleCommand("/channel list")
+	if lastSystemMessage(m) != "no channels yet" {
+		t.Fatalf("unexpected list message: %q", lastSystemMessage(m))
+	}
+
+	m.handleCommand("/channel unknown")
+	if lastSystemMessage(m) != "unknown channel command" {
+		t.Fatalf("unexpected message: %q", lastSystemMessage(m))
+	}
+}
+
+func TestChatModelUpdateSupplementalBranches(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/channels" {
+			_ = json.NewEncoder(w).Encode(ListChannelsResponse{Channels: nil})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	m := newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+	m.wsCh = make(chan ServerMessage)
+
+	updated, cmd := m.Update(shareTick{})
+	if cmd != nil {
+		t.Fatalf("expected no share tick cmd while disconnected")
+	}
+
+	updated.sidebarVisible = false
+	updated, cmd = updated.Update(presenceTick{})
+	if cmd != nil {
+		t.Fatalf("expected no presence tick cmd while sidebar hidden")
+	}
+
+	updated.voiceIPC = nil
+	updated.voiceReconnectAttempt = 0
+	updated, cmd = updated.Update(voicePingTick{})
+	if cmd == nil || updated.voiceReconnectAttempt != 1 {
+		t.Fatalf("expected reconnect schedule when voice IPC missing")
+	}
+
+	updated.voiceIPC = newVoiceIPC("")
+	updated.voiceReconnectAttempt = 0
+	updated, cmd = updated.Update(voicePingTick{})
+	if cmd == nil || updated.voiceReconnectAttempt != 1 {
+		t.Fatalf("expected reconnect schedule when ping send fails")
+	}
+	if !strings.Contains(updated.errMsg, "voice ping failed") {
+		t.Fatalf("expected ping failure error, got %q", updated.errMsg)
+	}
+
+	updated.errMsg = ""
+	updated, _ = updated.Update(directorySyncMsg{err: errDirectoryKeyPending})
+	if updated.errMsg != "" {
+		t.Fatalf("expected pending directory key to suppress error, got %q", updated.errMsg)
+	}
+
+	before := len(updated.messages)
+	updated.voiceAutoStarting = true
+	updated.voiceIPC = nil
+	updated, cmd = updated.Update(voiceIPCErrorMsg{err: errors.New("boom")})
+	if cmd != nil {
+		t.Fatalf("expected nil cmd without configured voice IPC")
+	}
+	if len(updated.messages) != before {
+		t.Fatalf("expected no disconnect message while auto-starting")
+	}
+
+	updated.voiceIPC = newVoiceIPC("")
+	_, cmd = updated.Update(voiceReconnectTick{})
+	if cmd == nil {
+		t.Fatalf("expected reconnect command")
+	}
+	if _, ok := cmd().(voiceIPCErrorMsg); !ok {
+		t.Fatalf("expected reconnect command to produce voiceIPCErrorMsg")
+	}
+
+	updated.channelRefreshNeeded = true
+	updated.channelRefreshRetries = 2
+	updated, cmd = updated.Update(wsMessageMsg(ServerMessage{Type: "device.joined", DeviceID: updated.auth.DeviceID}))
+	if cmd == nil {
+		t.Fatalf("expected device joined follow-up commands")
+	}
+	if updated.channelRefreshRetries != 0 {
+		t.Fatalf("expected channel refresh retries reset on own device join")
+	}
+}
+
+func TestChatModelApplyServerVoicePresenceBranches(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+
+	m.applyServerVoicePresence("", "u1", true)
+	m.applyServerVoicePresence("ch-1", "", true)
+	if len(m.serverVoiceRooms) != 0 {
+		t.Fatalf("expected empty updates to be ignored")
+	}
+
+	m.applyServerVoicePresence("ch-1", "u1", true)
+	if m.serverVoiceRooms["ch-1"] == nil || !m.serverVoiceRooms["ch-1"]["u1"] {
+		t.Fatalf("expected active user added to room")
+	}
+
+	m.applyServerVoicePresence("ch-1", "u1", false)
+	if _, ok := m.serverVoiceRooms["ch-1"]; ok {
+		t.Fatalf("expected empty room removed after user leaves")
+	}
+}
+
+func TestChatModelTextAndHighlightHelpersAdditionalPaths(t *testing.T) {
+	if got := wrapText("hello", 0); len(got) != 1 || got[0] != "hello" {
+		t.Fatalf("expected width<=0 passthrough, got %#v", got)
+	}
+	if got := wrapText("", 10); len(got) != 1 || got[0] != "" {
+		t.Fatalf("expected empty string wrap result, got %#v", got)
+	}
+	if got := wrapText("   ", 10); len(got) != 1 || got[0] != "" {
+		t.Fatalf("expected whitespace-only wrap result, got %#v", got)
+	}
+	if got := wrapText("abcdefgh ij", 3); len(got) < 3 {
+		t.Fatalf("expected chunked wrap result, got %#v", got)
+	}
+	if got := formatUsername("<alice>"); got != "<alice>" {
+		t.Fatalf("expected angle-bracket name passthrough, got %q", got)
+	}
+
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.activeChannel = "ch-1"
+	m.appendHighlightedMessage("token")
+	msgs := m.channelMsgs["ch-1"]
+	if len(msgs) != 1 || !msgs[0].highlight {
+		t.Fatalf("expected highlighted channel message")
+	}
+
+	if cmd := m.scheduleVoiceReconnect(0); cmd == nil {
+		t.Fatalf("expected reconnect command for low attempt")
+	}
+	if cmd := m.scheduleVoiceReconnect(999); cmd == nil {
+		t.Fatalf("expected reconnect command for capped attempt")
+	}
+}
+
+func TestChatModelShareDirectoryKeyAdditionalPaths(t *testing.T) {
+	key := bytes.Repeat([]byte{8}, crypto.KeySize)
+
+	t.Run("no-devices", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/devices/keys" {
+				_ = json.NewEncoder(w).Encode(DeviceKeysResponse{Keys: nil})
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer server.Close()
+
+		m := newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+		m.directoryKey = key
+		if err := m.shareDirectoryKey(); err != nil {
+			t.Fatalf("shareDirectoryKey: %v", err)
+		}
+	})
+
+	t.Run("self-only-devices-yield-empty-envelopes", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/devices/keys" {
+				_ = json.NewEncoder(w).Encode(DeviceKeysResponse{Keys: []DeviceKey{{}}})
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer server.Close()
+
+		m := newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+		m.directoryKey = key
+		if err := m.shareDirectoryKey(); err != nil {
+			t.Fatalf("shareDirectoryKey: %v", err)
+		}
+	})
+
+	t.Run("put-failure", func(t *testing.T) {
+		recipient := newTestKeyPair(t)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/devices/keys":
+				_ = json.NewEncoder(w).Encode(DeviceKeysResponse{Keys: []DeviceKey{{
+					DeviceID:  "device-2",
+					PublicKey: crypto.PublicKeyToBase64(recipient.Public),
+				}}})
+			case "/directory/keys":
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(apiError{Error: "boom"})
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		m := newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+		m.directoryKey = key
+		if err := m.shareDirectoryKey(); err == nil {
+			t.Fatalf("expected put directory key error")
+		}
+	})
+
+	t.Run("success", func(t *testing.T) {
+		recipient := newTestKeyPair(t)
+		var posted bool
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/devices/keys":
+				_ = json.NewEncoder(w).Encode(DeviceKeysResponse{Keys: []DeviceKey{{
+					DeviceID:  "device-2",
+					PublicKey: crypto.PublicKeyToBase64(recipient.Public),
+				}}})
+			case "/directory/keys":
+				posted = true
+				w.WriteHeader(http.StatusOK)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		m := newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+		m.directoryKey = key
+		if err := m.shareDirectoryKey(); err != nil {
+			t.Fatalf("shareDirectoryKey: %v", err)
+		}
+		if !posted {
+			t.Fatalf("expected directory key envelopes to be posted")
+		}
+	})
+}
+
+func TestChatModelEnsureChannelKeyAndHistoryErrorPaths(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	if _, err := m.ensureChannelKey(""); err == nil {
+		t.Fatalf("expected missing channel id error")
+	}
+
+	sender := newTestKeyPair(t)
+
+	t.Run("invalid-sender-public-key", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(ChannelKeyEnvelope{SenderPublicKey: "invalid", Envelope: "ct"})
+		}))
+		defer server.Close()
+
+		local := newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+		if _, err := local.ensureChannelKey("ch-1"); err == nil {
+			t.Fatalf("expected invalid sender key error")
+		}
+	})
+
+	t.Run("invalid-ciphertext", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(ChannelKeyEnvelope{SenderPublicKey: crypto.PublicKeyToBase64(sender.Public), Envelope: "bad"})
+		}))
+		defer server.Close()
+
+		local := newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+		if _, err := local.ensureChannelKey("ch-1"); err == nil {
+			t.Fatalf("expected decrypt key envelope error")
+		}
+	})
+
+	t.Run("invalid-key-size", func(t *testing.T) {
+		local := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+		badSizeCipher, err := crypto.EncryptForPeer(sender.Private, local.kp.Public, []byte{1, 2, 3})
+		if err != nil {
+			t.Fatalf("encrypt small payload: %v", err)
+		}
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(ChannelKeyEnvelope{SenderPublicKey: crypto.PublicKeyToBase64(sender.Public), Envelope: badSizeCipher})
+		}))
+		defer server.Close()
+
+		local.api = &APIClient{serverURL: server.URL, httpClient: server.Client()}
+		if _, err := local.ensureChannelKey("ch-1"); err == nil || !strings.Contains(err.Error(), "invalid channel key size") {
+			t.Fatalf("expected invalid channel key size error, got %v", err)
+		}
+	})
+
+	t.Run("load-history-paths", func(t *testing.T) {
+		key := bytes.Repeat([]byte{9}, crypto.KeySize)
+		bodyEnc, err := encryptChannelField(key, "hello")
+		if err != nil {
+			t.Fatalf("encrypt body: %v", err)
+		}
+		senderEnc, err := encryptChannelField(key, "alice")
+		if err != nil {
+			t.Fatalf("encrypt sender: %v", err)
+		}
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/channels/messages":
+				if r.URL.Query().Get("channel_id") == "empty" {
+					_ = json.NewEncoder(w).Encode(ChannelMessagesResponse{Messages: nil})
+					return
+				}
+				if r.URL.Query().Get("channel_id") == "boom" {
+					w.WriteHeader(http.StatusInternalServerError)
+					_ = json.NewEncoder(w).Encode(apiError{Error: "boom"})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(ChannelMessagesResponse{Messages: []ChannelMessageResponse{{
+					SenderID:      "u1",
+					SenderNameEnc: senderEnc,
+					Body:          bodyEnc,
+					SentAt:        time.Now().UTC().Format(time.RFC3339Nano),
+				}}})
+			case "/channels/keys":
+				w.WriteHeader(http.StatusNotFound)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		local := newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+		local.setChannelKey("ok", key)
+		local.loadChannelHistory("ok")
+		if len(local.channelMsgs["ok"]) == 0 || !local.channelHistoryLoaded["ok"] {
+			t.Fatalf("expected channel history loaded")
+		}
+
+		local.loadChannelHistory("boom")
+		if !strings.Contains(local.errMsg, "channel key") {
+			t.Fatalf("expected channel key error before history request, got %q", local.errMsg)
+		}
+
+		local.errMsg = ""
+		local.setChannelKey("empty", key)
+		local.loadChannelHistory("empty")
+		if !local.channelHistoryLoaded["empty"] {
+			t.Fatalf("expected empty history to mark as loaded")
+		}
+	})
+}
+
+func TestChatModelSelectionAndUserEntryEdges(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+	m.channelHistoryLoaded["ch-1"] = true
+	m.activeChannel = "ch-1"
+
+	m.useChannel("ch-1")
+	if lastSystemMessage(m) != "already viewing that channel" {
+		t.Fatalf("unexpected message: %q", lastSystemMessage(m))
+	}
+
+	m.selectActive = true
+	m.selectOptions = nil
+	m.handleChannelSelectKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.selectActive {
+		t.Fatalf("expected empty select options to close selection")
+	}
+
+	m.channelMsgs["ch-1"] = []chatMessage{
+		{isSystem: true, body: "system"},
+		{sender: "u2", senderName: "bob", body: "hello"},
+		{sender: "u3", body: "hi"},
+	}
+	m.userNames["u3"] = "carol"
+	m.userPresence["u2"] = true
+	m.userAdmins["u2"] = true
+	m.voiceSpeaking["u2"] = true
+
+	entries := m.channelUserEntries("ch-1")
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 channel user entries, got %d", len(entries))
+	}
+
+	m.serverVoiceRooms = map[string]map[string]bool{
+		"ch-1": {"u2": true, m.auth.UserID: true},
+		"ch-2": {},
+	}
+	m.channels["ch-2"] = channelInfo{ID: "ch-2", Name: "support"}
+	rooms := m.serverVoiceRoomEntries()
+	if len(rooms) != 1 || rooms[0].ChannelID != "ch-1" {
+		t.Fatalf("unexpected voice room entries: %+v", rooms)
+	}
+}
+
+func TestChatModelUpdateAdditionalMessageBranches(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+	m.channels["ch-2"] = channelInfo{ID: "ch-2", Name: "random"}
+	m.channelHistoryLoaded["ch-1"] = true
+	m.sidebarVisible = true
+	m.input.SetValue("")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if updated.sidebarIndex == 0 {
+		t.Fatalf("expected sidebar navigation to move selection")
+	}
+
+	updated.connected = false
+	_, cmd := updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatalf("expected enter while disconnected to return nil cmd")
+	}
+
+	updated.wsCh = make(chan ServerMessage)
+	updated, cmd = updated.Update(wsMessageMsg(ServerMessage{Type: "error", Code: "bad", Message: "oops"}))
+	if cmd == nil {
+		t.Fatalf("expected follow-up ws wait command")
+	}
+	if !strings.Contains(updated.errMsg, "[bad] oops") {
+		t.Fatalf("expected ws error message, got %q", updated.errMsg)
+	}
+
+	updated.errMsg = ""
+	updated, _ = updated.Update(directorySyncMsg{err: context.Canceled})
+	if updated.errMsg == "" {
+		t.Fatalf("expected directory sync error")
+	}
+
+	updated.errMsg = ""
+	updated, _ = updated.Update(shareKeysMsg{err: nil})
+	if updated.errMsg != "" {
+		t.Fatalf("expected nil share keys error to keep errMsg empty")
+	}
+	updated, _ = updated.Update(shareDirectoryMsg{err: nil})
+	if updated.errMsg != "" {
+		t.Fatalf("expected nil share directory error to keep errMsg empty")
+	}
+
+	updated.auth.IsTrusted = true
+	updated.pendingProfilePush = true
+	updated, cmd = updated.Update(directoryTick{})
+	if cmd == nil {
+		t.Fatalf("expected trusted directory tick to schedule work")
+	}
+
+	updated.channelRefreshNeeded = true
+	updated.channelRefreshRetries = channelRefreshMaxRetries
+	updated, cmd = updated.Update(channelRefreshTick{})
+	if cmd != nil {
+		t.Fatalf("expected no refresh schedule when retries are exhausted")
+	}
+}
+
+func TestChatModelUpdateVoiceIPCPaths(t *testing.T) {
+	addr := filepath.Join(t.TempDir(), "voice-update.sock")
+	listener, err := ipc.Listen(addr)
+	if err != nil {
+		t.Fatalf("listen voice ipc: %v", err)
+	}
+	defer listener.Close()
+
+	recv := make(chan ipc.Message, 2)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		dec := ipc.NewDecoder(conn)
+		for i := 0; i < 2; i++ {
+			var msg ipc.Message
+			if err := dec.Decode(&msg); err != nil {
+				return
+			}
+			recv <- msg
+		}
+	}()
+
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.voiceIPC = newVoiceIPC(addr)
+	join := ipc.Message{Cmd: ipc.CommandVoiceJoin, Room: "ch-1"}
+	m.queueVoiceCommand(join, "ch-1", "voice join requested")
+
+	updated, cmd := m.Update(voiceIPCConnectedMsg{ch: make(chan ipc.Message, 1)})
+	if cmd == nil {
+		t.Fatalf("expected voice wait/ping batch command")
+	}
+	if updated.voicePendingCmd != nil || updated.voicePendingRoom != "" {
+		t.Fatalf("expected pending voice command to clear after successful resend")
+	}
+	if updated.voiceRoom != "ch-1" {
+		t.Fatalf("expected pending room to become active room")
+	}
+	if !strings.Contains(lastSystemMessage(updated), "voice join requested") {
+		t.Fatalf("expected pending notice message")
+	}
+
+	select {
+	case first := <-recv:
+		if first.Cmd != ipc.CommandIdentify {
+			t.Fatalf("expected identify first, got %#v", first)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout waiting for identify command")
+	}
+	select {
+	case second := <-recv:
+		if second.Cmd != ipc.CommandVoiceJoin || second.Room != "ch-1" {
+			t.Fatalf("unexpected pending resend message: %#v", second)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout waiting for pending voice command")
+	}
+
+	updated.voiceCh = make(chan ipc.Message, 1)
+	updated, cmd = updated.Update(voiceIPCMsg(ipc.Message{Event: ipc.EventInfo, Error: "hello"}))
+	if cmd == nil {
+		t.Fatalf("expected follow-up voice wait cmd")
+	}
+	if !strings.Contains(lastSystemMessage(updated), "voice info: hello") {
+		t.Fatalf("expected voice info message")
+	}
+
+	updated.voiceAutoStarting = false
+	updated.voiceIPC = newVoiceIPC("")
+	before := len(updated.messages)
+	updated, cmd = updated.Update(voiceIPCErrorMsg{err: errors.New("disconnect")})
+	if cmd == nil || updated.voiceReconnectAttempt == 0 {
+		t.Fatalf("expected reconnect schedule after voice IPC error")
+	}
+	if len(updated.messages) != before+1 || lastSystemMessage(updated) != "voice daemon disconnected" {
+		t.Fatalf("expected disconnect system message")
+	}
+}
+
+func TestChatModelSendCurrentMessageAndHelpersEdgeCases(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.input.SetValue("   ")
+	if cmd := m.sendCurrentMessage(); cmd != nil {
+		t.Fatalf("expected nil cmd for empty message")
+	}
+
+	m.input.SetValue("hello")
+	m.ws = nil
+	if cmd := m.sendCurrentMessage(); cmd != nil {
+		t.Fatalf("expected nil cmd when websocket is nil")
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/channels/keys" {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(apiError{Error: "missing"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	m = newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+	m.activeChannel = "ch-1"
+	m.ws = &WSClient{closed: true}
+	m.input.SetValue("hello")
+	_ = m.sendCurrentMessage()
+	if !strings.Contains(m.errMsg, "channel key") {
+		t.Fatalf("expected channel key error, got %q", m.errMsg)
+	}
+
+	if got := m.channelHelpText(); !strings.Contains(got, "create") {
+		t.Fatalf("expected admin channel help text")
+	}
+	m.auth.IsAdmin = false
+	if got := m.channelHelpText(); got != "channel commands: /channel list" {
+		t.Fatalf("unexpected non-admin channel help text: %q", got)
+	}
+	if got := m.serverHelpText(); got != "admin only: server invites" {
+		t.Fatalf("unexpected non-admin server help text: %q", got)
+	}
+
+	if m.getChannelKey("") != nil {
+		t.Fatalf("expected empty channel id to return nil key")
+	}
+
+	if _, err := decryptFieldWithKey(bytes.Repeat([]byte{1}, crypto.KeySize), "not-base64"); err == nil {
+		t.Fatalf("expected decryptFieldWithKey decode error")
+	}
+	if _, err := encryptChannelField([]byte{1, 2}, "hello"); err == nil {
+		t.Fatalf("expected encryptChannelField key size error")
+	}
+	if !isNotFoundErr(errors.New("Not Found")) || isNotFoundErr(nil) {
+		t.Fatalf("unexpected isNotFoundErr behavior")
+	}
+}
+
+func TestChatModelShareKnownChannelKeysAdditionalPaths(t *testing.T) {
+	t.Run("list-channels-error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/channels" {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(apiError{Error: "boom"})
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer server.Close()
+
+		m := newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+		m.channelKeys["ch-1"] = bytes.Repeat([]byte{1}, crypto.KeySize)
+		if err := m.shareKnownChannelKeys(); err == nil {
+			t.Fatalf("expected list channels error")
+		}
+	})
+
+	t.Run("list-devices-error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/channels":
+				_ = json.NewEncoder(w).Encode(ListChannelsResponse{Channels: []ChannelResponse{{ID: "ch-1"}}})
+			case "/devices/keys":
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(apiError{Error: "boom"})
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		m := newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+		m.channelKeys["ch-1"] = bytes.Repeat([]byte{1}, crypto.KeySize)
+		if err := m.shareKnownChannelKeys(); err == nil {
+			t.Fatalf("expected list devices error")
+		}
+	})
+
+	t.Run("no-devices-short-circuit", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/channels":
+				_ = json.NewEncoder(w).Encode(ListChannelsResponse{Channels: []ChannelResponse{{ID: "ch-1"}}})
+			case "/devices/keys":
+				_ = json.NewEncoder(w).Encode(DeviceKeysResponse{Keys: nil})
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		m := newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+		m.channelKeys["ch-1"] = bytes.Repeat([]byte{1}, crypto.KeySize)
+		if err := m.shareKnownChannelKeys(); err != nil {
+			t.Fatalf("shareKnownChannelKeys: %v", err)
+		}
+	})
+}
+
+func TestChatModelSyncDirectoryAndChannelMutationEdges(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.directoryKey = bytes.Repeat([]byte{1}, crypto.KeySize)
+	m.auth = nil
+	if _, _, err := m.syncDirectory(false); err == nil || !strings.Contains(err.Error(), "missing auth") {
+		t.Fatalf("expected missing auth error, got %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/directory/keys":
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(apiError{Error: "boom"})
+		case "/channels":
+			if r.Method == http.MethodPost {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(apiError{Error: "create failed"})
+				return
+			}
+			if r.Method == http.MethodDelete {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			if r.Method == http.MethodPatch {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(apiError{Error: "rename failed"})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(ListChannelsResponse{Channels: nil})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	m = newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+	if _, err := m.ensureDirectoryKey(); err == nil {
+		t.Fatalf("expected ensureDirectoryKey error")
+	}
+
+	m.createChannel("general")
+	if !strings.Contains(m.errMsg, "create channel") {
+		t.Fatalf("expected create channel error, got %q", m.errMsg)
+	}
+
+	m.errMsg = ""
+	m.channels["abcdefghijk"] = channelInfo{ID: "abcdefghijk", Name: ""}
+	m.deleteChannel("abcdefghijk")
+	if !strings.Contains(lastSystemMessage(m), "deleted channel") {
+		t.Fatalf("expected deleted channel message")
+	}
+
+	m.errMsg = ""
+	m.channels["ch-2"] = channelInfo{ID: "ch-2", Name: "old"}
+	m.channelKeys["ch-2"] = bytes.Repeat([]byte{2}, crypto.KeySize)
+	m.renameChannel("ch-2", "new")
+	if !strings.Contains(m.errMsg, "rename channel") {
+		t.Fatalf("expected rename channel error, got %q", m.errMsg)
+	}
+
+	m.voicePendingCmd = &ipc.Message{Cmd: ipc.CommandVoiceJoin, Room: "ch-voice"}
+	m.voicePendingRoom = ""
+	if id := m.voiceChannelIndicatorID(); id != "ch-voice" {
+		t.Fatalf("expected pending command room fallback, got %q", id)
+	}
+	if name := m.channelDisplayName("unknown-channel-id"); name != "unknown-" {
+		t.Fatalf("expected shortID fallback, got %q", name)
+	}
+	m.resetVoiceMembersForRoom("")
+	if len(m.voiceMembers) != 0 {
+		t.Fatalf("expected resetVoiceMembersForRoom empty to clear members")
+	}
+}
+
+func TestChatModelVoiceAndInviteGuardBranches(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.voiceIPC = newVoiceIPC("")
+	m.activeChannel = ""
+
+	_ = m.handleVoiceCommand("/voice join", []string{"/voice", "join"})
+	if !strings.Contains(lastSystemMessage(m), "usage: /voice join") {
+		t.Fatalf("expected voice join usage message")
+	}
+
+	m.voiceIPC = nil
+	cmd := m.dispatchVoiceCommand(ipc.Message{Cmd: ipc.CommandMute}, "", "", "voice mute")
+	if cmd != nil {
+		t.Fatalf("expected nil command when voice IPC is missing")
+	}
+	if lastSystemMessage(m) != "voice daemon not configured" {
+		t.Fatalf("unexpected dispatch guard message: %q", lastSystemMessage(m))
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(apiError{Error: "boom"})
+	}))
+	defer server.Close()
+
+	m = newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
+	m.createServerInvite()
+	if !strings.Contains(m.errMsg, "server invite") {
+		t.Fatalf("expected invite error, got %q", m.errMsg)
+	}
+
+	m.startChannelSelection(nil)
+	if m.selectActive {
+		t.Fatalf("expected empty selection options to keep modal inactive")
+	}
+}
