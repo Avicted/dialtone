@@ -134,3 +134,15 @@ func TestPTTStartupDiagnostic(t *testing.T) {
 		t.Fatalf("expected reason field in diagnostic: %q", msg)
 	}
 }
+
+func TestPTTControllerRun(t *testing.T) {
+	var nilController *pttController
+	if err := nilController.Run(context.Background(), func() {}, func() {}); err == nil {
+		t.Fatalf("expected nil controller run to fail")
+	}
+
+	controller := &pttController{backend: testPTTBackend{}}
+	if err := controller.Run(context.Background(), func() {}, func() {}); err != nil {
+		t.Fatalf("expected backend run to succeed: %v", err)
+	}
+}

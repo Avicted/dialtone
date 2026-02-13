@@ -300,3 +300,36 @@ func TestRunReturnsNilWhenContextCanceled(t *testing.T) {
 		t.Fatalf("Run canceled context: %v", err)
 	}
 }
+
+func TestAddAndRemoveVoiceMember(t *testing.T) {
+	d := newVoiceDaemon("http://server", "token", "", pttBackendAuto, webrtc.Configuration{}, defaultVADThreshold, false)
+	d.room = "room-1"
+	d.local = "alice"
+	d.memb = map[string]struct{}{"alice": {}}
+
+	d.addVoiceMember("")
+	d.addVoiceMember("bob")
+	d.addVoiceMember("bob")
+
+	d.mu.Lock()
+	_, hasAlice := d.memb["alice"]
+	_, hasBob := d.memb["bob"]
+	membersLen := len(d.memb)
+	d.mu.Unlock()
+	if !hasAlice || !hasBob || membersLen != 2 {
+		t.Fatalf("expected alice and bob members only, got alice=%v bob=%v len=%d", hasAlice, hasBob, membersLen)
+	}
+
+	d.removeVoiceMember("charlie")
+	d.removeVoiceMember("")
+	d.removeVoiceMember("bob")
+
+	d.mu.Lock()
+	_, hasAlice = d.memb["alice"]
+	_, hasBob = d.memb["bob"]
+	membersLen = len(d.memb)
+	d.mu.Unlock()
+	if !hasAlice || hasBob || membersLen != 1 {
+		t.Fatalf("expected only local member to remain, got alice=%v bob=%v len=%d", hasAlice, hasBob, membersLen)
+	}
+}

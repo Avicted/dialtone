@@ -1724,3 +1724,110 @@ func TestHub_HandleVoiceLeave_BroadcastsPresenceToAllClients(t *testing.T) {
 		t.Fatalf("unexpected presence event: %+v", event)
 	}
 }
+
+func TestHub_HandleVoiceSignal_ValidationErrors(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+
+	sender := &Client{send: make(chan []byte, 8), userID: "user-1"}
+	hub.handleVoiceSignal(sender, inboundMessage{Type: "webrtc_offer", ChannelID: ""})
+	errEvent := readEvent[errorEvent](t, sender.send)
+	if errEvent.Type != "error" || errEvent.Code != "invalid_message" {
+		t.Fatalf("unexpected missing channel error event: %+v", errEvent)
+	}
+
+	hub.handleVoiceSignal(sender, inboundMessage{Type: "webrtc_offer", ChannelID: "ch-1"})
+	errEvent = readEvent[errorEvent](t, sender.send)
+	if errEvent.Type != "error" || errEvent.Code != "voice_not_joined" {
+		t.Fatalf("unexpected not-joined error event: %+v", errEvent)
+	}
+}
+
+func TestHub_HandleVoiceSignal_BroadcastToRoomPeers(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+
+	sender := &Client{send: make(chan []byte, 8), userID: "user-1"}
+	peerA := &Client{send: make(chan []byte, 8), userID: "user-2"}
+	peerB := &Client{send: make(chan []byte, 8), userID: "user-3"}
+
+	hub.mu.Lock()
+	hub.voiceRooms["ch-1"] = map[*Client]struct{}{
+		sender: {},
+		peerA:  {},
+		peerB:  {},
+	}
+	hub.voiceRoom[sender] = "ch-1"
+	hub.voiceRoom[peerA] = "ch-1"
+	hub.voiceRoom[peerB] = "ch-1"
+	hub.mu.Unlock()
+
+	hub.handleVoiceSignal(sender, inboundMessage{
+		Type:      "webrtc_offer",
+		ChannelID: "ch-1",
+		SDP:       "offer-sdp",
+	})
+
+	msgA := readEvent[voiceSignalEvent](t, peerA.send)
+	msgB := readEvent[voiceSignalEvent](t, peerB.send)
+
+	if msgA.Type != "webrtc_offer" || msgA.Sender != "user-1" || msgA.ChannelID != "ch-1" || msgA.SDP != "offer-sdp" {
+		t.Fatalf("unexpected peerA signal event: %+v", msgA)
+	}
+	if msgB.Type != "webrtc_offer" || msgB.Sender != "user-1" || msgB.ChannelID != "ch-1" || msgB.SDP != "offer-sdp" {
+		t.Fatalf("unexpected peerB signal event: %+v", msgB)
+	}
+
+	select {
+	case data := <-sender.send:
+		t.Fatalf("sender should not receive own signal, got %s", string(data))
+	default:
+	}
+}
+
+func TestHub_HandleVoiceSignal_RecipientRouting(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+
+	sender := &Client{send: make(chan []byte, 8), userID: "user-1"}
+	recipientInRoom := &Client{send: make(chan []byte, 8), userID: "user-2"}
+	recipientOutOfRoom := &Client{send: make(chan []byte, 8), userID: "user-2"}
+	unrelatedInRoom := &Client{send: make(chan []byte, 8), userID: "user-3"}
+
+	hub.mu.Lock()
+	hub.voiceRooms["ch-1"] = map[*Client]struct{}{
+		sender:          {},
+		recipientInRoom: {},
+		unrelatedInRoom: {},
+	}
+	hub.voiceRoom[sender] = "ch-1"
+	hub.voiceRoom[recipientInRoom] = "ch-1"
+	hub.voiceRoom[unrelatedInRoom] = "ch-1"
+	hub.voiceRooms["ch-2"] = map[*Client]struct{}{recipientOutOfRoom: {}}
+	hub.voiceRoom[recipientOutOfRoom] = "ch-2"
+	hub.byUser["user-2"] = map[*Client]struct{}{
+		recipientInRoom:    {},
+		recipientOutOfRoom: {},
+	}
+	hub.mu.Unlock()
+
+	hub.handleVoiceSignal(sender, inboundMessage{
+		Type:      "ice_candidate",
+		ChannelID: "ch-1",
+		Recipient: "user-2",
+		Candidate: "candidate:1 1 udp 2122260223 127.0.0.1 40000 typ host",
+	})
+
+	msg := readEvent[voiceSignalEvent](t, recipientInRoom.send)
+	if msg.Type != "ice_candidate" || msg.Sender != "user-1" || msg.Recipient != "user-2" || msg.Candidate == "" {
+		t.Fatalf("unexpected routed signal event: %+v", msg)
+	}
+
+	select {
+	case data := <-recipientOutOfRoom.send:
+		t.Fatalf("out-of-room recipient should not receive signal, got %s", string(data))
+	default:
+	}
+	select {
+	case data := <-unrelatedInRoom.send:
+		t.Fatalf("unrelated in-room peer should not receive recipient-targeted signal, got %s", string(data))
+	default:
+	}
+}

@@ -17,9 +17,10 @@ type Playback struct {
 	ctx    *malgo.AllocatedContext
 	device *malgo.Device
 
-	mu     sync.Mutex
-	buf    []int16
-	maxBuf int
+	mu        sync.Mutex
+	buf       []int16
+	maxBuf    int
+	closeOnce sync.Once
 }
 
 func StartPlayback(ctx context.Context) (*Playback, error) {
@@ -115,13 +116,15 @@ func (p *Playback) Close() error {
 	if p == nil {
 		return nil
 	}
-	if p.device != nil {
-		p.device.Uninit()
-		p.device = nil
-	}
-	if p.ctx != nil {
-		p.ctx.Uninit()
-		p.ctx = nil
-	}
+	p.closeOnce.Do(func() {
+		if p.device != nil {
+			p.device.Uninit()
+			p.device = nil
+		}
+		if p.ctx != nil {
+			p.ctx.Uninit()
+			p.ctx = nil
+		}
+	})
 	return nil
 }

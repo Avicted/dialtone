@@ -146,3 +146,11 @@ func TestLoginViewWithErrorsAndLoading(t *testing.T) {
 		t.Fatalf("expected view")
 	}
 }
+
+func TestLoginConfirmPasswordGetter(t *testing.T) {
+	m := newLoginModel("http://server")
+	m.confirmInput.SetValue("secret-confirm")
+	if got := m.confirmPassword(); got != "secret-confirm" {
+		t.Fatalf("confirmPassword() = %q, want %q", got, "secret-confirm")
+	}
+}
