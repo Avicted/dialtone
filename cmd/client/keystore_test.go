@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -248,5 +249,138 @@ func TestLoadDirectoryKeyInvalidPayload(t *testing.T) {
 	}
 	if key != nil {
 		t.Fatalf("expected nil key")
+	}
+}
+
+func TestLoadKeyPairLegacyPlaintextMigrates(t *testing.T) {
+	dir := setTestConfigDir(t)
+	kp := newTestKeyPair(t)
+	path := filepath.Join(dir, "dialtone", "device_key.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	plain, err := json.Marshal(storedKey{PrivateKey: crypto.PrivateKeyToBase64(kp.Private)})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(path, plain, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	loaded, err := loadKeyPair(path, "passphrase123")
+	if err != nil {
+		t.Fatalf("loadKeyPair: %v", err)
+	}
+	if crypto.PublicKeyToBase64(loaded.Public) != crypto.PublicKeyToBase64(kp.Public) {
+		t.Fatalf("unexpected loaded key")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read migrated key: %v", err)
+	}
+	var migrated storedKey
+	wasEncrypted, err := decryptKeystoreJSON("passphrase123", data, &migrated)
+	if err != nil {
+		t.Fatalf("decrypt migrated key: %v", err)
+	}
+	if !wasEncrypted {
+		t.Fatalf("expected migrated key to be encrypted")
+	}
+}
+
+func TestLoadDirectoryKeyLegacyPlainAndInvalidSize(t *testing.T) {
+	configDir := setTestConfigDir(t)
+	path := filepath.Join(configDir, "dialtone", "directory_key.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	key := make([]byte, crypto.KeySize)
+	plainPayload := storedDirectoryKey{Key: base64.StdEncoding.EncodeToString(key)}
+	data, err := json.Marshal(plainPayload)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	loaded, err := loadDirectoryKey("passphrase123")
+	if err != nil {
+		t.Fatalf("loadDirectoryKey: %v", err)
+	}
+	if len(loaded) != crypto.KeySize {
+		t.Fatalf("unexpected key size: %d", len(loaded))
+	}
+
+	invalidPayload := storedDirectoryKey{Key: base64.StdEncoding.EncodeToString([]byte{1, 2, 3})}
+	data, err = json.Marshal(invalidPayload)
+	if err != nil {
+		t.Fatalf("marshal invalid: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write invalid: %v", err)
+	}
+
+	loaded, err = loadDirectoryKey("")
+	if err != nil {
+		t.Fatalf("loadDirectoryKey invalid size: %v", err)
+	}
+	if loaded != nil {
+		t.Fatalf("expected nil key for invalid size")
+	}
+}
+
+func TestSaveKeyPairAndChannelKeysRequirePassphrase(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "device.json")
+	kp := newTestKeyPair(t)
+
+	if err := saveKeyPair(path, kp, ""); err == nil {
+		t.Fatalf("expected saveKeyPair passphrase error")
+	}
+
+	setTestConfigDir(t)
+	keys := map[string][]byte{"ch-1": make([]byte, crypto.KeySize)}
+	if err := saveChannelKeys(keys, ""); err == nil {
+		t.Fatalf("expected saveChannelKeys passphrase error")
+	}
+}
+
+func TestDecryptKeystoreJSONInvalidKDFParams(t *testing.T) {
+	payload := encryptedBlob{
+		Version: keystoreVersion,
+		KDF:     keystoreKDF,
+		Cipher:  keystoreCipher,
+		Salt:    base64.StdEncoding.EncodeToString([]byte("salt")),
+		N:       0,
+		R:       8,
+		P:       1,
+		Data:    base64.StdEncoding.EncodeToString([]byte("ciphertext")),
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var out storedKey
+	if _, err := decryptKeystoreJSON("passphrase123", data, &out); err == nil {
+		t.Fatalf("expected invalid kdf params error")
+	}
+}
+
+func TestSaveDirectoryKeyRequiresPassphrase(t *testing.T) {
+	setTestConfigDir(t)
+	key := make([]byte, crypto.KeySize)
+	if err := saveDirectoryKey(key, ""); err == nil {
+		t.Fatalf("expected saveDirectoryKey passphrase error")
+	}
+}
+
+func TestDecryptKeystoreJSONInvalidJSON(t *testing.T) {
+	var out storedKey
+	if _, err := decryptKeystoreJSON("passphrase123", []byte("not-json"), &out); err == nil {
+		t.Fatalf("expected json unmarshal error")
 	}
 }
