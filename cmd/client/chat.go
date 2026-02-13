@@ -90,6 +90,7 @@ type chatModel struct {
 	activeChannel         string
 	channelUnread         map[string]int
 	sidebarVisible        bool
+	helpVisible           bool
 	sidebarIndex          int
 	selectActive          bool
 	selectOptions         []channelInfo
@@ -147,6 +148,7 @@ var teaTick = tea.Tick
 
 func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, keystorePassphrase string, width, height int, voiceIPCAddr string) chatModel {
 	input := textinput.New()
+	input.Prompt = ""
 	input.Placeholder = "type a message..."
 	input.CharLimit = 16384
 	input.Width = clampMin(width-8, 20)
@@ -184,6 +186,7 @@ func newChatModel(api *APIClient, auth *AuthResponse, kp *crypto.KeyPair, keysto
 		directoryKey:         dirKey,
 		channelUnread:        make(map[string]int),
 		sidebarVisible:       true,
+		helpVisible:          true,
 		sidebarIndex:         0,
 	}
 	if auth != nil && auth.IsTrusted {
@@ -279,26 +282,32 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 		}
 		if m.sidebarVisible && m.input.Value() == "" {
 			switch msg.String() {
-			case "up", "k":
+			case "ctrl+up":
 				m.moveSidebarSelection(-1)
 				return m, nil
-			case "down", "j":
+			case "ctrl+down":
 				m.moveSidebarSelection(1)
 				return m, nil
-			case "enter":
-				if m.selectSidebarChannel() {
-					return m, nil
-				}
 			}
 		}
 		switch msg.String() {
+		case "ctrl+m":
+			return m, nil
 		case "enter":
+			if m.input.Value() == "" && m.sidebarVisible {
+				selectedID, ok := m.selectedSidebarChannelID()
+				if ok && selectedID != m.activeChannel {
+					if m.selectSidebarChannel() {
+						return m, nil
+					}
+				}
+			}
 			if m.connected {
 				cmd := m.sendCurrentMessage()
 				return m, cmd
 			}
 			return m, nil
-		case "ctrl+h", "ctrl+u":
+		case "ctrl+l":
 			m.sidebarVisible = !m.sidebarVisible
 			m.updateLayout()
 			m.refreshViewport()
@@ -306,6 +315,10 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 				m.refreshPresence()
 				return m, m.schedulePresenceTick()
 			}
+			return m, nil
+
+		case "ctrl+/", "f1":
+			m.helpVisible = !m.helpVisible
 			return m, nil
 
 		case "pgup", "pgdown":
@@ -565,6 +578,20 @@ func (m *chatModel) handleCommand(raw string) tea.Cmd {
 		}
 		return nil
 	}
+	if cmd == "/join" || cmd == "/j" {
+		target := strings.TrimSpace(strings.TrimPrefix(raw, parts[0]))
+		target = normalizeIRCChannelName(target)
+		if target == "" {
+			m.appendSystemMessage("usage: /join <channel>")
+			return nil
+		}
+		m.useChannel(target)
+		return nil
+	}
+	if cmd == "/list" || cmd == "/ls" {
+		m.refreshChannels(true)
+		return nil
+	}
 	if cmd != "/channel" {
 		m.appendSystemMessage("unknown command")
 		return nil
@@ -624,11 +651,17 @@ func (m *chatModel) handleCommand(raw string) tea.Cmd {
 	return nil
 }
 
+func normalizeIRCChannelName(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "#")
+	return strings.TrimSpace(value)
+}
+
 func (m *chatModel) helpText() string {
 	if m.auth.IsAdmin {
-		return "commands: /help | /voice join [channel] | /voice leave | /voice mute | /voice unmute | /channel list | /channel create <name> | /channel rename <channel_id|name> <new name> | /channel delete <channel_id|name> | /server invite"
+		return "commands: /help | /join <channel> | /j <channel> | /list | /ls | /voice join [channel] | /voice leave | /voice mute | /voice unmute | /channel list | /channel create <name> | /channel rename <channel_id|name> <new name> | /channel delete <channel_id|name> | /server invite"
 	}
-	return "commands: /help | /voice join [channel] | /voice leave | /voice mute | /voice unmute | /channel list"
+	return "commands: /help | /join <channel> | /j <channel> | /list | /ls | /voice join [channel] | /voice leave | /voice mute | /voice unmute | /channel list"
 }
 
 func (m *chatModel) handleVoiceEvent(msg ipc.Message) {
@@ -789,9 +822,9 @@ func (m *chatModel) clearPendingVoiceCommand() {
 
 func (m *chatModel) channelHelpText() string {
 	if m.auth.IsAdmin {
-		return "channel commands: /channel list | create <name> | rename <channel_id|name> <new name> | delete <channel_id|name>"
+		return "channel commands: /join <channel> | /j <channel> | /list | /ls | /channel list | create <name> | rename <channel_id|name> <new name> | delete <channel_id|name>"
 	}
-	return "channel commands: /channel list"
+	return "channel commands: /join <channel> | /j <channel> | /list | /ls | /channel list"
 }
 
 func (m *chatModel) serverHelpText() string {
@@ -1532,15 +1565,8 @@ func (m *chatModel) renderSidebar() string {
 			if name == "" {
 				name = shortID(ch.ID)
 			}
-			markers := ""
-			if ch.ID == m.activeChannel {
-				markers += "* "
-			}
-			if ch.ID == voiceChannelID {
-				markers += "♪ "
-			}
-			if markers != "" {
-				name = markers + name
+			if ch.ID == m.activeChannel && i != m.sidebarIndex {
+				name = "• " + name
 			}
 			unread := m.channelUnread[ch.ID]
 			if unread > 0 && ch.ID != m.activeChannel {
@@ -1587,9 +1613,6 @@ func (m *chatModel) renderSidebar() string {
 					style = sidebarOnlineStyle
 				}
 				name := formatUsername(entry.Name)
-				if entry.ID == m.auth.UserID {
-					name = fmt.Sprintf("%s (you)", name)
-				}
 				if room.ChannelID == voiceChannelID && entry.Speak {
 					name = fmt.Sprintf("+ %s", name)
 				}
@@ -1944,6 +1967,17 @@ func (m *chatModel) moveSidebarSelection(delta int) {
 	m.sidebarIndex = idx
 }
 
+func (m *chatModel) selectedSidebarChannelID() (string, bool) {
+	channels := m.channelList()
+	if len(channels) == 0 {
+		return "", false
+	}
+	if m.sidebarIndex < 0 || m.sidebarIndex >= len(channels) {
+		return "", false
+	}
+	return channels[m.sidebarIndex].ID, true
+}
+
 func (m *chatModel) selectSidebarChannel() bool {
 	channels := m.channelList()
 	if len(channels) == 0 {
@@ -2045,7 +2079,7 @@ func (m chatModel) View() string {
 
 	header := fmt.Sprintf(
 		"  %s  %s  %s  %s  %s",
-		appNameStyle.Render("* dialtone"),
+		appNameStyle.Render("› dialtone"),
 		headerStyle.Render(formatUsername(m.auth.Username)),
 		labelStyle.Render(shortID(m.auth.UserID)),
 		labelStyle.Render(m.activeChannelLabel()),
@@ -2080,8 +2114,16 @@ func (m chatModel) View() string {
 
 	if m.errMsg != "" {
 		b.WriteString(errorStyle.Render("  x " + m.errMsg))
+	} else if m.helpVisible {
+		helpLines := m.footerHelpLines()
+		for i, line := range helpLines {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(helpStyle.Render("  " + line))
+		}
 	} else {
-		b.WriteString(helpStyle.Render("  enter: send - /help for commands - up/down+enter (empty): switch channel - ctrl+u: focus users/channels - pgup/pgdn: scroll - ctrl+h: toggle sidebar - ctrl+q: quit"))
+		b.WriteString(helpStyle.Render("  ctrl+/ or f1: show help - ctrl+q: quit"))
 	}
 
 	return b.String()
@@ -2127,6 +2169,11 @@ func (m *chatModel) voiceStatusLabel() string {
 		return "voice: reconnecting"
 	}
 	return "voice: off"
+}
+
+func (m *chatModel) footerHelpLines() []string {
+	help := "enter: switch selected channel or send · /help: commands · ctrl+up/down: select channel · pgup/pgdn: scroll · ctrl+l: toggle sidebar · ctrl+/ or f1: toggle help · ctrl+q: quit"
+	return wrapText(help, clampMin(m.width-4, 20))
 }
 
 func (m *chatModel) voiceChannelIndicatorID() string {

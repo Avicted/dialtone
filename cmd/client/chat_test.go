@@ -329,8 +329,8 @@ func TestChatModelRenderSidebarAndSelection(t *testing.T) {
 	if !strings.Contains(out, "alpha") || !strings.Contains(out, "(2)") {
 		t.Fatalf("unexpected sidebar output")
 	}
-	if !strings.Contains(out, "♪ beta") {
-		t.Fatalf("expected voice marker on joined channel")
+	if strings.Contains(out, "♪ beta") {
+		t.Fatalf("did not expect voice marker on joined channel")
 	}
 	if !strings.Contains(out, "+ <"+m.auth.Username+">") {
 		t.Fatalf("expected speaking marker in in-voice section")
@@ -687,10 +687,10 @@ func TestChatModelSyncDirectoryPushProfile(t *testing.T) {
 	}
 }
 
-func TestChatModelUpdateCtrlHTogglesSidebar(t *testing.T) {
+func TestChatModelUpdateCtrlLTogglesSidebar(t *testing.T) {
 	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
 	m.sidebarVisible = true
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlH})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
 	if updated.sidebarVisible {
 		t.Fatalf("expected sidebar hidden")
 	}
@@ -867,6 +867,14 @@ func TestChatModelViewIncludesVoiceStatus(t *testing.T) {
 	}
 }
 
+func TestChatModelViewUsesSingleInputPrompt(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	out := m.View()
+	if strings.Contains(out, "  > >") {
+		t.Fatalf("expected single input prompt")
+	}
+}
+
 func TestChatModelHandleVoiceMembersEvent(t *testing.T) {
 	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
 	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
@@ -886,8 +894,8 @@ func TestChatModelHandleVoiceMembersEvent(t *testing.T) {
 	}
 
 	out := m.renderSidebar()
-	if !strings.Contains(out, "In Voice") || !strings.Contains(out, "(you)") {
-		t.Fatalf("expected in-voice roster rendering")
+	if !strings.Contains(out, "In Voice") || strings.Contains(out, "(you)") {
+		t.Fatalf("expected in-voice roster rendering without self label")
 	}
 }
 
@@ -1202,25 +1210,12 @@ func TestChatModelUpdateWindowAndPaging(t *testing.T) {
 	_, _ = updated.Update(tea.KeyMsg{Type: tea.KeyPgUp})
 }
 
-func TestChatModelUpdateCtrlUTogglesSidebar(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/presence" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(PresenceResponse{Statuses: map[string]bool{"u1": true}})
-	}))
-	defer server.Close()
-
-	api := &APIClient{serverURL: server.URL, httpClient: server.Client()}
-	m := newChatForTest(t, api)
-	m.userNames["u1"] = "alice"
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
-	if updated.sidebarVisible {
-		t.Fatalf("expected sidebar hidden")
-	}
-	if cmd != nil {
-		t.Fatalf("expected no command when hiding sidebar")
+func TestChatModelUpdateCtrlUDoesNotToggleSidebar(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.sidebarVisible = true
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	if !updated.sidebarVisible {
+		t.Fatalf("expected sidebar to remain visible")
 	}
 }
 
@@ -1915,15 +1910,43 @@ func TestChatModelHandleCommandAdditionalBranches(t *testing.T) {
 
 	m := newChatForTest(t, &APIClient{serverURL: server.URL, httpClient: server.Client()})
 	m.auth.IsAdmin = true
+	m.channels["general"] = channelInfo{ID: "general", Name: "general"}
+	m.channelHistoryLoaded["general"] = true
 
 	m.handleCommand("/channel help")
 	if !strings.Contains(lastSystemMessage(m), "channel commands") {
 		t.Fatalf("expected channel help")
 	}
 
+	m.handleCommand("/list")
+	if lastSystemMessage(m) != "no channels yet" {
+		t.Fatalf("unexpected /list message: %q", lastSystemMessage(m))
+	}
+
+	m.handleCommand("/ls")
+	if lastSystemMessage(m) != "no channels yet" {
+		t.Fatalf("unexpected /ls message: %q", lastSystemMessage(m))
+	}
+
 	m.handleCommand("/channel list")
 	if lastSystemMessage(m) != "no channels yet" {
 		t.Fatalf("unexpected list message: %q", lastSystemMessage(m))
+	}
+
+	m.handleCommand("/join #general")
+	if m.activeChannel != "general" {
+		t.Fatalf("expected /join to switch to channel")
+	}
+
+	m.activeChannel = ""
+	m.handleCommand("/j #general")
+	if m.activeChannel != "general" {
+		t.Fatalf("expected /j to switch to channel")
+	}
+
+	m.handleCommand("/join")
+	if lastSystemMessage(m) != "usage: /join <channel>" {
+		t.Fatalf("unexpected /join usage message: %q", lastSystemMessage(m))
 	}
 
 	m.handleCommand("/channel unknown")
@@ -2316,8 +2339,13 @@ func TestChatModelUpdateAdditionalMessageBranches(t *testing.T) {
 	m.input.SetValue("")
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	if updated.sidebarIndex == 0 {
-		t.Fatalf("expected sidebar navigation to move selection")
+	if updated.sidebarIndex != 0 {
+		t.Fatalf("expected plain down arrow to not move sidebar selection")
+	}
+
+	updated, _ = updated.Update(tea.KeyMsg{Type: tea.KeyCtrlDown})
+	if updated.sidebarIndex != 1 {
+		t.Fatalf("expected ctrl+down to move sidebar selection")
 	}
 
 	updated.connected = false
@@ -2363,6 +2391,71 @@ func TestChatModelUpdateAdditionalMessageBranches(t *testing.T) {
 	updated, cmd = updated.Update(channelRefreshTick{})
 	if cmd != nil {
 		t.Fatalf("expected no refresh schedule when retries are exhausted")
+	}
+}
+
+func TestChatModelUpdateEnterSendsDraftInsteadOfSwitching(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+	m.channels["ch-2"] = channelInfo{ID: "ch-2", Name: "random"}
+	m.channelHistoryLoaded["ch-1"] = true
+	m.channelHistoryLoaded["ch-2"] = true
+	m.sidebarVisible = true
+	m.activeChannel = "ch-1"
+	m.sidebarIndex = 1
+	m.connected = true
+	m.ws = &WSClient{closed: true}
+	m.input.SetValue("hello")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if updated.activeChannel != "ch-1" {
+		t.Fatalf("expected enter with draft to stay on current channel")
+	}
+	if updated.input.Value() != "hello" {
+		t.Fatalf("expected input to remain unchanged after failed send")
+	}
+}
+
+func TestChatModelUpdateEnterSwitchesWhenDraftEmpty(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+	m.channels["ch-2"] = channelInfo{ID: "ch-2", Name: "random"}
+	m.channelHistoryLoaded["ch-1"] = true
+	m.channelHistoryLoaded["ch-2"] = true
+	m.sidebarVisible = true
+	m.activeChannel = "ch-1"
+	m.sidebarIndex = 1
+	m.connected = true
+	m.ws = &WSClient{closed: true}
+	m.input.SetValue("")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if updated.activeChannel != "ch-2" {
+		t.Fatalf("expected enter to switch selected sidebar channel when draft is empty")
+	}
+}
+
+func TestChatModelUpdateCtrlArrowIgnoredWhileDrafting(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+	m.channels["ch-2"] = channelInfo{ID: "ch-2", Name: "random"}
+	m.sidebarVisible = true
+	m.sidebarIndex = 0
+	m.input.SetValue("hello")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlDown})
+	if updated.sidebarIndex != 0 {
+		t.Fatalf("expected ctrl+down to be ignored while drafting")
+	}
+}
+
+func TestChatModelUpdateF1TogglesHelp(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.helpVisible = true
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF1})
+	if updated.helpVisible {
+		t.Fatalf("expected f1 to hide help")
 	}
 }
 
@@ -2484,7 +2577,7 @@ func TestChatModelSendCurrentMessageAndHelpersEdgeCases(t *testing.T) {
 		t.Fatalf("expected admin channel help text")
 	}
 	m.auth.IsAdmin = false
-	if got := m.channelHelpText(); got != "channel commands: /channel list" {
+	if got := m.channelHelpText(); !strings.Contains(got, "/join <channel>") || !strings.Contains(got, "/channel list") {
 		t.Fatalf("unexpected non-admin channel help text: %q", got)
 	}
 	if got := m.serverHelpText(); got != "admin only: server invites" {

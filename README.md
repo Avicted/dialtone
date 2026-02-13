@@ -15,6 +15,7 @@ Dialtone uses symmetric encryption for message bodies and channel names, and pub
 
 ## Client
 ![Dialtone client screen 1](docs/dialtone-client-01.png)
+![Dialtone client screen 2](docs/dialtone-client-02.png)
 
 ## Who does what?
 
