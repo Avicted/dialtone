@@ -20,19 +20,25 @@ func makeExecutableFile(t *testing.T, path string, content string) {
 	}
 }
 
-func waitForFile(t *testing.T, path string, timeout time.Duration) string {
+func waitForFile(t *testing.T, path string, timeout time.Duration, wantLine string) string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
 		data, err := os.ReadFile(path)
 		if err == nil {
-			return string(data)
+			content := string(data)
+			if wantLine == "" || hasLine(content, wantLine) {
+				return content
+			}
 		}
 		if !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", path)
+			if wantLine == "" {
+				t.Fatalf("timed out waiting for %s", path)
+			}
+			t.Fatalf("timed out waiting for %s to contain line %q", path, wantLine)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -142,14 +148,14 @@ func TestStartVoiceDaemonLaunchesProcessAndStops(t *testing.T) {
 		t.Fatalf("expected voiceAutoStarting=true after start")
 	}
 
-	argsOut := waitForFile(t, argsPath, 2*time.Second)
+	argsOut := waitForFile(t, argsPath, 2*time.Second, "--meter")
 	for _, arg := range []string{"-server", "http://dialtone.test", "-token", "secret-token", "-ipc", "/tmp/dialtone-test.sock", "--meter"} {
 		if !hasLine(argsOut, arg) {
 			t.Fatalf("expected daemon arg %q in:\n%s", arg, argsOut)
 		}
 	}
 
-	envOut := waitForFile(t, envPath, 2*time.Second)
+	envOut := waitForFile(t, envPath, 2*time.Second, "DIALTONE_KEEP_ME=ok")
 	if strings.Contains(envOut, "XDG_ACTIVATION_TOKEN=") {
 		t.Fatalf("expected launcher token removed from daemon environment")
 	}
