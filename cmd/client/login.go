@@ -265,7 +265,7 @@ func (m loginModel) View() string {
 	}
 	b.WriteString(strings.Repeat("\n", topPad))
 
-	b.WriteString(centerText(appNameStyle.Render("*  dialtone"), m.width))
+	b.WriteString(centerText(appNameStyle.Render("›  dialtone"), m.width))
 	b.WriteString("\n")
 	b.WriteString(centerText(subtitleStyle.Render("encrypted messaging"), m.width))
 	b.WriteString("\n\n")
