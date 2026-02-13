@@ -741,6 +741,38 @@ func TestBuildDirectoryKeyEnvelopesErrors(t *testing.T) {
 	}
 }
 
+func TestBuildDirectoryKeyEnvelopesSuccessAndValidation(t *testing.T) {
+	sender := newTestKeyPair(t)
+	recipient := newTestKeyPair(t)
+	key := bytes.Repeat([]byte{9}, crypto.KeySize)
+
+	envelopes, err := buildDirectoryKeyEnvelopes(sender, "dev-1", key, []DeviceKey{
+		{},
+		{DeviceID: "dev-2", PublicKey: crypto.PublicKeyToBase64(recipient.Public)},
+	})
+	if err != nil {
+		t.Fatalf("buildDirectoryKeyEnvelopes: %v", err)
+	}
+	if len(envelopes) != 1 {
+		t.Fatalf("expected exactly one envelope, got %d", len(envelopes))
+	}
+	if envelopes[0].DeviceID != "dev-2" || envelopes[0].SenderDeviceID != "dev-1" {
+		t.Fatalf("unexpected envelope metadata: %+v", envelopes[0])
+	}
+
+	decrypted, err := crypto.DecryptFromPeer(recipient.Private, sender.Public, envelopes[0].Envelope)
+	if err != nil {
+		t.Fatalf("decrypt envelope: %v", err)
+	}
+	if !bytes.Equal(decrypted, key) {
+		t.Fatalf("unexpected decrypted key")
+	}
+
+	if _, err := buildDirectoryKeyEnvelopes(sender, "dev-1", key, []DeviceKey{{DeviceID: "dev-x", PublicKey: "invalid"}}); err == nil {
+		t.Fatalf("expected invalid device public key error")
+	}
+}
+
 func TestChatModelSelectSidebarChannel(t *testing.T) {
 	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
 	m.channels["a"] = channelInfo{ID: "a", Name: "alpha"}
@@ -798,6 +830,27 @@ func TestChatModelVoiceStatusLabel(t *testing.T) {
 	m.voiceCh = nil
 	if got := m.voiceStatusLabel(); got != "voice: reconnecting" {
 		t.Fatalf("unexpected reconnect status: %s", got)
+	}
+
+	m.voiceReconnectAttempt = 0
+	m.voiceRoom = "ch-1"
+	leaveCmd := ipc.Message{Cmd: ipc.CommandVoiceLeave}
+	m.voicePendingCmd = &leaveCmd
+	if got := m.voiceStatusLabel(); got != "voice: leaving general" {
+		t.Fatalf("unexpected leaving status: %s", got)
+	}
+
+	m.voicePendingCmd = &ipc.Message{Cmd: ipc.CommandMute}
+	if got := m.voiceStatusLabel(); got != "voice: general" {
+		t.Fatalf("unexpected updating status with active room: %s", got)
+	}
+
+	m.voicePendingCmd = nil
+	m.voiceRoom = ""
+	m.voiceAutoStarting = true
+	m.voicePendingRoom = "ch-2"
+	if got := m.voiceStatusLabel(); got != "voice: starting" {
+		t.Fatalf("unexpected starting status: %s", got)
 	}
 }
 
@@ -927,6 +980,58 @@ func TestChatModelHandleVoiceInfoEvent(t *testing.T) {
 	m.handleVoiceEvent(ipc.Message{Event: ipc.EventInfo, Error: "ptt startup mode=auto wayland=true portal=available selected=portal"})
 	if !strings.Contains(lastSystemMessage(m), "voice info: ptt startup mode=auto") {
 		t.Fatalf("expected voice info message shown to user")
+	}
+}
+
+func TestChatModelHandleVoiceEventAdditionalPaths(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+	m.voiceRoom = "ch-1"
+	m.voiceMembers["u2"] = true
+
+	m.handleVoiceEvent(ipc.Message{Event: ipc.EventVoiceReady, Room: "ch-1"})
+	if m.voiceRoom != "" {
+		t.Fatalf("expected voice room cleared on ready event for same room")
+	}
+	if len(m.voiceMembers) != 0 {
+		t.Fatalf("expected voice members cleared on ready event")
+	}
+
+	m.handleVoiceEvent(ipc.Message{Event: ipc.EventVoiceConnected, Room: "ch-1"})
+	if m.voiceRoom != "ch-1" {
+		t.Fatalf("expected connected room to be set")
+	}
+	if !m.voiceMembers[m.auth.UserID] {
+		t.Fatalf("expected local user added to voice members on connect")
+	}
+
+	m.voiceSpeaking = nil
+	m.handleVoiceEvent(ipc.Message{Event: ipc.EventUserSpeaking, User: "", Active: true})
+	if m.voiceSpeaking != nil {
+		t.Fatalf("expected empty user speaking event to be ignored")
+	}
+	m.handleVoiceEvent(ipc.Message{Event: ipc.EventUserSpeaking, User: "u2", Active: true})
+	if m.voiceSpeaking == nil || !m.voiceSpeaking["u2"] {
+		t.Fatalf("expected speaking map initialized and updated")
+	}
+
+	before := len(m.messages)
+	m.voiceAutoStarting = true
+	m.handleVoiceEvent(ipc.Message{Event: ipc.EventError, Error: "dial unix /tmp/dialtone-voice.sock: connect: no such file or directory"})
+	if len(m.messages) != before {
+		t.Fatalf("expected IPC-not-running error to be suppressed while auto-starting")
+	}
+
+	m.voiceAutoStarting = false
+	m.handleVoiceEvent(ipc.Message{Event: ipc.EventError, Error: "boom"})
+	if !strings.Contains(lastSystemMessage(m), "voice error: boom") {
+		t.Fatalf("expected voice error message")
+	}
+
+	before = len(m.messages)
+	m.handleVoiceEvent(ipc.Message{Event: ipc.EventPong})
+	if len(m.messages) != before {
+		t.Fatalf("expected pong event to be ignored")
 	}
 }
 
@@ -1531,6 +1636,80 @@ func TestChatModelVoiceHelperMethods(t *testing.T) {
 	m.clearVoiceMembers()
 	if len(m.voiceMembers) != 0 {
 		t.Fatalf("expected voiceMembers map cleared")
+	}
+}
+
+func TestChatModelDispatchVoiceCommandAutoStartPaths(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.voiceAutoStart = true
+	m.voiceIPCAddr = filepath.Join(t.TempDir(), "missing.sock")
+	m.voiceIPC = newVoiceIPC(m.voiceIPCAddr)
+	m.voicedPath = "/bin/true"
+	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+
+	cmd := m.dispatchVoiceCommand(
+		ipc.Message{Cmd: ipc.CommandVoiceJoin, Room: "ch-1"},
+		"ch-1",
+		"voice join requested",
+		"voice join",
+	)
+	if cmd == nil {
+		t.Fatalf("expected reconnect command when auto-start queues voice command")
+	}
+	if m.voicePendingCmd == nil || m.voicePendingCmd.Cmd != ipc.CommandVoiceJoin {
+		t.Fatalf("expected pending join command to be queued")
+	}
+	if m.voicePendingRoom != "ch-1" {
+		t.Fatalf("expected pending room ch-1, got %q", m.voicePendingRoom)
+	}
+	if !strings.Contains(lastSystemMessage(m), "starting voice daemon") {
+		t.Fatalf("expected auto-start notice")
+	}
+
+	m.stopVoiceDaemon()
+
+	m2 := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m2.voiceAutoStart = true
+	m2.voiceIPCAddr = filepath.Join(t.TempDir(), "missing.sock")
+	m2.voiceIPC = newVoiceIPC(m2.voiceIPCAddr)
+	m2.voicedPath = filepath.Join(t.TempDir(), "does-not-exist")
+
+	cmd = m2.dispatchVoiceCommand(
+		ipc.Message{Cmd: ipc.CommandMute},
+		"",
+		"voice mute requested",
+		"voice mute",
+	)
+	if cmd != nil {
+		t.Fatalf("expected no command when auto-start fails")
+	}
+	if !strings.Contains(lastSystemMessage(m2), "voice auto-start failed") {
+		t.Fatalf("expected auto-start failure message")
+	}
+}
+
+func TestChatModelCommandClosures(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.auth.IsTrusted = true
+	m.api = nil
+
+	cmd := m.syncDirectoryCmd(true)
+	if cmd == nil {
+		t.Fatalf("expected syncDirectoryCmd when trusted")
+	}
+	if _, ok := cmd().(directorySyncMsg); !ok {
+		t.Fatalf("expected directorySyncMsg from syncDirectoryCmd")
+	}
+
+	m.channelKeys["ch-1"] = bytes.Repeat([]byte{1}, crypto.KeySize)
+	m.auth = nil
+	m.kp = nil
+	cmd = m.shareKnownChannelKeysCmd()
+	if cmd == nil {
+		t.Fatalf("expected shareKnownChannelKeysCmd when channel keys are present")
+	}
+	if _, ok := cmd().(shareKeysMsg); !ok {
+		t.Fatalf("expected shareKeysMsg from shareKnownChannelKeysCmd")
 	}
 }
 

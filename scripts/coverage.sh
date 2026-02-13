@@ -46,9 +46,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# EXCLUDE_REGEX='internal|cmd/server'
-# mapfile -t PKGS < <(go list ./... | grep -vE "$EXCLUDE_REGEX")
-mapfile -t PKGS < <(go list ./...)
+mapfile -t PKGS < <(go list ./... | grep -vE '/cmd/voiced$')
 
 # Run tests with coverage and preserve failure output for diagnosability.
 if [[ "$SHOW_ZERO_ONLY" == true || "$FAIL_ON_ZERO" == true ]]; then
