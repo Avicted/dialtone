@@ -2,13 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Avicted/dialtone/internal/ipc"
 	"github.com/pion/webrtc/v4"
+	"nhooyr.io/websocket"
 )
 
 func TestNewVoiceDaemonDefaultsVADThreshold(t *testing.T) {
@@ -255,6 +260,122 @@ func TestRunWSLoopAndConnectWSHonorCanceledContext(t *testing.T) {
 
 	if _, err := d.connectWSWithRetry(ctx, 0); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected canceled context from connectWSWithRetry, got %v", err)
+	}
+}
+
+func TestConnectWSWithRetrySuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+		for {
+			if _, _, err := conn.Read(context.Background()); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	d := newVoiceDaemon(server.URL, "token", "", pttBackendAuto, webrtc.Configuration{}, defaultVADThreshold, false)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	ws, err := d.connectWSWithRetry(ctx, 0)
+	if err != nil {
+		t.Fatalf("connectWSWithRetry() error: %v", err)
+	}
+	if ws == nil {
+		t.Fatalf("expected websocket client")
+	}
+	ws.Close()
+}
+
+func TestRunWSLoopConnectsAndStopsOnCancel(t *testing.T) {
+	var joinSignals atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+		for {
+			_, data, err := conn.Read(context.Background())
+			if err != nil {
+				return
+			}
+			var msg VoiceSignal
+			if json.Unmarshal(data, &msg) == nil && msg.Type == "voice_join" {
+				joinSignals.Add(1)
+			}
+		}
+	}))
+	defer server.Close()
+
+	d := newVoiceDaemon(server.URL, "token", "", pttBackendAuto, webrtc.Configuration{}, defaultVADThreshold, false)
+	d.room = "room-1"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	out := make(chan VoiceSignal, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- d.runWSLoop(ctx, out)
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for d.currentWS() == nil {
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("runWSLoop did not establish websocket connection")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runWSLoop() error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("runWSLoop did not return after cancel")
+	}
+
+	if _, ok := <-out; ok {
+		t.Fatalf("expected output channel to be closed")
+	}
+	if joinSignals.Load() == 0 {
+		t.Fatalf("expected runWSLoop to resend room join after websocket connect")
+	}
+}
+
+func TestHandleWSMessageGuardPaths(t *testing.T) {
+	d := newVoiceDaemon("http://server", "token", "", pttBackendAuto, webrtc.Configuration{}, defaultVADThreshold, false)
+	d.local = "alice"
+	d.room = "room-1"
+	d.memb = map[string]struct{}{"alice": {}}
+
+	d.handleWSMessage(VoiceSignal{Type: "voice_join", ChannelID: "room-1", Sender: "alice"})
+	d.handleWSMessage(VoiceSignal{Type: "voice_join", ChannelID: "room-1", Sender: "bob"})
+	d.handleWSMessage(VoiceSignal{Type: "voice_leave", ChannelID: "room-1", Sender: "bob"})
+	d.handleWSMessage(VoiceSignal{Type: "voice_roster", ChannelID: ""})
+	d.handleWSMessage(VoiceSignal{Type: "voice.presence", ChannelID: "room-1", Users: []string{"bob"}})
+	d.handleWSMessage(VoiceSignal{Type: "voice.presence.snapshot", ChannelID: "room-1", Users: []string{"bob"}})
+	d.handleWSMessage(VoiceSignal{Type: "webrtc_offer", ChannelID: "room-1", Sender: "bob", SDP: "offer"})
+	d.handleWSMessage(VoiceSignal{Type: "webrtc_answer", ChannelID: "room-1", Sender: "bob", SDP: "answer"})
+	d.handleWSMessage(VoiceSignal{Type: "ice_candidate", ChannelID: "room-1", Sender: "bob", Candidate: "cand"})
+	d.handleWSMessage(VoiceSignal{Type: "unknown", ChannelID: "room-1", Sender: "bob"})
+
+	d.mu.Lock()
+	_, hasAlice := d.memb["alice"]
+	membersLen := len(d.memb)
+	d.mu.Unlock()
+
+	if !hasAlice || membersLen != 1 {
+		t.Fatalf("expected guard-path messages to keep members unchanged, got alice=%v len=%d", hasAlice, membersLen)
 	}
 }
 

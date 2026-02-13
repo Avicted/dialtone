@@ -127,3 +127,45 @@ func TestVoicedWSClientReadLoopClosesChannelOnSocketClose(t *testing.T) {
 		t.Fatalf("timeout waiting for read loop close")
 	}
 }
+
+func TestVoicedWSClientConnectInvalidURL(t *testing.T) {
+	client, err := ConnectWS("://bad-url", "token")
+	if err == nil || client != nil {
+		t.Fatalf("expected malformed URL dial error, got client=%v err=%v", client, err)
+	}
+}
+
+func TestVoicedWSClientReadLoopStopsOnCancelWhenChannelBlocked(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+		_ = conn.Write(context.Background(), websocket.MessageText, []byte(`{"type":"voice_join","channel_id":"room-1"}`))
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	client, err := ConnectWS(server.URL, "token")
+	if err != nil {
+		t.Fatalf("ConnectWS: %v", err)
+	}
+	defer client.Close()
+
+	ch := make(chan VoiceSignal)
+	done := make(chan struct{})
+	go func() {
+		client.ReadLoop(ch)
+		close(done)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	client.cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("ReadLoop did not stop after cancel")
+	}
+}

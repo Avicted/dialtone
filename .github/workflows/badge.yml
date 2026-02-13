@@ -47,7 +47,7 @@ jobs:
           fi
           color="red"
           if awk "BEGIN {exit !($total >= 80)}"; then
-            color="brightgreen"
+            color="green"
           elif awk "BEGIN {exit !($total >= 60)}"; then
             color="yellow"
           fi

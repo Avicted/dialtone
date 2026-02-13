@@ -1831,3 +1831,251 @@ func TestHub_HandleVoiceSignal_RecipientRouting(t *testing.T) {
 	default:
 	}
 }
+
+func TestDecodeIncoming_ChannelMessageValidationBranches(t *testing.T) {
+	tooLongBody := strings.Repeat("a", maxMessageLen+1)
+
+	tests := []struct {
+		name    string
+		payload map[string]any
+	}{
+		{
+			name: "missing channel id",
+			payload: map[string]any{
+				"type":            "channel.message.send",
+				"body":            "hello",
+				"sender_name_enc": "enc",
+			},
+		},
+		{
+			name: "missing body",
+			payload: map[string]any{
+				"type":            "channel.message.send",
+				"channel_id":      "ch-1",
+				"body":            "   ",
+				"sender_name_enc": "enc",
+			},
+		},
+		{
+			name: "message too long",
+			payload: map[string]any{
+				"type":            "channel.message.send",
+				"channel_id":      "ch-1",
+				"body":            tooLongBody,
+				"sender_name_enc": "enc",
+			},
+		},
+		{
+			name: "missing sender name",
+			payload: map[string]any{
+				"type":            "channel.message.send",
+				"channel_id":      "ch-1",
+				"body":            "hello",
+				"sender_name_enc": "   ",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(tt.payload)
+			if err != nil {
+				t.Fatalf("json.Marshal() error = %v", err)
+			}
+			_, err = decodeIncoming(data)
+			if err == nil {
+				t.Fatalf("expected decodeIncoming to fail for %s", tt.name)
+			}
+		})
+	}
+}
+
+func TestDecodeIncoming_VoiceSignalValidationBranches(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload map[string]any
+	}{
+		{
+			name: "voice_join missing channel",
+			payload: map[string]any{
+				"type": "voice_join",
+			},
+		},
+		{
+			name: "voice_leave missing channel",
+			payload: map[string]any{
+				"type": "voice_leave",
+			},
+		},
+		{
+			name: "webrtc_offer missing recipient",
+			payload: map[string]any{
+				"type":       "webrtc_offer",
+				"channel_id": "ch-1",
+				"sdp":        "offer",
+			},
+		},
+		{
+			name: "webrtc_answer missing sdp",
+			payload: map[string]any{
+				"type":       "webrtc_answer",
+				"channel_id": "ch-1",
+				"recipient":  "user-2",
+			},
+		},
+		{
+			name: "ice_candidate missing candidate",
+			payload: map[string]any{
+				"type":       "ice_candidate",
+				"channel_id": "ch-1",
+				"recipient":  "user-2",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(tt.payload)
+			if err != nil {
+				t.Fatalf("json.Marshal() error = %v", err)
+			}
+			_, err = decodeIncoming(data)
+			if err == nil {
+				t.Fatalf("expected decodeIncoming to fail for %s", tt.name)
+			}
+		})
+	}
+}
+
+func TestHub_HandleVoiceJoin_ValidationAndStorageErrors(t *testing.T) {
+	t.Run("missing channel id", func(t *testing.T) {
+		hub := NewHub(nil, nil, &fakeChannelRepo{ch: channel.Channel{ID: "ch-1"}})
+		client := &Client{send: make(chan []byte, 1), userID: "user-1"}
+
+		hub.handleVoiceJoin(context.Background(), client, inboundMessage{Type: "voice_join"})
+
+		event := readEvent[errorEvent](t, client.send)
+		if event.Code != "invalid_message" {
+			t.Fatalf("code = %q, want %q", event.Code, "invalid_message")
+		}
+	})
+
+	t.Run("channel repo unavailable", func(t *testing.T) {
+		hub := NewHub(nil, nil, nil)
+		client := &Client{send: make(chan []byte, 1), userID: "user-1"}
+
+		hub.handleVoiceJoin(context.Background(), client, inboundMessage{Type: "voice_join", ChannelID: "ch-1"})
+
+		event := readEvent[errorEvent](t, client.send)
+		if event.Code != "server_error" {
+			t.Fatalf("code = %q, want %q", event.Code, "server_error")
+		}
+	})
+
+	t.Run("channel not found", func(t *testing.T) {
+		hub := NewHub(nil, nil, &fakeChannelRepo{getErr: storage.ErrNotFound})
+		client := &Client{send: make(chan []byte, 1), userID: "user-1"}
+
+		hub.handleVoiceJoin(context.Background(), client, inboundMessage{Type: "voice_join", ChannelID: "missing"})
+
+		event := readEvent[errorEvent](t, client.send)
+		if event.Code != "channel_not_found" {
+			t.Fatalf("code = %q, want %q", event.Code, "channel_not_found")
+		}
+	})
+
+	t.Run("channel lookup failure", func(t *testing.T) {
+		hub := NewHub(nil, nil, &fakeChannelRepo{getErr: errors.New("boom")})
+		client := &Client{send: make(chan []byte, 1), userID: "user-1"}
+
+		hub.handleVoiceJoin(context.Background(), client, inboundMessage{Type: "voice_join", ChannelID: "ch-1"})
+
+		event := readEvent[errorEvent](t, client.send)
+		if event.Code != "server_error" {
+			t.Fatalf("code = %q, want %q", event.Code, "server_error")
+		}
+	})
+}
+
+func TestHub_HandleVoiceLeave_ValidationAndPeerEvent(t *testing.T) {
+	t.Run("missing channel id", func(t *testing.T) {
+		hub := NewHub(nil, nil, nil)
+		client := &Client{send: make(chan []byte, 1), userID: "user-1"}
+
+		hub.handleVoiceLeave(client, inboundMessage{Type: "voice_leave"})
+
+		event := readEvent[errorEvent](t, client.send)
+		if event.Code != "invalid_message" {
+			t.Fatalf("code = %q, want %q", event.Code, "invalid_message")
+		}
+	})
+
+	t.Run("peer receives leave signal", func(t *testing.T) {
+		hub := NewHub(nil, nil, nil)
+		leaver := &Client{send: make(chan []byte, 2), userID: "user-1"}
+		peer := &Client{send: make(chan []byte, 2), userID: "user-2"}
+
+		hub.mu.Lock()
+		hub.voiceRooms["ch-1"] = map[*Client]struct{}{leaver: {}, peer: {}}
+		hub.voiceRoom[leaver] = "ch-1"
+		hub.voiceRoom[peer] = "ch-1"
+		hub.mu.Unlock()
+
+		hub.handleVoiceLeave(leaver, inboundMessage{Type: "voice_leave", ChannelID: "ch-1"})
+
+		event := readEvent[voiceSignalEvent](t, peer.send)
+		if event.Type != "voice_leave" || event.ChannelID != "ch-1" || event.Sender != "user-1" {
+			t.Fatalf("unexpected peer leave event: %+v", event)
+		}
+	})
+}
+
+func TestHub_RemoveFromVoiceRoomLocked(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	missing := &Client{userID: "missing"}
+
+	hub.mu.Lock()
+	if peers := hub.removeFromVoiceRoomLocked(missing); peers != nil {
+		hub.mu.Unlock()
+		t.Fatalf("expected nil peers for client without room, got %d", len(peers))
+	}
+	hub.mu.Unlock()
+
+	owner := &Client{userID: "owner"}
+	hub.mu.Lock()
+	hub.voiceRooms["room-a"] = map[*Client]struct{}{owner: {}}
+	hub.voiceRoom[owner] = "room-a"
+	peers := hub.removeFromVoiceRoomLocked(owner)
+	_, hasRoom := hub.voiceRooms["room-a"]
+	_, tracked := hub.voiceRoom[owner]
+	hub.mu.Unlock()
+
+	if peers != nil {
+		t.Fatalf("expected nil peers when room is emptied, got %d", len(peers))
+	}
+	if hasRoom {
+		t.Fatalf("expected empty room to be removed")
+	}
+	if tracked {
+		t.Fatalf("expected client room tracking to be removed")
+	}
+
+	target := &Client{userID: "target"}
+	peerA := &Client{userID: "peer-a"}
+	peerB := &Client{userID: "peer-b"}
+	hub.mu.Lock()
+	hub.voiceRooms["room-b"] = map[*Client]struct{}{target: {}, peerA: {}, peerB: {}}
+	hub.voiceRoom[target] = "room-b"
+	hub.voiceRoom[peerA] = "room-b"
+	hub.voiceRoom[peerB] = "room-b"
+	peers = hub.removeFromVoiceRoomLocked(target)
+	roomSize := len(hub.voiceRooms["room-b"])
+	hub.mu.Unlock()
+
+	if len(peers) != 2 {
+		t.Fatalf("expected 2 remaining peers, got %d", len(peers))
+	}
+	if roomSize != 2 {
+		t.Fatalf("expected room to retain 2 peers, got %d", roomSize)
+	}
+}

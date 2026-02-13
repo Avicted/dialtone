@@ -49,3 +49,37 @@ func TestVoiceStatsLogLoopStopsOnContextCancel(t *testing.T) {
 		t.Fatalf("LogLoop did not stop after cancel")
 	}
 }
+
+func TestVoiceStatsLogLoopFlushesCountersOnTick(t *testing.T) {
+	s := newVoiceStats()
+	s.RecordSent(1600)
+	s.RecordDrop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		s.LogLoop(ctx)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(12 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.bytesSent.Load() == 0 && s.framesSent.Load() == 0 && s.framesDropped.Load() == 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if s.bytesSent.Load() != 0 || s.framesSent.Load() != 0 || s.framesDropped.Load() != 0 {
+		cancel()
+		<-done
+		t.Fatalf("expected counters to be reset after log loop tick")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("LogLoop did not stop after cancel")
+	}
+}

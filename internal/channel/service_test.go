@@ -108,6 +108,28 @@ func newServiceWithAdmin(isAdmin bool) (*Service, *fakeRepo) {
 	return svc, repo
 }
 
+func TestNewServiceDefaults(t *testing.T) {
+	repo := &fakeRepo{}
+	users := user.NewService(&fakeUserRepo{}, "pepper")
+	svc := NewService(repo, users)
+
+	if svc == nil {
+		t.Fatalf("expected service instance")
+	}
+	if svc.repo != repo {
+		t.Fatalf("expected repository to be stored on service")
+	}
+	if svc.users != users {
+		t.Fatalf("expected user service to be stored on service")
+	}
+	if svc.idGen == nil || svc.now == nil {
+		t.Fatalf("expected idGen and now defaults to be initialized")
+	}
+	if id := svc.idGen(); id == "" {
+		t.Fatalf("expected non-empty default generated channel id")
+	}
+}
+
 func TestCreateChannel_Admin(t *testing.T) {
 	svc, repo := newServiceWithAdmin(true)
 

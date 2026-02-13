@@ -16,7 +16,12 @@ func TestParseHotkeyVariants(t *testing.T) {
 		{name: "control+v", binding: "control+v"},
 		{name: "shift+space", binding: "shift+space"},
 		{name: "caps", binding: "caps"},
+		{name: "capslock alias", binding: "capslock"},
+		{name: "caps_lock alias", binding: "caps_lock"},
+		{name: "trim and case normalize", binding: "  ConTRol + Shift + V  "},
 		{name: "missing key", binding: "ctrl", wantErr: true},
+		{name: "modifiers only", binding: "ctrl+shift", wantErr: true},
+		{name: "empty segment", binding: "ctrl++v", wantErr: true},
 		{name: "unsupported key", binding: "alt+v", wantErr: true},
 		{name: "empty", binding: "", wantErr: true},
 	}
@@ -40,6 +45,30 @@ func TestParseHotkeyVariants(t *testing.T) {
 				t.Fatalf("expected ctrl modifier for %q", tc.binding)
 			}
 		})
+	}
+}
+
+func TestParseHotkeyModifierCounts(t *testing.T) {
+	mods, key, err := parseHotkey("control+shift+space")
+	if err != nil {
+		t.Fatalf("parseHotkey(control+shift+space) error: %v", err)
+	}
+	if key == 0 {
+		t.Fatalf("expected non-zero key")
+	}
+	if len(mods) != 2 {
+		t.Fatalf("expected two modifiers, got %d", len(mods))
+	}
+
+	mods, key, err = parseHotkey("capslock")
+	if err != nil {
+		t.Fatalf("parseHotkey(capslock) error: %v", err)
+	}
+	if key == 0 {
+		t.Fatalf("expected non-zero key for capslock")
+	}
+	if len(mods) != 0 {
+		t.Fatalf("expected no modifiers for capslock, got %d", len(mods))
 	}
 }
 
@@ -91,5 +120,15 @@ func TestNewHotkeyPTTBackendAndRunCanceled(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("hotkey backend Run did not return promptly")
 	case <-done:
+	}
+}
+
+func TestNewHotkeyPTTBackendValidationError(t *testing.T) {
+	backend, err := newHotkeyPTTBackend("alt+v")
+	if err == nil {
+		t.Fatalf("expected backend validation to fail")
+	}
+	if backend != nil {
+		t.Fatalf("expected nil backend on validation failure, got %#v", backend)
 	}
 }

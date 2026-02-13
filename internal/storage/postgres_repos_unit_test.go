@@ -139,6 +139,19 @@ func TestUserRepoSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("Count query error", func(t *testing.T) {
+		db, mock, cleanup := newRepoSQLMock(t)
+		defer cleanup()
+
+		repo := &userRepo{db: db}
+		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM users`).WillReturnError(errors.New("boom"))
+
+		_, err := repo.Count(ctx)
+		if err == nil || !strings.Contains(err.Error(), "count users") {
+			t.Fatalf("expected wrapped count users error, got %v", err)
+		}
+	})
+
 	t.Run("UpsertProfile validation", func(t *testing.T) {
 		repo := &userRepo{}
 		err := repo.UpsertProfile(ctx, user.Profile{})
@@ -178,11 +191,49 @@ func TestUserRepoSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("ListProfiles query error", func(t *testing.T) {
+		db, mock, cleanup := newRepoSQLMock(t)
+		defer cleanup()
+
+		repo := &userRepo{db: db}
+		mock.ExpectQuery(`SELECT user_id, name_enc, updated_at FROM user_profiles`).WillReturnError(errors.New("boom"))
+
+		_, err := repo.ListProfiles(ctx)
+		if err == nil || !strings.Contains(err.Error(), "list user profiles") {
+			t.Fatalf("expected wrapped list user profiles error, got %v", err)
+		}
+	})
+
+	t.Run("ListProfiles iterate error", func(t *testing.T) {
+		db, mock, cleanup := newRepoSQLMock(t)
+		defer cleanup()
+
+		repo := &userRepo{db: db}
+		rows := sqlmock.NewRows([]string{"user_id", "name_enc", "updated_at"}).
+			AddRow("u1", "name", now).
+			RowError(0, errors.New("boom"))
+		mock.ExpectQuery(`SELECT user_id, name_enc, updated_at FROM user_profiles`).WillReturnRows(rows)
+
+		_, err := repo.ListProfiles(ctx)
+		if err == nil || !strings.Contains(err.Error(), "iterate user profiles") {
+			t.Fatalf("expected wrapped iterate user profiles error, got %v", err)
+		}
+	})
+
 	t.Run("UpsertDirectoryKeyEnvelope validation", func(t *testing.T) {
 		repo := &userRepo{}
 		err := repo.UpsertDirectoryKeyEnvelope(ctx, user.DirectoryKeyEnvelope{})
 		if err == nil || !strings.Contains(err.Error(), "required") {
 			t.Fatalf("expected validation error, got %v", err)
+		}
+	})
+
+	t.Run("UpsertDirectoryKeyEnvelope validation missing envelope payload", func(t *testing.T) {
+		repo := &userRepo{}
+		env := user.DirectoryKeyEnvelope{DeviceID: "d1", SenderDeviceID: "d2", CreatedAt: now}
+		err := repo.UpsertDirectoryKeyEnvelope(ctx, env)
+		if err == nil || !strings.Contains(err.Error(), "sender_public_key and envelope are required") {
+			t.Fatalf("expected payload validation error, got %v", err)
 		}
 	})
 
@@ -260,6 +311,21 @@ func TestDeviceRepoSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("Create success with last_seen_at", func(t *testing.T) {
+		db, mock, cleanup := newRepoSQLMock(t)
+		defer cleanup()
+
+		repo := &deviceRepo{db: db}
+		lastSeen := now.Add(-time.Minute)
+		d := device.Device{ID: "d1", UserID: "u1", PublicKey: "pk", CreatedAt: now, LastSeenAt: &lastSeen}
+		mock.ExpectExec(`INSERT INTO devices`).WithArgs(d.ID, d.UserID, d.PublicKey, d.CreatedAt, lastSeen).
+			WillReturnResult(sqlmock.NewResult(1, 1))
+
+		if err := repo.Create(ctx, d); err != nil {
+			t.Fatalf("Create() error: %v", err)
+		}
+	})
+
 	t.Run("GetByID success", func(t *testing.T) {
 		db, mock, cleanup := newRepoSQLMock(t)
 		defer cleanup()
@@ -325,6 +391,21 @@ func TestDeviceRepoSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("GetByUserAndPublicKey empty stored key treated as not found", func(t *testing.T) {
+		db, mock, cleanup := newRepoSQLMock(t)
+		defer cleanup()
+
+		repo := &deviceRepo{db: db}
+		rows := sqlmock.NewRows([]string{"id", "user_id", "public_key", "created_at", "last_seen_at"}).
+			AddRow("d1", "u1", nil, now, nil)
+		mock.ExpectQuery(`FROM devices WHERE user_id = \$1 AND public_key = \$2`).WithArgs(user.ID("u1"), "pk").WillReturnRows(rows)
+
+		_, err := repo.GetByUserAndPublicKey(ctx, "u1", "pk")
+		if !errors.Is(err, device.ErrNotFound) {
+			t.Fatalf("expected device.ErrNotFound, got %v", err)
+		}
+	})
+
 	t.Run("ListByUser filters empty public key", func(t *testing.T) {
 		db, mock, cleanup := newRepoSQLMock(t)
 		defer cleanup()
@@ -344,6 +425,19 @@ func TestDeviceRepoSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("ListByUser query error", func(t *testing.T) {
+		db, mock, cleanup := newRepoSQLMock(t)
+		defer cleanup()
+
+		repo := &deviceRepo{db: db}
+		mock.ExpectQuery(`FROM devices WHERE user_id = \$1 ORDER BY created_at`).WithArgs(user.ID("u1")).WillReturnError(errors.New("boom"))
+
+		_, err := repo.ListByUser(ctx, "u1")
+		if err == nil || !strings.Contains(err.Error(), "list devices by user") {
+			t.Fatalf("expected wrapped list devices by user error, got %v", err)
+		}
+	})
+
 	t.Run("ListAll success", func(t *testing.T) {
 		db, mock, cleanup := newRepoSQLMock(t)
 		defer cleanup()
@@ -359,6 +453,19 @@ func TestDeviceRepoSQL(t *testing.T) {
 		}
 		if len(devices) != 1 {
 			t.Fatalf("unexpected devices len=%d", len(devices))
+		}
+	})
+
+	t.Run("ListAll query error", func(t *testing.T) {
+		db, mock, cleanup := newRepoSQLMock(t)
+		defer cleanup()
+
+		repo := &deviceRepo{db: db}
+		mock.ExpectQuery(`FROM devices ORDER BY created_at`).WillReturnError(errors.New("boom"))
+
+		_, err := repo.ListAll(ctx)
+		if err == nil || !strings.Contains(err.Error(), "list devices") {
+			t.Fatalf("expected wrapped list devices error, got %v", err)
 		}
 	})
 
@@ -394,6 +501,20 @@ func TestDeviceRepoSQL(t *testing.T) {
 
 		if err := repo.UpdateLastSeen(ctx, "d1", now); err != nil {
 			t.Fatalf("UpdateLastSeen() error: %v", err)
+		}
+	})
+
+	t.Run("UpdateLastSeen rows affected error", func(t *testing.T) {
+		db, mock, cleanup := newRepoSQLMock(t)
+		defer cleanup()
+
+		repo := &deviceRepo{db: db}
+		mock.ExpectExec(`UPDATE devices SET last_seen_at = \$2 WHERE id = \$1`).WithArgs(device.ID("d1"), now).
+			WillReturnResult(sqlmock.NewErrorResult(errors.New("boom")))
+
+		err := repo.UpdateLastSeen(ctx, "d1", now)
+		if err == nil || !strings.Contains(err.Error(), "rows affected") {
+			t.Fatalf("expected wrapped rows affected error, got %v", err)
 		}
 	})
 }
@@ -540,6 +661,19 @@ func TestChannelRepoSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("ListChannels query error", func(t *testing.T) {
+		db, mock, cleanup := newRepoSQLMock(t)
+		defer cleanup()
+
+		repo := &channelRepo{db: db}
+		mock.ExpectQuery(`FROM channels ORDER BY created_at DESC`).WillReturnError(errors.New("boom"))
+
+		_, err := repo.ListChannels(ctx)
+		if err == nil || !strings.Contains(err.Error(), "list channels") {
+			t.Fatalf("expected wrapped list channels error, got %v", err)
+		}
+	})
+
 	t.Run("DeleteChannel validation", func(t *testing.T) {
 		repo := &channelRepo{}
 		err := repo.DeleteChannel(ctx, "")
@@ -575,6 +709,20 @@ func TestChannelRepoSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("DeleteChannel rows affected error", func(t *testing.T) {
+		db, mock, cleanup := newRepoSQLMock(t)
+		defer cleanup()
+
+		repo := &channelRepo{db: db}
+		mock.ExpectExec(`DELETE FROM channels WHERE id = \$1`).WithArgs(channel.ID("c1")).
+			WillReturnResult(sqlmock.NewErrorResult(errors.New("boom")))
+
+		err := repo.DeleteChannel(ctx, "c1")
+		if err == nil || !strings.Contains(err.Error(), "rows affected") {
+			t.Fatalf("expected wrapped rows affected error, got %v", err)
+		}
+	})
+
 	t.Run("UpdateChannelName validation", func(t *testing.T) {
 		repo := &channelRepo{}
 		err := repo.UpdateChannelName(ctx, "", "")
@@ -606,6 +754,19 @@ func TestChannelRepoSQL(t *testing.T) {
 			WillReturnResult(sqlmock.NewResult(0, 1))
 
 		if err := repo.UpdateChannelName(ctx, "c1", "name"); err != nil {
+			t.Fatalf("UpdateChannelName() error: %v", err)
+		}
+	})
+
+	t.Run("UpdateChannelName trims input", func(t *testing.T) {
+		db, mock, cleanup := newRepoSQLMock(t)
+		defer cleanup()
+
+		repo := &channelRepo{db: db}
+		mock.ExpectExec(`UPDATE channels SET name_enc = \$2 WHERE id = \$1`).WithArgs(channel.ID("c1"), "name").
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		if err := repo.UpdateChannelName(ctx, "c1", "  name  "); err != nil {
 			t.Fatalf("UpdateChannelName() error: %v", err)
 		}
 	})
@@ -825,6 +986,38 @@ func TestServerInviteRepoSQL(t *testing.T) {
 		_, err := repo.Consume(ctx, "tok", "u1", now)
 		if !errors.Is(err, serverinvite.ErrExpired) {
 			t.Fatalf("expected ErrExpired, got %v", err)
+		}
+	})
+
+	t.Run("Consume fallback select error", func(t *testing.T) {
+		db, mock, cleanup := newRepoSQLMock(t)
+		defer cleanup()
+
+		repo := &serverInviteRepo{db: db}
+		emptyUpdate := sqlmock.NewRows([]string{"id", "created_at", "expires_at", "consumed_at", "consumed_by"})
+		mock.ExpectQuery(`UPDATE server_invites`).WithArgs("tok", now).WillReturnRows(emptyUpdate)
+		mock.ExpectQuery(`FROM server_invites WHERE id = \$1`).WithArgs("tok").WillReturnError(errors.New("boom"))
+
+		_, err := repo.Consume(ctx, "tok", "u1", now)
+		if err == nil || !strings.Contains(err.Error(), "select server invite") {
+			t.Fatalf("expected wrapped select server invite error, got %v", err)
+		}
+	})
+
+	t.Run("Consume fallback still not found", func(t *testing.T) {
+		db, mock, cleanup := newRepoSQLMock(t)
+		defer cleanup()
+
+		repo := &serverInviteRepo{db: db}
+		emptyUpdate := sqlmock.NewRows([]string{"id", "created_at", "expires_at", "consumed_at", "consumed_by"})
+		available := sqlmock.NewRows([]string{"id", "created_at", "expires_at", "consumed_at", "consumed_by"}).
+			AddRow("tok", now.Add(-time.Hour), now.Add(time.Hour), nil, nil)
+		mock.ExpectQuery(`UPDATE server_invites`).WithArgs("tok", now).WillReturnRows(emptyUpdate)
+		mock.ExpectQuery(`FROM server_invites WHERE id = \$1`).WithArgs("tok").WillReturnRows(available)
+
+		_, err := repo.Consume(ctx, "tok", "u1", now)
+		if !errors.Is(err, serverinvite.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
 		}
 	})
 }
