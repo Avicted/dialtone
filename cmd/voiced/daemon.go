@@ -59,6 +59,10 @@ func newVoiceDaemon(serverURL, token, pttBind, pttBackend string, iceConfig webr
 }
 
 func (d *voiceDaemon) Run(ctx context.Context, ipcAddr string) error {
+	if ctx.Err() != nil {
+		return nil
+	}
+
 	d.sts = newVoiceStats()
 	go d.sts.LogLoop(ctx)
 	d.startPlayback(ctx)
