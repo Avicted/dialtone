@@ -1358,3 +1358,208 @@ func TestChatModelDispatchVoiceLeaveDoesNotClearRoomBeforeAck(t *testing.T) {
 		t.Fatalf("timed out waiting for leave command on ipc")
 	}
 }
+
+func TestWaitForVoiceMsg(t *testing.T) {
+	ch := make(chan ipc.Message, 1)
+	ch <- ipc.Message{Event: ipc.EventPong}
+
+	msg := waitForVoiceMsg(ch)()
+	voiceMsg, ok := msg.(voiceIPCMsg)
+	if !ok {
+		t.Fatalf("expected voiceIPCMsg, got %T", msg)
+	}
+	if ipc.Message(voiceMsg).Event != ipc.EventPong {
+		t.Fatalf("expected pong event, got %#v", ipc.Message(voiceMsg))
+	}
+
+	closed := make(chan ipc.Message)
+	close(closed)
+	msg = waitForVoiceMsg(closed)()
+	errMsg, ok := msg.(voiceIPCErrorMsg)
+	if !ok {
+		t.Fatalf("expected voiceIPCErrorMsg, got %T", msg)
+	}
+	if !strings.Contains(errMsg.err.Error(), "voice daemon disconnected") {
+		t.Fatalf("unexpected disconnect error: %v", errMsg.err)
+	}
+}
+
+func TestChatModelConnectVoiceIPC(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.voiceIPC = nil
+	if cmd := m.connectVoiceIPC(); cmd != nil {
+		t.Fatalf("expected nil connect command when voice IPC is not configured")
+	}
+
+	m.voiceIPC = newVoiceIPC("")
+	cmd := m.connectVoiceIPC()
+	if cmd == nil {
+		t.Fatalf("expected connect command")
+	}
+	msg := cmd()
+	errMsg, ok := msg.(voiceIPCErrorMsg)
+	if !ok {
+		t.Fatalf("expected voiceIPCErrorMsg for invalid address, got %T", msg)
+	}
+	if !strings.Contains(errMsg.err.Error(), "voice ipc address is empty") {
+		t.Fatalf("unexpected connect error: %v", errMsg.err)
+	}
+
+	addr := filepath.Join(t.TempDir(), "voice.sock")
+	listener, err := ipc.Listen(addr)
+	if err != nil {
+		t.Fatalf("listen voice ipc: %v", err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		_ = conn.Close()
+	}()
+
+	m.voiceIPC = newVoiceIPC(addr)
+	cmd = m.connectVoiceIPC()
+	msg = cmd()
+	connected, ok := msg.(voiceIPCConnectedMsg)
+	if !ok {
+		t.Fatalf("expected voiceIPCConnectedMsg, got %T", msg)
+	}
+	if connected.ch == nil {
+		t.Fatalf("expected non-nil voice IPC channel")
+	}
+}
+
+func TestChatModelHandleVoiceCommandPaths(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	if cmd := m.handleVoiceCommand("/voice", []string{"/voice"}); cmd != nil {
+		t.Fatalf("expected no command for usage help")
+	}
+	if !strings.Contains(lastSystemMessage(m), "voice commands") {
+		t.Fatalf("expected voice help message")
+	}
+
+	m.voiceIPC = nil
+	if cmd := m.handleVoiceCommand("/voice mute", []string{"/voice", "mute"}); cmd != nil {
+		t.Fatalf("expected no command when voice IPC is nil")
+	}
+	if !strings.Contains(lastSystemMessage(m), "voice daemon not configured") {
+		t.Fatalf("expected missing daemon message")
+	}
+
+	m.voiceIPC = &voiceIPC{addr: ""}
+	m.voiceRoom = "room-1"
+	_ = m.handleVoiceCommand("/voice leave", []string{"/voice", "leave"})
+	if !strings.Contains(lastSystemMessage(m), "voice leave failed") {
+		t.Fatalf("expected leave failure message")
+	}
+	_ = m.handleVoiceCommand("/voice mute", []string{"/voice", "mute"})
+	if !strings.Contains(lastSystemMessage(m), "voice mute failed") {
+		t.Fatalf("expected mute failure message")
+	}
+	_ = m.handleVoiceCommand("/voice unmute", []string{"/voice", "unmute"})
+	if !strings.Contains(lastSystemMessage(m), "voice unmute failed") {
+		t.Fatalf("expected unmute failure message")
+	}
+
+	addr := filepath.Join(t.TempDir(), "voice.sock")
+	listener, err := ipc.Listen(addr)
+	if err != nil {
+		t.Fatalf("listen voice ipc: %v", err)
+	}
+	defer listener.Close()
+
+	recv := make(chan ipc.Message, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var msg ipc.Message
+		if err := ipc.NewDecoder(conn).Decode(&msg); err == nil {
+			recv <- msg
+		}
+	}()
+
+	m.voiceIPC = newVoiceIPC(addr)
+	m.voiceCh = make(chan ipc.Message, 1)
+	m.channels["ch-1"] = channelInfo{ID: "ch-1", Name: "general"}
+	m.activeChannel = "ch-1"
+
+	if cmd := m.handleVoiceCommand("/voice join", []string{"/voice", "join"}); cmd != nil {
+		t.Fatalf("expected no reconnect cmd when voice channel already connected")
+	}
+	if m.voiceRoom != "ch-1" {
+		t.Fatalf("expected voice room set to joined channel, got %q", m.voiceRoom)
+	}
+	if !strings.Contains(lastSystemMessage(m), "voice join requested") {
+		t.Fatalf("expected join notice")
+	}
+
+	select {
+	case sent := <-recv:
+		if sent.Cmd != ipc.CommandVoiceJoin || sent.Room != "ch-1" {
+			t.Fatalf("unexpected join IPC message: %#v", sent)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout waiting for join message")
+	}
+}
+
+func TestChatModelVoiceHelperMethods(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+
+	pending := ipc.Message{Cmd: ipc.CommandVoiceJoin, Room: "room-1"}
+	m.queueVoiceCommand(pending, "room-1", "queued")
+	m.clearPendingVoiceCommand()
+	if m.voicePendingCmd != nil || m.voicePendingRoom != "" || m.voicePendingNotice != "" {
+		t.Fatalf("expected pending voice command state to be cleared")
+	}
+
+	if cmd := m.scheduleVoicePing(); cmd == nil {
+		t.Fatalf("expected non-nil voice ping schedule command")
+	}
+
+	m.voiceMembers = nil
+	m.clearVoiceMembers()
+	if m.voiceMembers == nil {
+		t.Fatalf("expected voiceMembers map initialized")
+	}
+	m.voiceMembers["user-1"] = true
+	m.clearVoiceMembers()
+	if len(m.voiceMembers) != 0 {
+		t.Fatalf("expected voiceMembers map cleared")
+	}
+}
+
+func TestChatModelShareDirectoryKeyCmdGuards(t *testing.T) {
+	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	m.auth.IsTrusted = false
+	if cmd := m.shareDirectoryKeyCmd(); cmd != nil {
+		t.Fatalf("expected nil cmd when user is not trusted")
+	}
+
+	m.auth.IsTrusted = true
+	m.directoryKey = nil
+	if cmd := m.shareDirectoryKeyCmd(); cmd != nil {
+		t.Fatalf("expected nil cmd without directory key")
+	}
+
+	m.directoryKey = bytes.Repeat([]byte{7}, crypto.KeySize)
+	m.api = nil
+	m.kp = nil
+	cmd := m.shareDirectoryKeyCmd()
+	if cmd == nil {
+		t.Fatalf("expected cmd when trusted and directory key exists")
+	}
+	msg := cmd()
+	result, ok := msg.(shareDirectoryMsg)
+	if !ok {
+		t.Fatalf("expected shareDirectoryMsg, got %T", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("expected nil error when shareDirectoryKey short-circuits missing deps, got %v", result.err)
+	}
+}

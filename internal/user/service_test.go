@@ -84,6 +84,27 @@ func newTestService() (*Service, *fakeRepo) {
 	return svc, repo
 }
 
+func TestNewServiceDefaults(t *testing.T) {
+	repo := newFakeRepo()
+	svc := NewService(repo, "pepper")
+
+	if svc == nil {
+		t.Fatalf("expected service instance")
+	}
+	if svc.repo != repo {
+		t.Fatalf("expected repository to be stored on service")
+	}
+	if svc.idGen == nil || svc.now == nil {
+		t.Fatalf("expected idGen and now defaults to be initialized")
+	}
+	if len(svc.pepper) == 0 {
+		t.Fatalf("expected pepper bytes to be initialized")
+	}
+	if id := svc.NewID(); id == "" {
+		t.Fatalf("expected NewID to return a non-empty value")
+	}
+}
+
 func TestCreate_Success(t *testing.T) {
 	svc, _ := newTestService()
 

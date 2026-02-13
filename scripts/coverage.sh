@@ -47,14 +47,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 # EXCLUDE_REGEX='internal|cmd/server'
-# PKGS=$(go list ./... | grep -vE "$EXCLUDE_REGEX")
-PKGS=$(go list ./...)
+# mapfile -t PKGS < <(go list ./... | grep -vE "$EXCLUDE_REGEX")
+mapfile -t PKGS < <(go list ./...)
 
-# Silence go test output when we only care about zero coverage
+# Run tests with coverage and preserve failure output for diagnosability.
 if [[ "$SHOW_ZERO_ONLY" == true || "$FAIL_ON_ZERO" == true ]]; then
-  go test $PKGS -cover -coverprofile=coverage.out > /dev/null
+  TEST_LOG=$(mktemp)
+  if ! go test "${PKGS[@]}" -cover -coverprofile=coverage.out >"$TEST_LOG" 2>&1; then
+    cat "$TEST_LOG" >&2
+    rm -f "$TEST_LOG"
+    exit 1
+  fi
+  rm -f "$TEST_LOG"
 else
-  go test $PKGS -cover -coverprofile=coverage.out
+  go test "${PKGS[@]}" -cover -coverprofile=coverage.out
 fi
 
 if [[ "$FAIL_ON_ZERO" == true ]]; then
@@ -63,7 +69,12 @@ if [[ "$FAIL_ON_ZERO" == true ]]; then
     | awk '$NF=="0.0%" { found=1; print } END { exit found }'
 elif [[ "$SHOW_ZERO_ONLY" == true ]]; then
   # Just print zero-coverage functions
-  go tool cover -func=coverage.out | awk '$NF=="0.0%"'
+  ZERO_OUTPUT=$(go tool cover -func=coverage.out | awk '$NF=="0.0%"')
+  if [[ -n "$ZERO_OUTPUT" ]]; then
+    printf '%s\n' "$ZERO_OUTPUT"
+  else
+    echo "No functions at 0.0% coverage"
+  fi
 else
   # Full coverage output
   go tool cover -func=coverage.out
