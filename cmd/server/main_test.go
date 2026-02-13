@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -16,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -235,6 +237,36 @@ func TestRun_FailsWithBadDBURL(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "init store") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestServerMainExitsOnRunError(t *testing.T) {
+	if os.Getenv("DIALTONE_TEST_SERVER_MAIN_HELPER") == "1" {
+		_ = os.Unsetenv("DIALTONE_LISTEN_ADDR")
+		_ = os.Unsetenv("DIALTONE_DB_URL")
+		_ = os.Unsetenv("DIALTONE_USERNAME_PEPPER")
+		_ = os.Unsetenv("DIALTONE_ADMIN_TOKEN")
+		_ = os.Unsetenv("DIALTONE_TLS_CERT")
+		_ = os.Unsetenv("DIALTONE_TLS_KEY")
+		main()
+		os.Exit(0)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestServerMainExitsOnRunError")
+	cmd.Env = append(os.Environ(), "DIALTONE_TEST_SERVER_MAIN_HELPER=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected subprocess exit error, got %v", err)
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Fatalf("expected exit code 1, got %d", exitErr.ExitCode())
+	}
+	if !strings.Contains(stderr.String(), "fatal: config invalid") {
+		t.Fatalf("expected fatal config error in stderr, got %q", stderr.String())
 	}
 }
 
