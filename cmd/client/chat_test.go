@@ -1361,17 +1361,52 @@ func TestChatModelSendCurrentMessageChannel(t *testing.T) {
 
 func TestChatModelScheduleTicks(t *testing.T) {
 	m := newChatForTest(t, &APIClient{serverURL: "http://server", httpClient: http.DefaultClient})
+	originalTeaTick := teaTick
+	durations := make([]time.Duration, 0, 5)
+	teaTick = func(delay time.Duration, callback func(time.Time) tea.Msg) tea.Cmd {
+		durations = append(durations, delay)
+		return func() tea.Msg {
+			return callback(time.Now())
+		}
+	}
+	t.Cleanup(func() {
+		teaTick = originalTeaTick
+	})
+
 	if cmd := m.scheduleDirectoryTick(); cmd == nil {
 		t.Fatalf("expected directory tick cmd")
+	} else if _, ok := cmd().(directoryTick); !ok {
+		t.Fatalf("expected directoryTick message")
 	}
 	if cmd := m.schedulePresenceTick(); cmd == nil {
 		t.Fatalf("expected presence tick cmd")
+	} else if _, ok := cmd().(presenceTick); !ok {
+		t.Fatalf("expected presenceTick message")
+	}
+	if cmd := m.scheduleVoicePing(); cmd == nil {
+		t.Fatalf("expected voice ping cmd")
+	} else if _, ok := cmd().(voicePingTick); !ok {
+		t.Fatalf("expected voicePingTick message")
 	}
 	if cmd := m.scheduleShareTick(); cmd == nil {
 		t.Fatalf("expected share tick cmd")
+	} else if _, ok := cmd().(shareTick); !ok {
+		t.Fatalf("expected shareTick message")
 	}
 	if cmd := m.scheduleChannelRefresh(); cmd == nil {
 		t.Fatalf("expected channel refresh cmd")
+	} else if _, ok := cmd().(channelRefreshTick); !ok {
+		t.Fatalf("expected channelRefreshTick message")
+	}
+
+	expectedDurations := []time.Duration{10 * time.Second, 5 * time.Second, 15 * time.Second, shareKeysInterval, channelRefreshDelay}
+	if len(durations) != len(expectedDurations) {
+		t.Fatalf("captured durations length=%d want=%d", len(durations), len(expectedDurations))
+	}
+	for index := range expectedDurations {
+		if durations[index] != expectedDurations[index] {
+			t.Fatalf("duration[%d]=%s want=%s", index, durations[index], expectedDurations[index])
+		}
 	}
 }
 

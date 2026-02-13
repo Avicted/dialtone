@@ -4,6 +4,7 @@ set -euo pipefail
 
 SHOW_ZERO_ONLY=false
 FAIL_ON_ZERO=false
+OPEN_HTML=false
 
 # Function to display help
 print_help() {
@@ -13,13 +14,8 @@ Usage: $0 [OPTIONS]
 Options:
   --zero           Show only functions with 0.0% coverage
   --fail-on-zero   Fail (exit non-zero) if any function has 0.0% coverage
+  --html           Generate coverage.html
   --help           Show this help message and exit
-
-Examples:
-  $0                     # Run tests and show full coverage
-  $0 --zero              # Show only functions with 0% coverage
-  $0 --fail-on-zero      # Fail if any function has 0% coverage (CI-friendly)
-  $0 --zero --fail-on-zero # Show 0% functions and fail if any exist
 EOF
 }
 
@@ -34,6 +30,10 @@ while [[ $# -gt 0 ]]; do
       FAIL_ON_ZERO=true
       shift
       ;;
+    --html)
+      OPEN_HTML=true
+      shift
+      ;;
     --help)
       print_help
       exit 0
@@ -46,7 +46,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-mapfile -t PKGS < <(go list ./... | grep -vE '/cmd/voiced$')
+mapfile -t PKGS < <(go list ./...)
 
 # Run tests with coverage and preserve failure output for diagnosability.
 if [[ "$SHOW_ZERO_ONLY" == true || "$FAIL_ON_ZERO" == true ]]; then
@@ -76,4 +76,19 @@ elif [[ "$SHOW_ZERO_ONLY" == true ]]; then
 else
   # Full coverage output
   go tool cover -func=coverage.out
+fi
+
+if [[ "$OPEN_HTML" == true ]]; then
+  HTML_REPORT=coverage.html
+  go tool cover -html=coverage.out -o "$HTML_REPORT"
+
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$HTML_REPORT" >/dev/null 2>&1 || true
+  elif command -v open >/dev/null 2>&1; then
+    open "$HTML_REPORT" >/dev/null 2>&1 || true
+  elif command -v start >/dev/null 2>&1; then
+    start "$HTML_REPORT" >/dev/null 2>&1 || true
+  fi
+
+  echo "HTML report generated: $HTML_REPORT"
 fi

@@ -13,4 +13,4 @@ bin/
 .env*
 !.env.example
 
-coverage.out
+coverage.*
