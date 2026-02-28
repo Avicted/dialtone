@@ -178,4 +178,4 @@ On Linux, local client keys are stored under `~/.config/dialtone`. The keystore 
 
 
 ## License
-MIT
+GPLv3. See [LICENSE](LICENSE).
